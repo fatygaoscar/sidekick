@@ -82,3 +82,31 @@ web_dir = Path("web")
 if web_dir.exists():
     app.mount("/static", StaticFiles(directory=str(web_dir)), name="static")
 ```
+
+## GitHub CLI (gh)
+
+### Installation Without sudo
+When sudo requires a password prompt (not available in non-interactive shells), install gh to user's local bin:
+```bash
+mkdir -p ~/.local/bin
+curl -sL https://github.com/cli/cli/releases/download/v2.63.2/gh_2.63.2_linux_amd64.tar.gz | tar xz -C /tmp
+mv /tmp/gh_2.63.2_linux_amd64/bin/gh ~/.local/bin/
+```
+Ensure `~/.local/bin` is in your PATH.
+
+### Web-Based Authentication Requires Patience
+When running `gh auth login` with `--web` option:
+- The command prints a one-time code and URL
+- The user must go to the URL and enter the code
+- **The command must keep running** until the user completes the web flow
+- If the command exits (due to timeout, rate limiting, or error) before completion, the authentication will not be saved locally even if the user authorized it on GitHub's website
+
+**Problem**: Running `gh auth login --web` with a short timeout or in a context where it might exit early will cause authentication to fail silently. The user sees the code, goes to GitHub, authorizes, but the local CLI never receives confirmation because the process already terminated.
+
+**Solution**: Either:
+1. Run `gh auth login` in an interactive terminal where it can wait indefinitely
+2. Use token-based auth: `gh auth login --with-token < token.txt`
+3. Use SSH key auth if already configured: The user authenticated by selecting "SSH key" during `gh auth login` which uses existing `~/.ssh/id_ed25519`
+
+### Rate Limiting
+GitHub's device auth flow has rate limits. If you see `slow_down` errors, wait a few minutes before retrying.
