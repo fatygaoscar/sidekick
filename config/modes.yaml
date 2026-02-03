@@ -1,0 +1,38 @@
+# Mode definitions for Sidekick
+
+modes:
+  work:
+    name: Work
+    description: General work mode for capturing thoughts and notes
+    color: "#4CAF50"
+    submodes:
+      meeting:
+        name: Meeting
+        description: Meeting mode with key start/stop controls
+        color: "#2196F3"
+        features:
+          - key_start_stop
+          - important_markers
+          - auto_summarize
+      focus:
+        name: Focus
+        description: Deep focus mode with minimal interruptions
+        color: "#9C27B0"
+        features:
+          - important_markers
+
+  personal:
+    name: Personal
+    description: Personal notes and reminders
+    color: "#FF9800"
+    submodes: {}
+
+  brainstorm:
+    name: Brainstorm
+    description: Free-form idea capture mode
+    color: "#E91E63"
+    submodes: {}
+
+# Default mode on startup
+default_mode: work
+default_submode: null

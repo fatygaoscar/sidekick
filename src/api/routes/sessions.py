@@ -1,0 +1,331 @@
+"""Session and meeting REST endpoints."""
+
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+
+from src.sessions.manager import SessionManager
+from src.summarization.manager import SummarizationManager
+
+
+router = APIRouter()
+
+
+def get_session_manager(request: Request) -> SessionManager:
+    """Dependency to get session manager."""
+    return request.app.state.session_manager
+
+
+def get_summarization_manager(request: Request) -> SummarizationManager:
+    """Dependency to get summarization manager."""
+    return request.app.state.summarization_manager
+
+
+# Request/Response models
+class StartSessionRequest(BaseModel):
+    mode: str = "work"
+    submode: Optional[str] = None
+
+
+class StartMeetingRequest(BaseModel):
+    title: Optional[str] = None
+
+
+class UpdateMeetingRequest(BaseModel):
+    title: Optional[str] = None
+
+
+class MarkImportantRequest(BaseModel):
+    note: Optional[str] = None
+    duration_seconds: Optional[int] = None
+
+
+class SummarizeRequest(BaseModel):
+    prompt_type: str = "default"
+    custom_instructions: Optional[str] = None
+
+
+class SessionResponse(BaseModel):
+    id: str
+    mode: str
+    submode: Optional[str]
+    is_active: bool
+    started_at: str
+    ended_at: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+class MeetingResponse(BaseModel):
+    id: str
+    session_id: str
+    title: Optional[str]
+    is_active: bool
+    key_start: str
+    key_stop: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+class ImportantMarkerResponse(BaseModel):
+    id: str
+    session_id: str
+    meeting_id: Optional[str]
+    marked_at: str
+    duration_seconds: int
+    note: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+class SummaryResponse(BaseModel):
+    id: str
+    meeting_id: str
+    content: str
+    backend: str
+    model: str
+    created_at: str
+    prompt_tokens: Optional[int]
+    completion_tokens: Optional[int]
+
+    class Config:
+        from_attributes = True
+
+
+# Session endpoints
+@router.post("/sessions", response_model=SessionResponse)
+async def start_session(
+    request: StartSessionRequest,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """Start a new session."""
+    session = await session_manager.start_session(
+        mode=request.mode,
+        submode=request.submode,
+    )
+    return SessionResponse(
+        id=session.id,
+        mode=session.mode,
+        submode=session.submode,
+        is_active=session.is_active,
+        started_at=session.started_at.isoformat(),
+        ended_at=session.ended_at.isoformat() if session.ended_at else None,
+    )
+
+
+@router.get("/sessions/current", response_model=SessionResponse)
+async def get_current_session(
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """Get the current active session."""
+    session = session_manager.current_session
+    if not session:
+        raise HTTPException(status_code=404, detail="No active session")
+    return SessionResponse(
+        id=session.id,
+        mode=session.mode,
+        submode=session.submode,
+        is_active=session.is_active,
+        started_at=session.started_at.isoformat(),
+        ended_at=session.ended_at.isoformat() if session.ended_at else None,
+    )
+
+
+@router.delete("/sessions/current")
+async def end_current_session(
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """End the current session."""
+    session = await session_manager.end_session()
+    if not session:
+        raise HTTPException(status_code=404, detail="No active session")
+    return {"status": "ended", "session_id": session.id}
+
+
+# Meeting endpoints
+@router.post("/sessions/{session_id}/meetings", response_model=MeetingResponse)
+async def start_meeting(
+    session_id: str,
+    request: StartMeetingRequest,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """Start a new meeting (Key Start)."""
+    if not session_manager.current_session:
+        raise HTTPException(status_code=404, detail="No active session")
+    if session_manager.current_session.id != session_id:
+        raise HTTPException(status_code=400, detail="Session ID mismatch")
+
+    meeting = await session_manager.start_meeting(title=request.title)
+    if not meeting:
+        raise HTTPException(status_code=500, detail="Failed to start meeting")
+
+    return MeetingResponse(
+        id=meeting.id,
+        session_id=meeting.session_id,
+        title=meeting.title,
+        is_active=meeting.is_active,
+        key_start=meeting.key_start.isoformat(),
+        key_stop=meeting.key_stop.isoformat() if meeting.key_stop else None,
+    )
+
+
+@router.put("/sessions/{session_id}/meetings/{meeting_id}", response_model=MeetingResponse)
+async def end_or_update_meeting(
+    session_id: str,
+    meeting_id: str,
+    request: UpdateMeetingRequest = None,
+    action: str = "stop",
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """End a meeting (Key Stop) or update meeting details."""
+    if not session_manager.current_meeting:
+        raise HTTPException(status_code=404, detail="No active meeting")
+    if session_manager.current_meeting.id != meeting_id:
+        raise HTTPException(status_code=400, detail="Meeting ID mismatch")
+
+    if action == "stop":
+        meeting = await session_manager.end_meeting()
+    else:
+        # Just update title if provided
+        meeting = session_manager.current_meeting
+        # Note: would need to add title update to session manager
+
+    if not meeting:
+        raise HTTPException(status_code=500, detail="Failed to update meeting")
+
+    return MeetingResponse(
+        id=meeting.id,
+        session_id=meeting.session_id,
+        title=meeting.title,
+        is_active=meeting.is_active,
+        key_start=meeting.key_start.isoformat(),
+        key_stop=meeting.key_stop.isoformat() if meeting.key_stop else None,
+    )
+
+
+@router.get("/sessions/{session_id}/meetings/current", response_model=MeetingResponse)
+async def get_current_meeting(
+    session_id: str,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """Get the current active meeting."""
+    meeting = session_manager.current_meeting
+    if not meeting:
+        raise HTTPException(status_code=404, detail="No active meeting")
+    return MeetingResponse(
+        id=meeting.id,
+        session_id=meeting.session_id,
+        title=meeting.title,
+        is_active=meeting.is_active,
+        key_start=meeting.key_start.isoformat(),
+        key_stop=meeting.key_stop.isoformat() if meeting.key_stop else None,
+    )
+
+
+# Important marker endpoint
+@router.post("/sessions/{session_id}/important", response_model=ImportantMarkerResponse)
+async def mark_important(
+    session_id: str,
+    request: MarkImportantRequest,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """Mark the current moment as important."""
+    if not session_manager.current_session:
+        raise HTTPException(status_code=404, detail="No active session")
+    if session_manager.current_session.id != session_id:
+        raise HTTPException(status_code=400, detail="Session ID mismatch")
+
+    marker = await session_manager.mark_important(
+        note=request.note,
+        duration_seconds=request.duration_seconds,
+    )
+
+    return ImportantMarkerResponse(
+        id=marker.id,
+        session_id=marker.session_id,
+        meeting_id=marker.meeting_id,
+        marked_at=marker.marked_at.isoformat(),
+        duration_seconds=marker.duration_seconds,
+        note=marker.note,
+    )
+
+
+# Summarization endpoint
+@router.post("/meetings/{meeting_id}/summarize", response_model=SummaryResponse)
+async def summarize_meeting(
+    meeting_id: str,
+    request: SummarizeRequest,
+    session_manager: SessionManager = Depends(get_session_manager),
+    summarization_manager: SummarizationManager = Depends(get_summarization_manager),
+):
+    """Generate a summary for a meeting."""
+    result = await summarization_manager.summarize_meeting(
+        session_manager=session_manager,
+        meeting_id=meeting_id,
+        prompt_type=request.prompt_type,
+        custom_instructions=request.custom_instructions,
+    )
+
+    # Save summary to database
+    summary = await session_manager._repo.add_summary(
+        meeting_id=meeting_id,
+        content=result.content,
+        backend=result.backend,
+        model=result.model,
+        prompt_tokens=result.prompt_tokens,
+        completion_tokens=result.completion_tokens,
+    )
+
+    return SummaryResponse(
+        id=summary.id,
+        meeting_id=summary.meeting_id,
+        content=summary.content,
+        backend=summary.backend,
+        model=summary.model,
+        created_at=summary.created_at.isoformat(),
+        prompt_tokens=summary.prompt_tokens,
+        completion_tokens=summary.completion_tokens,
+    )
+
+
+@router.get("/meetings/{meeting_id}/transcript")
+async def get_meeting_transcript(
+    meeting_id: str,
+    include_important: bool = True,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """Get the transcript for a meeting."""
+    transcript = await session_manager.get_meeting_transcript(
+        meeting_id=meeting_id,
+        include_important_tags=include_important,
+    )
+    return {"meeting_id": meeting_id, "transcript": transcript}
+
+
+@router.get("/meetings/{meeting_id}/summaries")
+async def get_meeting_summaries(
+    meeting_id: str,
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """Get all summaries for a meeting."""
+    summaries = await session_manager._repo.get_summaries(meeting_id)
+    return {
+        "meeting_id": meeting_id,
+        "summaries": [
+            SummaryResponse(
+                id=s.id,
+                meeting_id=s.meeting_id,
+                content=s.content,
+                backend=s.backend,
+                model=s.model,
+                created_at=s.created_at.isoformat(),
+                prompt_tokens=s.prompt_tokens,
+                completion_tokens=s.completion_tokens,
+            )
+            for s in summaries
+        ],
+    }

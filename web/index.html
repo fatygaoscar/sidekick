@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sidekick - Audio Transcription Assistant</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <h1 class="logo">Sidekick</h1>
+                <div class="mode-selector">
+                    <select id="mode-select">
+                        <option value="work">Work</option>
+                        <option value="personal">Personal</option>
+                        <option value="brainstorm">Brainstorm</option>
+                    </select>
+                    <select id="submode-select" class="hidden">
+                        <option value="">No submode</option>
+                    </select>
+                </div>
+            </div>
+            <div class="header-right">
+                <span id="connection-status" class="status-indicator disconnected">Disconnected</span>
+                <button id="settings-btn" class="icon-btn" title="Settings">⚙️</button>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Left Panel - Controls -->
+            <aside class="control-panel">
+                <div class="recording-section">
+                    <div class="recording-status" id="recording-status">
+                        <span class="status-dot"></span>
+                        <span class="status-text">Not Recording</span>
+                    </div>
+                    <div class="elapsed-time" id="elapsed-time">00:00:00</div>
+                </div>
+
+                <div class="session-controls">
+                    <button id="session-btn" class="btn btn-primary btn-large">
+                        Start Session
+                    </button>
+                </div>
+
+                <div class="meeting-controls" id="meeting-controls">
+                    <h3>Meeting Controls</h3>
+                    <div class="meeting-status" id="meeting-status">
+                        <span class="meeting-indicator"></span>
+                        <span>No active meeting</span>
+                    </div>
+                    <div class="meeting-buttons">
+                        <button id="key-start-btn" class="btn btn-success">
+                            Key Start
+                        </button>
+                        <button id="key-stop-btn" class="btn btn-danger" disabled>
+                            Key Stop
+                        </button>
+                    </div>
+                    <button id="important-btn" class="btn btn-warning btn-large" disabled>
+                        ⭐ Mark Important
+                    </button>
+                </div>
+
+                <div class="audio-visualizer">
+                    <h3>Audio Level</h3>
+                    <canvas id="audio-canvas" width="200" height="60"></canvas>
+                </div>
+            </aside>
+
+            <!-- Main Panel - Transcript -->
+            <main class="transcript-panel">
+                <div class="transcript-header">
+                    <h2>Live Transcript</h2>
+                    <div class="transcript-actions">
+                        <button id="clear-btn" class="btn btn-small">Clear</button>
+                        <button id="export-btn" class="btn btn-small">Export</button>
+                    </div>
+                </div>
+                <div class="transcript-content" id="transcript-content">
+                    <p class="placeholder">Start a session to begin transcription...</p>
+                </div>
+            </main>
+        </div>
+
+        <!-- Bottom Bar -->
+        <footer class="bottom-bar">
+            <div class="summary-section">
+                <button id="summarize-btn" class="btn btn-primary" disabled>
+                    Generate Summary
+                </button>
+                <select id="summary-type">
+                    <option value="default">Full Summary</option>
+                    <option value="quick">Quick Summary</option>
+                    <option value="action_items">Action Items</option>
+                    <option value="decisions">Decisions Only</option>
+                </select>
+            </div>
+            <div class="status-bar">
+                <span id="segment-count">0 segments</span>
+                <span id="backend-info">Local Whisper</span>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Summary Modal -->
+    <div id="summary-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Meeting Summary</h2>
+                <button class="modal-close" id="close-summary">&times;</button>
+            </div>
+            <div class="modal-body" id="summary-content">
+                <!-- Summary will be inserted here -->
+            </div>
+            <div class="modal-footer">
+                <button id="copy-summary" class="btn">Copy to Clipboard</button>
+                <button id="download-summary" class="btn btn-primary">Download</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/audio.js"></script>
+    <script src="/static/js/websocket.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
