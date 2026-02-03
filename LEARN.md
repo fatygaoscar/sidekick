@@ -2,6 +2,16 @@
 
 This file documents corrections and lessons learned during development that should be referenced in future projects.
 
+## Workflow
+
+### Explain Before Executing
+Always explain what you're about to do before running commands, especially for:
+- Git operations (commits, pushes, merges)
+- System modifications
+- Multi-step processes
+
+This helps the user understand and approve the action before it happens.
+
 ## Python Environment
 
 ### Use `python3` instead of `python`
