@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import traceback
 from typing import Any
 
 import numpy as np
@@ -33,6 +34,8 @@ class AudioWebSocketHandler:
         self._settings = get_settings()
         self._event_bus = get_event_bus()
 
+        print(f"[WebSocket] Initializing handler, sample_rate={self._settings.audio_sample_rate}")
+
         # Audio processing components
         self._vad = VoiceActivityDetector(
             sample_rate=self._settings.audio_sample_rate,
@@ -42,6 +45,7 @@ class AudioWebSocketHandler:
 
         self._is_running = False
         self._process_task: asyncio.Task | None = None
+        print("[WebSocket] Handler initialized successfully")
 
     async def handle(self) -> None:
         """Main handler for WebSocket connection."""
@@ -240,19 +244,28 @@ class AudioWebSocketHandler:
         """Send JSON data to client."""
         try:
             await self._websocket.send_text(json.dumps(data))
-        except Exception:
-            pass  # Client may have disconnected
+        except Exception as e:
+            print(f"[WebSocket] Send error: {e}")
 
 
 @router.websocket("/ws/audio")
 async def audio_websocket(websocket: WebSocket):
     """WebSocket endpoint for audio streaming."""
-    session_manager = websocket.app.state.session_manager
-    transcription_manager = websocket.app.state.transcription_manager
+    try:
+        session_manager = websocket.app.state.session_manager
+        transcription_manager = websocket.app.state.transcription_manager
 
-    handler = AudioWebSocketHandler(
-        websocket=websocket,
-        session_manager=session_manager,
-        transcription_manager=transcription_manager,
-    )
-    await handler.handle()
+        handler = AudioWebSocketHandler(
+            websocket=websocket,
+            session_manager=session_manager,
+            transcription_manager=transcription_manager,
+        )
+        await handler.handle()
+    except Exception as e:
+        print(f"[WebSocket] Error in endpoint: {e}")
+        traceback.print_exc()
+        # Try to close the websocket gracefully if possible
+        try:
+            await websocket.close(code=1011, reason=str(e)[:123])
+        except Exception:
+            pass

@@ -30,31 +30,49 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan manager."""
     settings = get_settings()
 
+    print("[Startup] Initializing Sidekick...")
+
     # Ensure data directory exists
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)
 
     # Initialize database
+    print("[Startup] Initializing database...")
     await init_db(settings.database_url)
 
     # Initialize repository
     app.state.repository = Repository(settings.database_url)
     await app.state.repository.init_db()
+    print("[Startup] Database initialized")
 
     # Initialize managers
     app.state.session_manager = SessionManager(app.state.repository)
     app.state.transcription_manager = TranscriptionManager(settings)
     app.state.summarization_manager = SummarizationManager(settings)
 
+    # Pre-initialize transcription manager to load model at startup
+    print(f"[Startup] Initializing transcription manager (backend={settings.transcription_backend.value})...")
+    try:
+        await app.state.transcription_manager.initialize()
+        print("[Startup] Transcription manager initialized successfully")
+    except Exception as e:
+        print(f"[Startup] WARNING: Failed to initialize transcription manager: {e}")
+        import traceback
+        traceback.print_exc()
+
     # Try to restore last session
     await app.state.session_manager.restore_session()
+
+    print("[Startup] Sidekick ready!")
 
     yield
 
     # Cleanup
+    print("[Shutdown] Shutting down...")
     await app.state.transcription_manager.shutdown()
     await app.state.summarization_manager.shutdown()
     await app.state.repository.close()
+    print("[Shutdown] Complete")
 
 
 def create_app() -> FastAPI:
