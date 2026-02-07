@@ -70,6 +70,35 @@ class Repository:
             await db.commit()
             return await self.get_session(session_id)
 
+    async def delete_session(self, session_id: str) -> None:
+        """Delete a session and all associated data."""
+        from sqlalchemy import delete
+
+        async with self._session_factory() as db:
+            # Delete summaries for meetings in this session
+            meetings = await db.execute(
+                select(Meeting).where(Meeting.session_id == session_id)
+            )
+            for meeting in meetings.scalars().all():
+                await db.execute(
+                    delete(Summary).where(Summary.meeting_id == meeting.id)
+                )
+
+            # Delete related data
+            await db.execute(
+                delete(ImportantMarker).where(ImportantMarker.session_id == session_id)
+            )
+            await db.execute(
+                delete(TranscriptSegment).where(TranscriptSegment.session_id == session_id)
+            )
+            await db.execute(
+                delete(Meeting).where(Meeting.session_id == session_id)
+            )
+            await db.execute(
+                delete(Session).where(Session.id == session_id)
+            )
+            await db.commit()
+
     async def update_session_mode(
         self, session_id: str, mode: str, submode: str | None = None
     ) -> Session | None:
@@ -269,3 +298,58 @@ class Repository:
                 .order_by(Summary.created_at.desc())
             )
             return list(result.scalars().all())
+
+    async def get_sessions_list(
+        self, limit: int = 50, offset: int = 0
+    ) -> list[dict]:
+        """Get list of sessions with summary info for recordings page."""
+        async with self._session_factory() as db:
+            # Get sessions ordered by start time (newest first)
+            result = await db.execute(
+                select(Session)
+                .options(selectinload(Session.meetings))
+                .where(Session.is_active == False)  # Only completed sessions
+                .order_by(Session.started_at.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            sessions = list(result.scalars().all())
+
+            recordings = []
+            for session in sessions:
+                # Get segment count and duration
+                seg_result = await db.execute(
+                    select(TranscriptSegment)
+                    .where(TranscriptSegment.session_id == session.id)
+                    .order_by(TranscriptSegment.end_time.desc())
+                )
+                segments = list(seg_result.scalars().all())
+
+                duration_seconds = 0
+                if segments:
+                    duration_seconds = int(max(s.end_time for s in segments))
+
+                # Check if any meeting has summaries
+                has_summary = False
+                title = None
+                for meeting in session.meetings:
+                    if meeting.title:
+                        title = meeting.title
+                    sum_result = await db.execute(
+                        select(Summary).where(Summary.meeting_id == meeting.id).limit(1)
+                    )
+                    if sum_result.scalar_one_or_none():
+                        has_summary = True
+                        break
+
+                recordings.append({
+                    "id": session.id,
+                    "title": title,
+                    "started_at": session.started_at.isoformat(),
+                    "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+                    "duration_seconds": duration_seconds,
+                    "segment_count": len(segments),
+                    "has_summary": has_summary,
+                })
+
+            return recordings

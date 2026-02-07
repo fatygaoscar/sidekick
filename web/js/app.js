@@ -1,93 +1,70 @@
 /**
- * Main application logic for Sidekick
+ * Sidekick - Simplified Recording App
  */
 
 class SidekickApp {
     constructor() {
-        // State
-        this.session = null;
-        this.meeting = null;
-        this.segments = [];
-        this.elapsedSeconds = 0;
-        this.timerInterval = null;
+        this.state = {
+            isRecording: false,
+            sessionId: null,
+            elapsedSeconds: 0,
+            selectedTemplate: 'meeting',
+        };
 
-        // Components
+        this.timerInterval = null;
         this.audioCapture = null;
         this.visualizer = null;
         this.ws = null;
+        this.obsidianUri = null;
 
-        // DOM Elements
         this.elements = {
-            // Connection
-            connectionStatus: document.getElementById('connection-status'),
-
-            // Mode
-            modeSelect: document.getElementById('mode-select'),
-            submodeSelect: document.getElementById('submode-select'),
-
-            // Recording
-            recordingStatus: document.getElementById('recording-status'),
-            elapsedTime: document.getElementById('elapsed-time'),
-            sessionBtn: document.getElementById('session-btn'),
-
-            // Meeting
-            meetingControls: document.getElementById('meeting-controls'),
-            meetingStatus: document.getElementById('meeting-status'),
-            keyStartBtn: document.getElementById('key-start-btn'),
-            keyStopBtn: document.getElementById('key-stop-btn'),
-            importantBtn: document.getElementById('important-btn'),
-
-            // Audio
+            recordBtn: document.getElementById('record-btn'),
+            timer: document.getElementById('timer'),
             audioCanvas: document.getElementById('audio-canvas'),
+            statusText: document.getElementById('status-text'),
+            connectionDot: document.getElementById('connection-dot'),
+            connectionText: document.getElementById('connection-text'),
 
-            // Transcript
-            transcriptContent: document.getElementById('transcript-content'),
-            clearBtn: document.getElementById('clear-btn'),
-            exportBtn: document.getElementById('export-btn'),
-            segmentCount: document.getElementById('segment-count'),
+            // Naming modal
+            namingModal: document.getElementById('naming-modal'),
+            namingClose: document.getElementById('naming-close'),
+            namingCancel: document.getElementById('naming-cancel'),
+            namingSubmit: document.getElementById('naming-submit'),
+            recordingTitle: document.getElementById('recording-title'),
+            templateBtns: document.querySelectorAll('.template-btn'),
+            customPromptGroup: document.getElementById('custom-prompt-group'),
+            customPrompt: document.getElementById('custom-prompt'),
 
-            // Summary
-            summarizeBtn: document.getElementById('summarize-btn'),
-            summaryType: document.getElementById('summary-type'),
-            summaryModal: document.getElementById('summary-modal'),
-            summaryContent: document.getElementById('summary-content'),
-            closeSummary: document.getElementById('close-summary'),
-            copySummary: document.getElementById('copy-summary'),
-            downloadSummary: document.getElementById('download-summary'),
+            // Confirmation modal
+            confirmationModal: document.getElementById('confirmation-modal'),
+            confirmationClose: document.getElementById('confirmation-close'),
+            confirmationFilename: document.getElementById('confirmation-filename'),
+            confirmationPreview: document.getElementById('confirmation-preview'),
+            newRecordingBtn: document.getElementById('new-recording-btn'),
+            openObsidianBtn: document.getElementById('open-obsidian-btn'),
+
+            // Processing overlay
+            processingOverlay: document.getElementById('processing-overlay'),
         };
 
         this._init();
     }
 
     _init() {
-        // Initialize visualizer
         this.visualizer = new AudioVisualizer(this.elements.audioCanvas);
         this.visualizer.clear();
 
-        // Initialize WebSocket
         this._initWebSocket();
-
-        // Initialize audio capture
         this._initAudioCapture();
-
-        // Bind event handlers
         this._bindEvents();
-
-        // Load modes
-        this._loadModes();
     }
 
     _initWebSocket() {
         this.ws = new SidekickWebSocket({
             onOpen: () => this._onConnected(),
             onClose: () => this._onDisconnected(),
-            onError: (err) => this._onError(err),
             onState: (state) => this._onState(state),
-            onTranscription: (data) => this._onTranscription(data),
-            onImportantMarked: (data) => this._onImportantMarked(data),
-            onErrorMessage: (data) => this._onErrorMessage(data),
         });
-
         this.ws.connect();
     }
 
@@ -95,7 +72,7 @@ class SidekickApp {
         this.audioCapture = new AudioCapture({
             sampleRate: 16000,
             onAudioData: (buffer) => {
-                if (this.session) {
+                if (this.state.isRecording) {
                     this.ws.sendAudio(buffer);
                 }
             },
@@ -106,171 +83,102 @@ class SidekickApp {
     }
 
     _bindEvents() {
-        // Session control
-        this.elements.sessionBtn.addEventListener('click', () => this._toggleSession());
+        // Record button
+        this.elements.recordBtn.addEventListener('click', () => this._toggleRecording());
 
-        // Meeting controls
-        this.elements.keyStartBtn.addEventListener('click', () => this._startMeeting());
-        this.elements.keyStopBtn.addEventListener('click', () => this._endMeeting());
-        this.elements.importantBtn.addEventListener('click', () => this._markImportant());
-
-        // Mode selection
-        this.elements.modeSelect.addEventListener('change', (e) => {
-            this._changeMode(e.target.value);
+        // Naming modal
+        this.elements.namingClose.addEventListener('click', () => this._closeNamingModal());
+        this.elements.namingCancel.addEventListener('click', () => this._closeNamingModal());
+        this.elements.namingSubmit.addEventListener('click', () => this._processRecording());
+        this.elements.namingModal.addEventListener('click', (e) => {
+            if (e.target === this.elements.namingModal) this._closeNamingModal();
         });
 
-        // Transcript controls
-        this.elements.clearBtn.addEventListener('click', () => this._clearTranscript());
-        this.elements.exportBtn.addEventListener('click', () => this._exportTranscript());
-
-        // Summary
-        this.elements.summarizeBtn.addEventListener('click', () => this._generateSummary());
-        this.elements.closeSummary.addEventListener('click', () => this._closeSummaryModal());
-        this.elements.copySummary.addEventListener('click', () => this._copySummary());
-        this.elements.downloadSummary.addEventListener('click', () => this._downloadSummary());
-
-        // Close modal on outside click
-        this.elements.summaryModal.addEventListener('click', (e) => {
-            if (e.target === this.elements.summaryModal) {
-                this._closeSummaryModal();
-            }
+        // Template buttons
+        this.elements.templateBtns.forEach(btn => {
+            btn.addEventListener('click', () => this._selectTemplate(btn.dataset.template));
         });
-    }
 
-    async _loadModes() {
-        try {
-            const response = await fetch('/api/modes');
-            const data = await response.json();
+        // Confirmation modal
+        this.elements.confirmationClose.addEventListener('click', () => this._closeConfirmationModal());
+        this.elements.newRecordingBtn.addEventListener('click', () => this._closeConfirmationModal());
+        this.elements.openObsidianBtn.addEventListener('click', () => this._openObsidian());
+        this.elements.confirmationModal.addEventListener('click', (e) => {
+            if (e.target === this.elements.confirmationModal) this._closeConfirmationModal();
+        });
 
-            // Populate mode select
-            this.elements.modeSelect.innerHTML = '';
-            for (const [key, mode] of Object.entries(data.modes)) {
-                const option = document.createElement('option');
-                option.value = key;
-                option.textContent = mode.name;
-                this.elements.modeSelect.appendChild(option);
-            }
-
-            // Set default
-            this.elements.modeSelect.value = data.default_mode;
-        } catch (error) {
-            console.error('Failed to load modes:', error);
-        }
+        // Enter key in title input
+        this.elements.recordingTitle.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') this._processRecording();
+        });
     }
 
     // Connection handlers
     _onConnected() {
-        this.elements.connectionStatus.textContent = 'Connected';
-        this.elements.connectionStatus.classList.remove('disconnected');
-        this.elements.connectionStatus.classList.add('connected');
+        this.elements.connectionDot.classList.add('connected');
+        this.elements.connectionText.textContent = 'Connected';
     }
 
     _onDisconnected() {
-        this.elements.connectionStatus.textContent = 'Disconnected';
-        this.elements.connectionStatus.classList.remove('connected');
-        this.elements.connectionStatus.classList.add('disconnected');
-    }
-
-    _onError(error) {
-        console.error('WebSocket error:', error);
+        this.elements.connectionDot.classList.remove('connected');
+        this.elements.connectionText.textContent = 'Disconnected';
     }
 
     _onState(state) {
-        // Update session state
-        this.session = state.session;
-        this.meeting = state.meeting;
-
-        // Update UI
-        this._updateUI();
+        if (state.session) {
+            this.state.sessionId = state.session.id;
+        }
     }
 
-    _onTranscription(data) {
-        this._addSegment({
-            text: data.text,
-            startTime: data.start_time,
-            endTime: data.end_time,
-            isImportant: data.is_important,
-        });
-    }
-
-    _onImportantMarked(data) {
-        // Flash the important button
-        this.elements.importantBtn.classList.add('flash');
-        setTimeout(() => {
-            this.elements.importantBtn.classList.remove('flash');
-        }, 500);
-    }
-
-    _onErrorMessage(data) {
-        console.error('Server error:', data.message);
-        // Could show a toast notification here
-    }
-
-    // Session management
-    async _toggleSession() {
-        if (this.session) {
-            await this._endSession();
+    // Recording flow
+    async _toggleRecording() {
+        if (this.state.isRecording) {
+            await this._stopRecording();
         } else {
-            await this._startSession();
+            await this._startRecording();
         }
     }
 
-    async _startSession() {
+    async _startRecording() {
         try {
-            // Start audio capture
+            this.elements.statusText.textContent = 'Starting...';
+
             await this.audioCapture.start();
+            this.ws.startSession();
 
-            // Start session via WebSocket
-            const mode = this.elements.modeSelect.value;
-            this.ws.startSession(mode);
+            this.state.isRecording = true;
+            this.elements.recordBtn.classList.add('recording');
+            this.elements.recordBtn.textContent = 'Stop';
+            this.elements.statusText.textContent = 'Recording';
 
-            // Start timer
             this._startTimer();
-
         } catch (error) {
-            console.error('Failed to start session:', error);
-            alert('Failed to access microphone. Please grant permission and try again.');
+            console.error('Failed to start recording:', error);
+            this.elements.statusText.textContent = 'Microphone access denied';
         }
     }
 
-    async _endSession() {
-        // Stop audio capture
+    async _stopRecording() {
         this.audioCapture.stop();
         this.visualizer.clear();
-
-        // End session via WebSocket
         this.ws.endSession();
 
-        // Stop timer
+        this.state.isRecording = false;
+        this.elements.recordBtn.classList.remove('recording');
+        this.elements.recordBtn.textContent = 'Record';
+        this.elements.statusText.textContent = 'Ready';
+
         this._stopTimer();
-    }
-
-    // Meeting management
-    _startMeeting() {
-        this.ws.startMeeting();
-    }
-
-    _endMeeting() {
-        this.ws.endMeeting();
-    }
-
-    _markImportant() {
-        this.ws.markImportant();
-    }
-
-    _changeMode(mode) {
-        if (this.session) {
-            this.ws.changeMode(mode);
-        }
+        this._showNamingModal();
     }
 
     // Timer
     _startTimer() {
-        this.elapsedSeconds = 0;
+        this.state.elapsedSeconds = 0;
         this._updateTimerDisplay();
 
         this.timerInterval = setInterval(() => {
-            this.elapsedSeconds++;
+            this.state.elapsedSeconds++;
             this._updateTimerDisplay();
         }, 1000);
     }
@@ -283,197 +191,117 @@ class SidekickApp {
     }
 
     _updateTimerDisplay() {
-        const hours = Math.floor(this.elapsedSeconds / 3600);
-        const minutes = Math.floor((this.elapsedSeconds % 3600) / 60);
-        const seconds = this.elapsedSeconds % 60;
-
-        this.elements.elapsedTime.textContent =
-            `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        const h = Math.floor(this.state.elapsedSeconds / 3600);
+        const m = Math.floor((this.state.elapsedSeconds % 3600) / 60);
+        const s = this.state.elapsedSeconds % 60;
+        this.elements.timer.textContent =
+            `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
     }
 
-    // Transcript management
-    _addSegment(segment) {
-        this.segments.push(segment);
-        this._renderSegment(segment);
-        this._updateSegmentCount();
-        this._scrollToBottom();
+    // Naming modal
+    _showNamingModal() {
+        this.elements.recordingTitle.value = '';
+        this.elements.customPrompt.value = '';
+        this._selectTemplate('meeting');
+        this.elements.namingModal.classList.remove('hidden');
+        this.elements.recordingTitle.focus();
     }
 
-    _renderSegment(segment) {
-        // Remove placeholder if present
-        const placeholder = this.elements.transcriptContent.querySelector('.placeholder');
-        if (placeholder) {
-            placeholder.remove();
+    _closeNamingModal() {
+        this.elements.namingModal.classList.add('hidden');
+        this._resetTimer();
+    }
+
+    _selectTemplate(template) {
+        this.state.selectedTemplate = template;
+
+        this.elements.templateBtns.forEach(btn => {
+            btn.classList.toggle('selected', btn.dataset.template === template);
+        });
+
+        if (template === 'custom') {
+            this.elements.customPromptGroup.classList.remove('hidden');
+            this.elements.customPrompt.focus();
+        } else {
+            this.elements.customPromptGroup.classList.add('hidden');
         }
-
-        const div = document.createElement('div');
-        div.className = 'transcript-segment' + (segment.isImportant ? ' important' : '');
-
-        const timestamp = document.createElement('div');
-        timestamp.className = 'timestamp';
-        timestamp.textContent = this._formatTime(segment.startTime);
-
-        const text = document.createElement('div');
-        text.className = 'text';
-        text.textContent = segment.text;
-
-        div.appendChild(timestamp);
-        div.appendChild(text);
-        this.elements.transcriptContent.appendChild(div);
     }
 
-    _formatTime(seconds) {
-        const mins = Math.floor(seconds / 60);
-        const secs = Math.floor(seconds % 60);
-        return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }
-
-    _scrollToBottom() {
-        this.elements.transcriptContent.scrollTop = this.elements.transcriptContent.scrollHeight;
-    }
-
-    _updateSegmentCount() {
-        this.elements.segmentCount.textContent = `${this.segments.length} segments`;
-    }
-
-    _clearTranscript() {
-        this.segments = [];
-        this.elements.transcriptContent.innerHTML = '<p class="placeholder">Start a session to begin transcription...</p>';
-        this._updateSegmentCount();
-    }
-
-    _exportTranscript() {
-        const text = this.segments.map(s => {
-            const time = this._formatTime(s.startTime);
-            const marker = s.isImportant ? ' [IMPORTANT]' : '';
-            return `[${time}]${marker} ${s.text}`;
-        }).join('\n\n');
-
-        const blob = new Blob([text], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `transcript_${new Date().toISOString().slice(0, 10)}.txt`;
-        a.click();
-        URL.revokeObjectURL(url);
-    }
-
-    // Summary
-    async _generateSummary() {
-        if (!this.meeting) {
-            alert('Please start a meeting first to generate a summary.');
+    async _processRecording() {
+        const title = this.elements.recordingTitle.value.trim();
+        if (!title) {
+            this.elements.recordingTitle.focus();
             return;
         }
 
-        const summaryType = this.elements.summaryType.value;
+        if (!this.state.sessionId) {
+            alert('No recording session found');
+            return;
+        }
+
+        const template = this.state.selectedTemplate;
+        const customPrompt = template === 'custom' ? this.elements.customPrompt.value.trim() : null;
+
+        this.elements.namingModal.classList.add('hidden');
+        this.elements.processingOverlay.classList.remove('hidden');
 
         try {
-            this.elements.summarizeBtn.disabled = true;
-            this.elements.summarizeBtn.textContent = 'Generating...';
-
-            const response = await fetch(`/api/meetings/${this.meeting.id}/summarize`, {
+            const response = await fetch(`/api/recordings/${this.state.sessionId}/export-obsidian`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt_type: summaryType }),
+                body: JSON.stringify({
+                    title,
+                    template,
+                    custom_prompt: customPrompt,
+                }),
             });
 
             if (!response.ok) {
-                throw new Error('Failed to generate summary');
+                const error = await response.json();
+                throw new Error(error.detail || 'Export failed');
             }
 
-            const data = await response.json();
-            this._showSummary(data.content);
+            const result = await response.json();
+            this._showConfirmation(result);
 
         } catch (error) {
-            console.error('Failed to generate summary:', error);
-            alert('Failed to generate summary. Please try again.');
-        } finally {
-            this.elements.summarizeBtn.disabled = false;
-            this.elements.summarizeBtn.textContent = 'Generate Summary';
+            console.error('Export failed:', error);
+            this.elements.processingOverlay.classList.add('hidden');
+            alert(`Export failed: ${error.message}`);
+            this._resetTimer();
         }
     }
 
-    _showSummary(content) {
-        this.elements.summaryContent.innerHTML = `<pre>${content}</pre>`;
-        this.elements.summaryModal.classList.remove('hidden');
+    // Confirmation modal
+    _showConfirmation(result) {
+        this.elements.processingOverlay.classList.add('hidden');
+        this.obsidianUri = result.obsidian_uri;
+
+        this.elements.confirmationFilename.textContent = result.filename;
+        this.elements.confirmationPreview.textContent = result.summary_preview;
+        this.elements.confirmationModal.classList.remove('hidden');
     }
 
-    _closeSummaryModal() {
-        this.elements.summaryModal.classList.add('hidden');
+    _closeConfirmationModal() {
+        this.elements.confirmationModal.classList.add('hidden');
+        this._resetTimer();
     }
 
-    _copySummary() {
-        const content = this.elements.summaryContent.textContent;
-        navigator.clipboard.writeText(content).then(() => {
-            this.elements.copySummary.textContent = 'Copied!';
-            setTimeout(() => {
-                this.elements.copySummary.textContent = 'Copy to Clipboard';
-            }, 2000);
-        });
-    }
-
-    _downloadSummary() {
-        const content = this.elements.summaryContent.textContent;
-        const blob = new Blob([content], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `summary_${new Date().toISOString().slice(0, 10)}.txt`;
-        a.click();
-        URL.revokeObjectURL(url);
-    }
-
-    // UI updates
-    _updateUI() {
-        // Session state
-        if (this.session) {
-            this.elements.recordingStatus.classList.add('active');
-            this.elements.recordingStatus.querySelector('.status-text').textContent = 'Recording';
-            this.elements.sessionBtn.textContent = 'End Session';
-            this.elements.sessionBtn.classList.remove('btn-primary');
-            this.elements.sessionBtn.classList.add('btn-danger');
-
-            // Enable meeting controls
-            this.elements.keyStartBtn.disabled = false;
-            this.elements.importantBtn.disabled = !this.meeting;
-            this.elements.summarizeBtn.disabled = !this.meeting;
-        } else {
-            this.elements.recordingStatus.classList.remove('active');
-            this.elements.recordingStatus.querySelector('.status-text').textContent = 'Not Recording';
-            this.elements.sessionBtn.textContent = 'Start Session';
-            this.elements.sessionBtn.classList.add('btn-primary');
-            this.elements.sessionBtn.classList.remove('btn-danger');
-
-            // Disable meeting controls
-            this.elements.keyStartBtn.disabled = true;
-            this.elements.keyStopBtn.disabled = true;
-            this.elements.importantBtn.disabled = true;
-            this.elements.summarizeBtn.disabled = true;
+    _openObsidian() {
+        if (this.obsidianUri) {
+            window.open(this.obsidianUri, '_blank');
         }
+        this._closeConfirmationModal();
+    }
 
-        // Meeting state
-        if (this.meeting) {
-            this.elements.meetingStatus.classList.add('active');
-            this.elements.meetingStatus.querySelector('span:last-child').textContent =
-                this.meeting.title || 'Meeting in progress';
-            this.elements.keyStartBtn.disabled = true;
-            this.elements.keyStopBtn.disabled = false;
-            this.elements.importantBtn.disabled = false;
-        } else if (this.session) {
-            this.elements.meetingStatus.classList.remove('active');
-            this.elements.meetingStatus.querySelector('span:last-child').textContent = 'No active meeting';
-            this.elements.keyStartBtn.disabled = false;
-            this.elements.keyStopBtn.disabled = true;
-        }
-
-        // Mode
-        if (this.session) {
-            this.elements.modeSelect.value = this.session.mode;
-        }
+    _resetTimer() {
+        this.state.elapsedSeconds = 0;
+        this._updateTimerDisplay();
+        this.state.sessionId = null;
     }
 }
 
-// Initialize app when DOM is ready
+// Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     window.app = new SidekickApp();
 });

@@ -182,7 +182,7 @@ class AudioCapture {
     }
 }
 
-// Audio visualizer
+// Audio visualizer - Berkeley Mono aesthetic
 class AudioVisualizer {
     constructor(canvas) {
         this.canvas = canvas;
@@ -196,46 +196,49 @@ class AudioVisualizer {
         const width = this.width;
         const height = this.height;
 
-        // Clear
-        ctx.fillStyle = '#1a1a2e';
+        // Clear with dark background
+        ctx.fillStyle = '#0a0a0a';
         ctx.fillRect(0, 0, width, height);
 
         if (!frequencyData) {
-            // Draw idle state
-            ctx.fillStyle = '#334155';
-            ctx.fillRect(0, height / 2 - 2, width, 4);
+            this._drawIdle();
             return;
         }
 
-        // Draw frequency bars
-        const barCount = Math.min(frequencyData.length, 32);
-        const barWidth = width / barCount - 2;
-        const barSpacing = 2;
+        // Draw frequency bars - minimal aesthetic
+        const barCount = 40;
+        const barWidth = 4;
+        const gap = (width - (barCount * barWidth)) / (barCount - 1);
 
         for (let i = 0; i < barCount; i++) {
-            const value = frequencyData[i] / 255;
-            const barHeight = value * height * 0.9;
+            const dataIndex = Math.floor(i * frequencyData.length / barCount);
+            const value = frequencyData[dataIndex] / 255;
+            const barHeight = Math.max(2, value * height * 0.85);
 
-            const x = i * (barWidth + barSpacing);
-            const y = height - barHeight;
+            const x = i * (barWidth + gap);
+            const y = (height - barHeight) / 2;
 
-            // Gradient color based on level
-            const hue = 200 + (value * 60); // Blue to cyan
-            ctx.fillStyle = `hsl(${hue}, 70%, 50%)`;
+            // White bars with opacity based on level
+            const opacity = 0.3 + (value * 0.7);
+            ctx.fillStyle = `rgba(224, 224, 224, ${opacity})`;
             ctx.fillRect(x, y, barWidth, barHeight);
         }
+    }
 
-        // Draw peak indicator
-        const peakWidth = width * level;
-        ctx.fillStyle = 'rgba(33, 150, 243, 0.3)';
-        ctx.fillRect(0, 0, peakWidth, 4);
+    _drawIdle() {
+        const ctx = this.ctx;
+        const width = this.width;
+        const height = this.height;
+
+        // Draw subtle center line
+        ctx.fillStyle = '#2a2a2a';
+        ctx.fillRect(0, height / 2 - 1, width, 2);
     }
 
     clear() {
-        this.ctx.fillStyle = '#1a1a2e';
+        this.ctx.fillStyle = '#0a0a0a';
         this.ctx.fillRect(0, 0, this.width, this.height);
-        this.ctx.fillStyle = '#334155';
-        this.ctx.fillRect(0, this.height / 2 - 2, this.width, 4);
+        this._drawIdle();
     }
 }
 

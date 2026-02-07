@@ -70,6 +70,9 @@ class Settings(BaseSettings):
     # Important marker duration (seconds)
     important_marker_duration: int = 60
 
+    # Obsidian integration
+    obsidian_vault_path: str = "/mnt/c/Users/ozzfa/Documents/Obsidian Vault"
+
     @field_validator("vad_aggressiveness")
     @classmethod
     def validate_vad_aggressiveness(cls, v: int) -> int:

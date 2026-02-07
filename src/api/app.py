@@ -96,10 +96,11 @@ def create_app() -> FastAPI:
     )
 
     # Include routers
-    from src.api.routes import sessions, modes, websocket
+    from src.api.routes import sessions, modes, websocket, export
 
     app.include_router(sessions.router, prefix="/api", tags=["sessions"])
     app.include_router(modes.router, prefix="/api", tags=["modes"])
+    app.include_router(export.router, prefix="/api", tags=["export"])
     app.include_router(websocket.router, tags=["websocket"])
 
     # Mount static files for web UI
@@ -124,5 +125,15 @@ def create_app() -> FastAPI:
         if index_path.exists():
             return FileResponse(str(index_path))
         return {"message": "Sidekick API", "docs": "/docs"}
+
+    # Recordings page
+    @app.get("/recordings")
+    async def recordings_page() -> dict:
+        from fastapi.responses import FileResponse
+
+        recordings_path = web_dir / "recordings.html"
+        if recordings_path.exists():
+            return FileResponse(str(recordings_path))
+        return {"message": "Page not found"}, 404
 
     return app

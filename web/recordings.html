@@ -3,55 +3,62 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sidekick</title>
+    <title>Recordings - Sidekick</title>
     <link rel="stylesheet" href="/static/css/styles.css">
 </head>
 <body>
     <div class="app">
         <!-- Header -->
-        <header class="header">
-            <h1 class="logo">Sidekick</h1>
-            <div class="header-right">
-                <a href="/static/recordings.html" class="header-link">History</a>
-            </div>
+        <header class="page-header">
+            <a href="/" class="back-link">&larr; Back</a>
+            <h1 class="page-title">Recordings</h1>
         </header>
 
-        <!-- Main Content -->
-        <main class="main-content">
-            <div class="record-section">
-                <button id="record-btn" class="record-btn">
-                    Record
-                </button>
-
-                <div class="visualizer-section">
-                    <canvas id="audio-canvas" width="400" height="60"></canvas>
-                </div>
-
-                <div id="timer" class="timer">00:00:00</div>
+        <!-- Recordings List -->
+        <main class="recordings-list" id="recordings-list">
+            <!-- Loading state -->
+            <div class="empty-state" id="loading-state">
+                <div class="processing-spinner"></div>
+                <p class="empty-state-text mt-16">Loading...</p>
             </div>
         </main>
-
-        <!-- Status Bar -->
-        <footer class="status-bar">
-            <div class="status-left" id="status-text">Ready</div>
-            <div class="status-right">
-                <span class="connection-dot" id="connection-dot"></span>
-                <span class="connection-text" id="connection-text">Disconnected</span>
-            </div>
-        </footer>
     </div>
 
-    <!-- Naming Modal -->
-    <div id="naming-modal" class="modal hidden">
+    <!-- View Recording Modal -->
+    <div id="view-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 640px;">
+            <div class="modal-header">
+                <h2 class="modal-title" id="view-title">Recording</h2>
+                <button class="modal-close" id="view-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Details</label>
+                    <div class="recording-meta" id="view-meta"></div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Transcript</label>
+                    <div class="transcript-view" id="view-transcript"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" id="view-close-btn">Close</button>
+                <button class="btn btn-primary" id="resummarize-btn">Re-summarize</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Re-summarize Modal (same as naming modal) -->
+    <div id="resummarize-modal" class="modal hidden">
         <div class="modal-content">
             <div class="modal-header">
-                <h2 class="modal-title">Name Recording</h2>
-                <button class="modal-close" id="naming-close">&times;</button>
+                <h2 class="modal-title">Re-summarize Recording</h2>
+                <button class="modal-close" id="resummarize-close">&times;</button>
             </div>
             <div class="modal-body">
                 <div class="form-group">
                     <label class="form-label">Title</label>
-                    <input type="text" id="recording-title" class="form-input" placeholder="Enter a title..." autofocus>
+                    <input type="text" id="resummarize-title" class="form-input" placeholder="Enter a title...">
                 </div>
 
                 <div class="form-group">
@@ -65,14 +72,14 @@
                     </div>
                 </div>
 
-                <div class="form-group hidden" id="custom-prompt-group">
+                <div class="form-group hidden" id="resummarize-custom-group">
                     <label class="form-label">Custom Prompt</label>
-                    <textarea id="custom-prompt" class="form-input" placeholder="Describe how you want the recording summarized..."></textarea>
+                    <textarea id="resummarize-custom-prompt" class="form-input" placeholder="Describe how you want the recording summarized..."></textarea>
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn" id="naming-cancel">Cancel</button>
-                <button class="btn btn-primary" id="naming-submit">Process</button>
+                <button class="btn" id="resummarize-cancel">Cancel</button>
+                <button class="btn btn-primary" id="resummarize-submit">Process</button>
             </div>
         </div>
     </div>
@@ -90,7 +97,7 @@
                 <div class="confirmation-preview" id="confirmation-preview"></div>
             </div>
             <div class="modal-footer">
-                <button class="btn" id="new-recording-btn">New Recording</button>
+                <button class="btn" id="back-to-list-btn">Back to List</button>
                 <button class="btn btn-primary" id="open-obsidian-btn">Open in Obsidian</button>
             </div>
         </div>
@@ -102,8 +109,6 @@
         <div class="processing-text">Processing...</div>
     </div>
 
-    <script src="/static/js/audio.js"></script>
-    <script src="/static/js/websocket.js"></script>
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/recordings.js"></script>
 </body>
 </html>

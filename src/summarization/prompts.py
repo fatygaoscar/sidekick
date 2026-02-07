@@ -43,6 +43,147 @@ DECISION_LOG_TEMPLATE = """Extract all decisions made during this meeting. For e
 TRANSCRIPT:
 {transcript}"""
 
+# New structured templates for Obsidian export
+
+MEETING_TEMPLATE = """Create a comprehensive meeting summary following this structure:
+
+## Meeting Overview
+Brief 2-3 sentence summary of the meeting's purpose and outcome.
+
+## Attendees
+List participants if mentioned, otherwise note "Not specified"
+
+## Agenda/Topics Discussed
+- Topic 1
+- Topic 2
+...
+
+## Key Decisions
+- Decision 1: [description] - Rationale: [if mentioned]
+- Decision 2: ...
+
+## Action Items
+| Task | Owner | Due Date |
+|------|-------|----------|
+| ... | ... | ... |
+
+## Follow-up Items
+Items requiring future discussion or pending resolution.
+
+## Additional Notes
+Any other relevant information.
+
+---
+TRANSCRIPT:
+{transcript}"""
+
+BRAINSTORM_TEMPLATE = """Create a brainstorming session summary following this structure:
+
+## Session Focus
+What problem or topic was being explored?
+
+## Ideas Generated
+List all ideas mentioned, grouped by theme if applicable:
+
+### Theme 1
+- Idea 1
+- Idea 2
+
+### Theme 2
+- Idea 3
+- Idea 4
+
+## Promising Directions
+Which ideas showed the most potential or received the most discussion?
+
+## Concerns/Constraints
+Any limitations, risks, or concerns raised about the ideas.
+
+## Next Steps
+What was decided for further exploration?
+
+## Raw Ideas
+Unfiltered list of all concepts mentioned.
+
+---
+TRANSCRIPT:
+{transcript}"""
+
+INTERVIEW_TEMPLATE = """Create an interview summary following this structure:
+
+## Interview Overview
+Who was interviewed and for what purpose?
+
+## Key Questions & Answers
+
+### Q1: [Question]
+**A:** [Summary of answer]
+
+### Q2: [Question]
+**A:** [Summary of answer]
+
+(Continue for all significant Q&A exchanges)
+
+## Candidate/Interviewee Assessment
+Key strengths and areas of concern observed.
+
+## Notable Quotes
+Direct quotes that were particularly insightful or relevant.
+
+## Follow-up Questions
+Questions that should be explored in future conversations.
+
+## Recommendation/Conclusion
+Overall assessment or next steps.
+
+---
+TRANSCRIPT:
+{transcript}"""
+
+LECTURE_TEMPLATE = """Create lecture/presentation notes following this structure:
+
+## Topic
+Main subject of the lecture/presentation.
+
+## Key Concepts
+
+### Concept 1
+- Definition/explanation
+- Key points
+
+### Concept 2
+- Definition/explanation
+- Key points
+
+## Important Terms
+| Term | Definition |
+|------|------------|
+| ... | ... |
+
+## Examples/Case Studies
+Examples used to illustrate concepts.
+
+## Key Takeaways
+The most important points to remember.
+
+## Questions Raised
+Questions asked during the session or topics for further study.
+
+## Study Notes
+Additional context helpful for understanding the material.
+
+---
+TRANSCRIPT:
+{transcript}"""
+
+CUSTOM_TEMPLATE = """Summarize the following transcript according to the user's specific instructions.
+
+TRANSCRIPT:
+{transcript}
+
+USER INSTRUCTIONS:
+{custom_prompt}"""
+
 
 def get_prompt(
     prompt_type: str = "default",
@@ -53,7 +194,8 @@ def get_prompt(
     Get system and user prompts for summarization.
 
     Args:
-        prompt_type: Type of summary (default, quick, action_items, decisions)
+        prompt_type: Type of summary (default, quick, action_items, decisions,
+                     meeting, brainstorm, interview, lecture, custom)
         transcript: The transcript to summarize
         custom_instructions: Optional custom instructions to append
 
@@ -65,12 +207,45 @@ def get_prompt(
         "quick": QUICK_SUMMARY_TEMPLATE,
         "action_items": ACTION_ITEMS_TEMPLATE,
         "decisions": DECISION_LOG_TEMPLATE,
+        "meeting": MEETING_TEMPLATE,
+        "brainstorm": BRAINSTORM_TEMPLATE,
+        "interview": INTERVIEW_TEMPLATE,
+        "lecture": LECTURE_TEMPLATE,
+        "custom": CUSTOM_TEMPLATE,
     }
 
     template = templates.get(prompt_type, USER_PROMPT_TEMPLATE)
-    user_prompt = template.format(transcript=transcript)
 
-    if custom_instructions:
-        user_prompt += f"\n\nAdditional instructions: {custom_instructions}"
+    if prompt_type == "custom" and custom_instructions:
+        user_prompt = template.format(transcript=transcript, custom_prompt=custom_instructions)
+    else:
+        user_prompt = template.format(transcript=transcript)
+        if custom_instructions:
+            user_prompt += f"\n\nAdditional instructions: {custom_instructions}"
 
     return SYSTEM_PROMPT, user_prompt
+
+
+# Template metadata for frontend display
+TEMPLATE_INFO = {
+    "meeting": {
+        "name": "Meeting",
+        "description": "Structured meeting notes with decisions and action items",
+    },
+    "brainstorm": {
+        "name": "Brainstorm",
+        "description": "Capture ideas, themes, and promising directions",
+    },
+    "interview": {
+        "name": "Interview",
+        "description": "Q&A format with assessment and key quotes",
+    },
+    "lecture": {
+        "name": "Lecture",
+        "description": "Study notes with key concepts and terms",
+    },
+    "custom": {
+        "name": "Custom",
+        "description": "Provide your own summarization instructions",
+    },
+}

@@ -1,11 +1,13 @@
 """Session and meeting REST endpoints."""
 
-from typing import Optional
+from datetime import datetime
+from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from src.sessions.manager import SessionManager
+from src.sessions.repository import Repository
 from src.summarization.manager import SummarizationManager
 
 
@@ -20,6 +22,11 @@ def get_session_manager(request: Request) -> SessionManager:
 def get_summarization_manager(request: Request) -> SummarizationManager:
     """Dependency to get summarization manager."""
     return request.app.state.summarization_manager
+
+
+def get_repository(request: Request) -> Repository:
+    """Dependency to get repository."""
+    return request.app.state.repository
 
 
 # Request/Response models
@@ -327,5 +334,98 @@ async def get_meeting_summaries(
                 completion_tokens=s.completion_tokens,
             )
             for s in summaries
+        ],
+    }
+
+
+# Recording list response model
+class RecordingResponse(BaseModel):
+    id: str
+    title: Optional[str]
+    started_at: str
+    ended_at: Optional[str]
+    duration_seconds: int
+    segment_count: int
+    has_summary: bool
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/recordings", response_model=List[RecordingResponse])
+async def list_recordings(
+    limit: int = 50,
+    offset: int = 0,
+    repository: Repository = Depends(get_repository),
+):
+    """List past recording sessions."""
+    sessions = await repository.get_sessions_list(limit=limit, offset=offset)
+    return sessions
+
+
+@router.delete("/recordings/{session_id}")
+async def delete_recording(
+    session_id: str,
+    repository: Repository = Depends(get_repository),
+):
+    """Delete a recording and all its associated data."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    await repository.delete_session(session_id)
+    return {"status": "deleted", "session_id": session_id}
+
+
+@router.get("/recordings/{session_id}")
+async def get_recording(
+    session_id: str,
+    repository: Repository = Depends(get_repository),
+):
+    """Get details for a specific recording."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    # Get segments for this session
+    segments = await repository.get_segments(session_id=session_id)
+
+    # Get meetings and their summaries
+    meetings = session.meetings if hasattr(session, 'meetings') else []
+
+    # Calculate duration
+    duration_seconds = 0
+    if segments:
+        duration_seconds = int(max(s.end_time for s in segments))
+
+    # Build transcript
+    transcript_lines = []
+    for segment in segments:
+        mins = int(segment.start_time // 60)
+        secs = int(segment.start_time % 60)
+        timestamp = f"[{mins:02d}:{secs:02d}]"
+        marker = " [IMPORTANT]" if segment.is_important else ""
+        transcript_lines.append({
+            "timestamp": timestamp,
+            "text": segment.text,
+            "is_important": segment.is_important,
+            "start_time": segment.start_time,
+        })
+
+    return {
+        "id": session.id,
+        "started_at": session.started_at.isoformat(),
+        "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+        "duration_seconds": duration_seconds,
+        "segment_count": len(segments),
+        "transcript": transcript_lines,
+        "meetings": [
+            {
+                "id": m.id,
+                "title": m.title,
+                "key_start": m.key_start.isoformat(),
+                "key_stop": m.key_stop.isoformat() if m.key_stop else None,
+            }
+            for m in meetings
         ],
     }
