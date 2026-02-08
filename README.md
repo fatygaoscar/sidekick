@@ -21,22 +21,32 @@ A Python-based web application that provides real-time audio transcription with 
 ## Quick Start
 
 ```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+# Start managed background server (creates venv and installs deps if needed)
+./start.sh
 
-# Install dependencies
-pip install -e .
+# Start with ngrok public URL for phone testing
+./start.sh --ngrok
 
-# Copy and configure environment
-cp .env.example .env
-# Edit .env as needed
+# Check status
+./status.sh
 
-# Run the application
-python -m src.main
+# Stop server
+./stop.sh
 ```
 
 Then open http://localhost:8000 in your browser.
+
+Manual run is still available:
+
+```bash
+source venv/bin/activate
+python -m src.main
+```
+
+Managed ngrok artifacts:
+- `data/ngrok.pid`
+- `data/ngrok.log`
+- `data/ngrok.url`
 
 ## Configuration
 
@@ -54,3 +64,18 @@ See `.env.example` for all available configuration options including:
 4. Press "Mark Important" to flag key moments
 5. Use "Key Stop" to end the meeting
 6. Click "Generate Summary" to create an AI-powered summary
+
+## Transcription Pipelines
+
+Sidekick now has two explicit transcription pipelines:
+
+- **Live Preview pipeline (optional)**:
+  `microphone stream -> websocket chunks -> live preview text`
+  - Controlled by `LIVE_TRANSCRIPTION_PREVIEW` (`true` by default).
+  - Used only for UX feedback while recording.
+  - Not used as export source of truth.
+
+- **Export pipeline (authoritative)**:
+  `saved recording audio -> full transcription -> transcript segments -> summary -> markdown export`
+  - Runs when you click Process/Export.
+  - Rebuilds transcript segments from saved audio for deterministic exports.

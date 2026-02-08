@@ -1,17 +1,39 @@
 """Session and meeting REST endpoints."""
 
+import re
 from datetime import datetime
-from typing import Optional, List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from src.audio.storage import (
+    extension_from_content_type,
+    get_audio_dir,
+    get_session_audio_candidates,
+    get_session_audio_path,
+    media_type_for_path,
+)
 from src.sessions.manager import SessionManager
 from src.sessions.repository import Repository
 from src.summarization.manager import SummarizationManager
 
 
 router = APIRouter()
+
+
+def _sanitize_title_for_filename(title: str) -> str:
+    """Sanitize title for safe filesystem download names."""
+    sanitized = re.sub(r'[<>:"/\\|?*]', "", title).strip()
+    return sanitized or "Untitled Recording"
+
+
+def _build_formatted_title(started_at: datetime, title: str | None) -> str:
+    """Build the canonical recording title shown in history."""
+    timestamp = started_at.strftime("%Y-%m-%d-%H%M")
+    base_title = (title or "Untitled Recording").strip() or "Untitled Recording"
+    return f"{timestamp} - {base_title}"
 
 
 def get_session_manager(request: Request) -> SessionManager:
@@ -342,11 +364,13 @@ async def get_meeting_summaries(
 class RecordingResponse(BaseModel):
     id: str
     title: Optional[str]
+    formatted_title: str
     started_at: str
     ended_at: Optional[str]
     duration_seconds: int
     segment_count: int
     has_summary: bool
+    has_audio: bool
 
     class Config:
         from_attributes = True
@@ -360,6 +384,10 @@ async def list_recordings(
 ):
     """List past recording sessions."""
     sessions = await repository.get_sessions_list(limit=limit, offset=offset)
+    for recording in sessions:
+        started_at = datetime.fromisoformat(recording["started_at"])
+        recording["formatted_title"] = _build_formatted_title(started_at, recording.get("title"))
+        recording["has_audio"] = get_session_audio_path(recording["id"]) is not None
     return sessions
 
 
@@ -374,6 +402,9 @@ async def delete_recording(
         raise HTTPException(status_code=404, detail="Recording not found")
 
     await repository.delete_session(session_id)
+    audio_path = get_session_audio_path(session_id)
+    if audio_path and audio_path.exists():
+        audio_path.unlink()
     return {"status": "deleted", "session_id": session_id}
 
 
@@ -397,6 +428,9 @@ async def get_recording(
     duration_seconds = 0
     if segments:
         duration_seconds = int(max(s.end_time for s in segments))
+    elif session.ended_at:
+        elapsed = (session.ended_at - session.started_at).total_seconds()
+        duration_seconds = max(0, int(elapsed))
 
     # Build transcript
     transcript_lines = []
@@ -404,7 +438,6 @@ async def get_recording(
         mins = int(segment.start_time // 60)
         secs = int(segment.start_time % 60)
         timestamp = f"[{mins:02d}:{secs:02d}]"
-        marker = " [IMPORTANT]" if segment.is_important else ""
         transcript_lines.append({
             "timestamp": timestamp,
             "text": segment.text,
@@ -412,12 +445,29 @@ async def get_recording(
             "start_time": segment.start_time,
         })
 
+    title = None
+    if meetings:
+        ordered_meetings = sorted(meetings, key=lambda m: m.key_start)
+        for meeting in ordered_meetings:
+            if meeting.title:
+                title = meeting.title
+                break
+
+    audio_path = get_session_audio_path(session.id)
+
     return {
         "id": session.id,
+        "title": title,
+        "formatted_title": _build_formatted_title(session.started_at, title),
         "started_at": session.started_at.isoformat(),
         "ended_at": session.ended_at.isoformat() if session.ended_at else None,
         "duration_seconds": duration_seconds,
         "segment_count": len(segments),
+        "has_audio": audio_path is not None,
+        "audio_url": f"/api/recordings/{session.id}/audio" if audio_path else None,
+        "audio_download_url": (
+            f"/api/recordings/{session.id}/audio?download=true" if audio_path else None
+        ),
         "transcript": transcript_lines,
         "meetings": [
             {
@@ -429,3 +479,72 @@ async def get_recording(
             for m in meetings
         ],
     }
+
+
+@router.put("/recordings/{session_id}/audio")
+async def upload_recording_audio(
+    session_id: str,
+    request: Request,
+    repository: Repository = Depends(get_repository),
+):
+    """Upload encoded audio for a completed recording session."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Audio payload is empty")
+
+    extension = extension_from_content_type(request.headers.get("content-type", ""))
+
+    audio_dir = get_audio_dir()
+    for existing in get_session_audio_candidates(session_id):
+        existing.unlink()
+
+    audio_path = audio_dir / f"{session_id}.{extension}"
+    audio_path.write_bytes(body)
+
+    return {
+        "status": "uploaded",
+        "session_id": session_id,
+        "bytes": len(body),
+        "audio_url": f"/api/recordings/{session_id}/audio",
+    }
+
+
+@router.get("/recordings/{session_id}/audio")
+async def get_recording_audio(
+    session_id: str,
+    download: bool = False,
+    repository: Repository = Depends(get_repository),
+):
+    """Stream or download stored audio for a recording session."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    audio_path = get_session_audio_path(session_id)
+    if not audio_path:
+        raise HTTPException(status_code=404, detail="Recording audio not found")
+
+    title = None
+    meetings = sorted(session.meetings, key=lambda m: m.key_start) if session.meetings else []
+    for meeting in meetings:
+        if meeting.title:
+            title = meeting.title
+            break
+
+    stem = _build_formatted_title(session.started_at, title)
+    safe_name = _sanitize_title_for_filename(stem)
+    filename = f"{safe_name}{audio_path.suffix.lower()}"
+    media_type = media_type_for_path(audio_path)
+
+    if download:
+        return FileResponse(
+            path=audio_path,
+            media_type=media_type,
+            filename=filename,
+        )
+
+    return FileResponse(path=audio_path, media_type=media_type)

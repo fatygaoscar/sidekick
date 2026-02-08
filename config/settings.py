@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     audio_sample_rate: int = 16000
     audio_channels: int = 1
     vad_aggressiveness: int = 2
+    live_transcription_preview: bool = True
 
     # Important marker duration (seconds)
     important_marker_duration: int = 60

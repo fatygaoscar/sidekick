@@ -10,18 +10,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from config.settings import get_settings
-from src.sessions.manager import SessionManager
+from src.audio.storage import get_session_audio_path
 from src.sessions.repository import Repository
 from src.summarization.manager import SummarizationManager
 from src.summarization.prompts import TEMPLATE_INFO
+from src.transcription.manager import TranscriptionManager
 
 
 router = APIRouter()
-
-
-def get_session_manager(request: Request) -> SessionManager:
-    """Dependency to get session manager."""
-    return request.app.state.session_manager
 
 
 def get_summarization_manager(request: Request) -> SummarizationManager:
@@ -32,6 +28,11 @@ def get_summarization_manager(request: Request) -> SummarizationManager:
 def get_repository(request: Request) -> Repository:
     """Dependency to get repository."""
     return request.app.state.repository
+
+
+def get_transcription_manager(request: Request) -> TranscriptionManager:
+    """Dependency to get transcription manager."""
+    return request.app.state.transcription_manager
 
 
 class ExportRequest(BaseModel):
@@ -58,11 +59,15 @@ async def get_templates():
 async def export_to_obsidian(
     session_id: str,
     request: ExportRequest,
-    session_manager: SessionManager = Depends(get_session_manager),
     summarization_manager: SummarizationManager = Depends(get_summarization_manager),
     repository: Repository = Depends(get_repository),
+    transcription_manager: TranscriptionManager = Depends(get_transcription_manager),
 ):
-    """Export a recording to Obsidian vault with AI summary."""
+    """Export a recording to Obsidian vault with AI summary.
+
+    Authoritative export pipeline:
+      audio file -> transcription -> transcript segments -> summary -> markdown
+    """
     settings = get_settings()
 
     # Get session and its transcript
@@ -70,10 +75,107 @@ async def export_to_obsidian(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Get all segments for the session
+    audio_path = get_session_audio_path(session_id)
+    if not audio_path:
+        raise HTTPException(status_code=400, detail="No recording audio available for this session")
+
+    # Persist the user-provided title for history/recordings pages.
+    # If there is no meeting yet, create one and attach the title.
+    meetings = sorted(session.meetings, key=lambda m: m.key_start) if session.meetings else []
+    primary_meeting_id = None
+    if meetings:
+        primary_meeting = meetings[0]
+        primary_meeting_id = primary_meeting.id
+        if primary_meeting.title != request.title:
+            await repository.update_meeting_title(primary_meeting.id, request.title)
+    else:
+        meeting = await repository.create_meeting(session_id=session.id, title=request.title)
+        primary_meeting_id = meeting.id
+
+    # Export transcription pipeline is source of truth:
+    # transcribe full recording audio, then replace transcript segments for session.
+    try:
+        transcription_result, audio_duration_seconds = await transcription_manager.transcribe_file(
+            audio_path
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to transcribe recording audio: {str(e)}")
+
+    full_text = transcription_result.text.strip()
+    if not full_text:
+        raise HTTPException(status_code=400, detail="No speech detected in recording audio")
+
+    await repository.delete_segments_for_session(session_id)
+
+    if transcription_result.words:
+        # Create readable transcript segments from word timestamps.
+        buffer_words: list[dict] = []
+        max_words_per_segment = 24
+        max_segment_duration = 14.0
+
+        def flush_words(words: list[dict]) -> tuple[str, float, float] | None:
+            if not words:
+                return None
+            text = " ".join(str(w.get("word", "")).strip() for w in words).strip()
+            if not text:
+                return None
+            start = float(words[0].get("start", 0.0))
+            end = float(words[-1].get("end", start))
+            return text, start, end
+
+        for word in transcription_result.words:
+            token = str(word.get("word", "")).strip()
+            if not token:
+                continue
+
+            if not buffer_words:
+                buffer_words.append(word)
+                continue
+
+            first_start = float(buffer_words[0].get("start", 0.0))
+            segment_elapsed = float(word.get("end", first_start)) - first_start
+            hit_limit = len(buffer_words) >= max_words_per_segment or segment_elapsed >= max_segment_duration
+            sentence_end = token.endswith((".", "!", "?"))
+
+            buffer_words.append(word)
+            if hit_limit or sentence_end:
+                parsed = flush_words(buffer_words)
+                if parsed:
+                    text, start, end = parsed
+                    await repository.add_segment(
+                        session_id=session_id,
+                        meeting_id=primary_meeting_id,
+                        text=text,
+                        start_time=start,
+                        end_time=end,
+                        confidence=transcription_result.confidence,
+                    )
+                buffer_words = []
+
+        parsed = flush_words(buffer_words)
+        if parsed:
+            text, start, end = parsed
+            await repository.add_segment(
+                session_id=session_id,
+                meeting_id=primary_meeting_id,
+                text=text,
+                start_time=start,
+                end_time=end,
+                confidence=transcription_result.confidence,
+            )
+    else:
+        await repository.add_segment(
+            session_id=session_id,
+            meeting_id=primary_meeting_id,
+            text=full_text,
+            start_time=0.0,
+            end_time=audio_duration_seconds,
+            confidence=transcription_result.confidence,
+        )
+
     segments = await repository.get_segments(session_id=session_id)
     if not segments:
-        raise HTTPException(status_code=400, detail="No transcript available for this session")
+        raise HTTPException(status_code=500, detail="Failed to build transcript segments from recording audio")
 
     # Build transcript with timestamps
     transcript_lines = []
@@ -84,7 +186,7 @@ async def export_to_obsidian(
         marker = " [IMPORTANT]" if segment.is_important else ""
         transcript_lines.append(f"{timestamp}{marker} {segment.text}")
 
-    full_transcript = "\n".join(transcript_lines)
+    full_transcript = "\n".join(transcript_lines).strip()
 
     # Generate summary using the selected template
     template = request.template
@@ -100,14 +202,11 @@ async def export_to_obsidian(
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
 
     # Calculate duration
-    if segments:
-        duration_seconds = int(max(s.end_time for s in segments))
-        hours = duration_seconds // 3600
-        minutes = (duration_seconds % 3600) // 60
-        seconds = duration_seconds % 60
-        duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-    else:
-        duration_str = "00:00:00"
+    duration_seconds = int(audio_duration_seconds)
+    hours = duration_seconds // 3600
+    minutes = (duration_seconds % 3600) // 60
+    seconds = duration_seconds % 60
+    duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     # Build filename: YYYY-MM-DD-HHMM - [title] [Template].md
     timestamp = session.started_at.strftime("%Y-%m-%d-%H%M")
@@ -117,9 +216,7 @@ async def export_to_obsidian(
 
     # Build markdown content
     recorded_at = session.started_at.strftime("%Y-%m-%d %H:%M")
-    markdown_content = f"""# {timestamp} - {request.title}
-
-**Template**: {template_label}
+    markdown_content = f"""**Template**: {template_label}
 **Recorded**: {recorded_at}
 **Duration**: {duration_str}
 

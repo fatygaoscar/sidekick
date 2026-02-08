@@ -19,6 +19,9 @@ class RecordingsPage {
             viewCloseBtn: document.getElementById('view-close-btn'),
             viewTitle: document.getElementById('view-title'),
             viewMeta: document.getElementById('view-meta'),
+            viewAudioGroup: document.getElementById('view-audio-group'),
+            viewAudioPlayer: document.getElementById('view-audio-player'),
+            viewAudioDownload: document.getElementById('view-audio-download'),
             viewTranscript: document.getElementById('view-transcript'),
             resummarizeBtn: document.getElementById('resummarize-btn'),
 
@@ -139,7 +142,13 @@ class RecordingsPage {
         });
 
         const duration = this._formatDuration(rec.duration_seconds);
-        const title = rec.title || 'Untitled Recording';
+        const title = rec.formatted_title || rec.title || 'Untitled Recording';
+        const audioButtons = rec.has_audio
+            ? `
+                <button class="btn view-btn" data-id="${rec.id}">View</button>
+                <a class="btn" href="/api/recordings/${rec.id}/audio?download=true">Download Audio</a>
+            `
+            : `<button class="btn view-btn" data-id="${rec.id}">View</button>`;
 
         return `
             <div class="recording-card">
@@ -151,7 +160,7 @@ class RecordingsPage {
                     ${rec.has_summary ? '<span>Has Summary</span>' : ''}
                 </div>
                 <div class="recording-actions">
-                    <button class="btn view-btn" data-id="${rec.id}">View</button>
+                    ${audioButtons}
                     <button class="btn export-btn" data-id="${rec.id}">Export</button>
                     <button class="btn delete-btn" data-id="${rec.id}">Delete</button>
                 </div>
@@ -199,12 +208,23 @@ class RecordingsPage {
         const rec = this.currentRecording;
         const date = new Date(rec.started_at);
 
-        this.elements.viewTitle.textContent = rec.meetings[0]?.title || 'Recording';
+        this.elements.viewTitle.textContent = rec.formatted_title || rec.title || 'Recording';
         this.elements.viewMeta.innerHTML = `
             <span>Date: ${date.toLocaleDateString()}</span>
             <span>Duration: ${this._formatDuration(rec.duration_seconds)}</span>
             <span>Segments: ${rec.segment_count}</span>
         `;
+
+        if (rec.has_audio && rec.audio_url) {
+            this.elements.viewAudioGroup.classList.remove('hidden');
+            this.elements.viewAudioPlayer.src = rec.audio_url;
+            this.elements.viewAudioDownload.href = rec.audio_download_url || `${rec.audio_url}?download=true`;
+        } else {
+            this.elements.viewAudioGroup.classList.add('hidden');
+            this.elements.viewAudioPlayer.removeAttribute('src');
+            this.elements.viewAudioPlayer.load();
+            this.elements.viewAudioDownload.removeAttribute('href');
+        }
 
         // Render transcript
         if (rec.transcript && rec.transcript.length > 0) {
@@ -222,13 +242,14 @@ class RecordingsPage {
     }
 
     _closeViewModal() {
+        this.elements.viewAudioPlayer.pause();
         this.elements.viewModal.classList.add('hidden');
     }
 
     _showResummarizeModal() {
         this._closeViewModal();
 
-        const title = this.currentRecording?.meetings[0]?.title || '';
+        const title = this.currentRecording?.title || this.currentRecording?.meetings[0]?.title || '';
         this.elements.resummarizeTitle.value = title;
         this.elements.resummarizeCustomPrompt.value = '';
         this._selectTemplate('meeting');

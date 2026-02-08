@@ -210,6 +210,17 @@ class Repository:
             result = await db.execute(query)
             return list(result.scalars().all())
 
+    async def delete_segments_for_session(self, session_id: str) -> int:
+        """Delete all transcript segments for a session."""
+        from sqlalchemy import delete
+
+        async with self._session_factory() as db:
+            result = await db.execute(
+                delete(TranscriptSegment).where(TranscriptSegment.session_id == session_id)
+            )
+            await db.commit()
+            return result.rowcount or 0
+
     async def mark_segments_important(
         self, session_id: str, start_time: float, end_time: float
     ) -> int:
@@ -328,12 +339,16 @@ class Repository:
                 duration_seconds = 0
                 if segments:
                     duration_seconds = int(max(s.end_time for s in segments))
+                elif session.ended_at:
+                    elapsed = (session.ended_at - session.started_at).total_seconds()
+                    duration_seconds = max(0, int(elapsed))
 
                 # Check if any meeting has summaries
                 has_summary = False
                 title = None
-                for meeting in session.meetings:
-                    if meeting.title:
+                meetings = sorted(session.meetings, key=lambda m: m.key_start)
+                for meeting in meetings:
+                    if not title and meeting.title:
                         title = meeting.title
                     sum_result = await db.execute(
                         select(Summary).where(Summary.meeting_id == meeting.id).limit(1)

@@ -1,5 +1,7 @@
 """Transcription engine manager for switching between backends."""
 
+from pathlib import Path
+
 import numpy as np
 
 from config.settings import Settings, TranscriptionBackend, get_settings
@@ -160,6 +162,31 @@ class TranscriptionManager:
                 source="transcription_manager",
             )
             raise
+
+    async def transcribe_file(
+        self,
+        file_path: str | Path,
+        language: str | None = None,
+        start_offset: float = 0.0,
+    ) -> tuple[TranscriptionResult, float]:
+        """
+        Transcribe an audio file from disk.
+
+        Returns:
+            Tuple of (TranscriptionResult, duration_seconds)
+        """
+        from faster_whisper.audio import decode_audio
+
+        resolved = Path(file_path)
+        audio = decode_audio(str(resolved), sampling_rate=16000)
+        duration_seconds = len(audio) / 16000
+        result = await self.transcribe(
+            audio=audio,
+            sample_rate=16000,
+            language=language,
+            start_offset=start_offset,
+        )
+        return result, duration_seconds
 
     def _create_engine(self, backend: TranscriptionBackend) -> TranscriptionEngine:
         """Create a transcription engine for the specified backend."""

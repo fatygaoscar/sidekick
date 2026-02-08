@@ -7,11 +7,15 @@ class AudioCapture {
         this.sampleRate = options.sampleRate || 16000;
         this.onAudioData = options.onAudioData || (() => {});
         this.onLevelUpdate = options.onLevelUpdate || (() => {});
+        this.onEncodedAudio = options.onEncodedAudio || (() => {});
 
         this.audioContext = null;
         this.mediaStream = null;
         this.workletNode = null;
         this.analyser = null;
+        this.mediaRecorder = null;
+        this.recordedChunks = [];
+        this.recordedMimeType = null;
         this.isCapturing = false;
     }
 
@@ -37,6 +41,8 @@ class AudioCapture {
 
             // Create source from microphone
             const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+
+            this._startMediaRecorder();
 
             // Create analyser for visualization
             this.analyser = this.audioContext.createAnalyser();
@@ -157,8 +163,56 @@ class AudioCapture {
         requestAnimationFrame(updateLevel);
     }
 
+    _startMediaRecorder() {
+        if (typeof MediaRecorder === 'undefined' || !this.mediaStream) {
+            return;
+        }
+
+        const mimeCandidates = [
+            'audio/webm;codecs=opus',
+            'audio/webm',
+            'audio/mp4',
+        ];
+        let mimeType = '';
+        for (const candidate of mimeCandidates) {
+            if (MediaRecorder.isTypeSupported(candidate)) {
+                mimeType = candidate;
+                break;
+            }
+        }
+
+        this.recordedChunks = [];
+        this.recordedMimeType = mimeType || 'audio/webm';
+
+        this.mediaRecorder = mimeType
+            ? new MediaRecorder(this.mediaStream, { mimeType })
+            : new MediaRecorder(this.mediaStream);
+
+        this.mediaRecorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) {
+                this.recordedChunks.push(event.data);
+            }
+        };
+
+        this.mediaRecorder.onstop = () => {
+            if (!this.recordedChunks.length) return;
+            const blob = new Blob(this.recordedChunks, { type: this.recordedMimeType });
+            this.onEncodedAudio(blob, this.recordedMimeType);
+            this.recordedChunks = [];
+        };
+
+        this.mediaRecorder.start(1000);
+    }
+
     stop() {
         this.isCapturing = false;
+
+        if (this.mediaRecorder) {
+            if (this.mediaRecorder.state !== 'inactive') {
+                this.mediaRecorder.stop();
+            }
+            this.mediaRecorder = null;
+        }
 
         if (this.workletNode) {
             this.workletNode.disconnect();

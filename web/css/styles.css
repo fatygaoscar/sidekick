@@ -155,6 +155,32 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
+.live-preview {
+    width: 100%;
+    max-width: 560px;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    padding: 12px 14px;
+}
+
+.live-preview-label {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+
+.live-preview-text {
+    min-height: 38px;
+    max-height: 120px;
+    overflow-y: auto;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+}
+
 /* Status Bar */
 .status-bar {
     display: flex;
@@ -619,6 +645,10 @@ textarea.form-input {
 
     .timer {
         font-size: 24px;
+    }
+
+    .live-preview {
+        max-width: 100%;
     }
 
     .template-grid {
