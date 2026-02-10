@@ -103,8 +103,34 @@
 
     <!-- Processing Overlay -->
     <div id="processing-overlay" class="processing-overlay hidden">
-        <div class="processing-spinner"></div>
-        <div class="processing-text">Processing...</div>
+        <div class="processing-panel">
+            <div class="processing-panel-header">
+                <div class="processing-title">EXPORT PIPELINE</div>
+                <div id="processing-overall" class="processing-overall">0%</div>
+            </div>
+            <div id="processing-stage" class="processing-stage">Queued</div>
+            <div class="processing-grid">
+                <div class="processing-row">
+                    <div class="processing-label-wrap">
+                        <span class="processing-label">TRANSCRIPTION</span>
+                        <span id="processing-transcription-text" class="processing-percent">0%</span>
+                    </div>
+                    <div class="processing-bar">
+                        <div id="processing-transcription-fill" class="processing-bar-fill"></div>
+                    </div>
+                </div>
+                <div class="processing-row">
+                    <div class="processing-label-wrap">
+                        <span class="processing-label">SUMMARIZATION</span>
+                        <span id="processing-summarization-text" class="processing-percent">0%</span>
+                    </div>
+                    <div class="processing-bar">
+                        <div id="processing-summarization-fill" class="processing-bar-fill"></div>
+                    </div>
+                </div>
+            </div>
+            <div id="processing-text" class="processing-text">Preparing export...</div>
+        </div>
     </div>
 
     <script src="/static/js/audio.js"></script>

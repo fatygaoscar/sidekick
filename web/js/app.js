@@ -19,6 +19,15 @@ class SidekickApp {
         this.ws = null;
         this.obsidianUri = null;
         this.audioUploadPromise = null;
+        this.pendingChunks = [];
+        this.isUploadingChunks = false;
+        this.uploadedChunkCount = 0;
+        this.finalizedChunkAudio = false;
+        this.captureStoppedPromise = null;
+        this.captureStopMeta = null;
+        this.resolveCaptureStopped = null;
+        this.fallbackBlob = null;
+        this.fallbackMimeType = null;
 
         this.elements = {
             recordBtn: document.getElementById('record-btn'),
@@ -50,6 +59,13 @@ class SidekickApp {
 
             // Processing overlay
             processingOverlay: document.getElementById('processing-overlay'),
+            processingText: document.getElementById('processing-text'),
+            processingStage: document.getElementById('processing-stage'),
+            processingOverall: document.getElementById('processing-overall'),
+            processingTranscriptionText: document.getElementById('processing-transcription-text'),
+            processingSummarizationText: document.getElementById('processing-summarization-text'),
+            processingTranscriptionFill: document.getElementById('processing-transcription-fill'),
+            processingSummarizationFill: document.getElementById('processing-summarization-fill'),
         };
 
         this._init();
@@ -83,9 +99,20 @@ class SidekickApp {
                 }
             },
             onEncodedAudio: (blob, mimeType) => {
-                const targetSessionId = this.state.sessionId || this.state.lastSessionId;
-                if (!targetSessionId) return;
-                this.audioUploadPromise = this._uploadSessionAudio(targetSessionId, blob, mimeType);
+                // Keep full blob as fallback if chunk persistence fails.
+                this.fallbackBlob = blob;
+                this.fallbackMimeType = mimeType;
+            },
+            onEncodedChunk: (blob, mimeType, chunkIndex) => {
+                this.pendingChunks.push({ blob, mimeType, chunkIndex });
+                this._processChunkQueue();
+            },
+            onCaptureStopped: (meta) => {
+                this.captureStopMeta = meta;
+                if (this.resolveCaptureStopped) {
+                    this.resolveCaptureStopped(meta);
+                    this.resolveCaptureStopped = null;
+                }
             },
             onLevelUpdate: (level, frequencyData) => {
                 this.visualizer.draw(level, frequencyData);
@@ -189,6 +216,15 @@ class SidekickApp {
             }
             this.state.lastSessionId = startedSessionId;
             this.audioUploadPromise = null;
+            this.pendingChunks = [];
+            this.isUploadingChunks = false;
+            this.uploadedChunkCount = 0;
+            this.finalizedChunkAudio = false;
+            this.captureStopMeta = null;
+            this.captureStoppedPromise = null;
+            this.resolveCaptureStopped = null;
+            this.fallbackBlob = null;
+            this.fallbackMimeType = null;
 
             this.state.isRecording = true;
             this.elements.recordBtn.classList.add('recording');
@@ -209,6 +245,9 @@ class SidekickApp {
     async _stopRecording() {
         const sessionId = this.state.sessionId;
         this.state.lastSessionId = sessionId;
+        this.captureStoppedPromise = new Promise((resolve) => {
+            this.resolveCaptureStopped = resolve;
+        });
         this.audioCapture.stop();
         this.visualizer.clear();
         this.ws.endSession();
@@ -299,14 +338,19 @@ class SidekickApp {
         const customPrompt = template === 'custom' ? this.elements.customPrompt.value.trim() : null;
 
         this.elements.namingModal.classList.add('hidden');
+        this._setProcessingState({
+            stage: 'queued',
+            message: 'Preparing export...',
+            transcriptionProgress: 0,
+            summarizationProgress: 0,
+            overallProgress: 0,
+        });
         this.elements.processingOverlay.classList.remove('hidden');
 
         try {
-            if (this.audioUploadPromise) {
-                await this.audioUploadPromise;
-            }
+            await this._ensureRecordingAudioPersisted(exportSessionId);
 
-            const response = await fetch(`/api/recordings/${exportSessionId}/export-obsidian`, {
+            const createResponse = await fetch(`/api/recordings/${exportSessionId}/export-obsidian-job`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -316,12 +360,13 @@ class SidekickApp {
                 }),
             });
 
-            if (!response.ok) {
-                const error = await response.json();
+            if (!createResponse.ok) {
+                const error = await createResponse.json();
                 throw new Error(error.detail || 'Export failed');
             }
 
-            const result = await response.json();
+            const job = await createResponse.json();
+            const result = await this._waitForExportJob(job.job_id);
             this._showConfirmation(result);
 
         } catch (error) {
@@ -359,6 +404,15 @@ class SidekickApp {
         this._updateTimerDisplay();
         this.state.sessionId = null;
         this.audioUploadPromise = null;
+        this.pendingChunks = [];
+        this.isUploadingChunks = false;
+        this.uploadedChunkCount = 0;
+        this.finalizedChunkAudio = false;
+        this.captureStoppedPromise = null;
+        this.captureStopMeta = null;
+        this.resolveCaptureStopped = null;
+        this.fallbackBlob = null;
+        this.fallbackMimeType = null;
     }
 
     _resetLivePreview() {
@@ -389,6 +443,206 @@ class SidekickApp {
             await new Promise(resolve => setTimeout(resolve, 50));
         }
         return null;
+    }
+
+    async _processChunkQueue() {
+        if (this.isUploadingChunks) return;
+        this.isUploadingChunks = true;
+
+        try {
+            while (this.pendingChunks.length > 0) {
+                const sessionId = this.state.sessionId || this.state.lastSessionId;
+                if (!sessionId) break;
+
+                const nextChunk = this.pendingChunks[0];
+                await this._uploadSessionAudioChunk(sessionId, nextChunk);
+                this.pendingChunks.shift();
+                this.uploadedChunkCount += 1;
+            }
+        } finally {
+            this.isUploadingChunks = false;
+        }
+    }
+
+    async _uploadSessionAudioChunk(sessionId, chunk) {
+        const maxAttempts = 4;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            try {
+                const response = await fetch(
+                    `/api/recordings/${sessionId}/audio/chunks/${chunk.chunkIndex}`,
+                    {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': chunk.mimeType || 'audio/webm',
+                        },
+                        body: chunk.blob,
+                    }
+                );
+
+                if (response.ok) {
+                    return;
+                }
+
+                const payload = await response.json().catch(() => ({}));
+                if (response.status === 409) {
+                    const expected = Number(
+                        payload.expected_chunk_index
+                        || response.headers.get('X-Expected-Chunk-Index')
+                    );
+                    if (!Number.isNaN(expected) && chunk.chunkIndex < expected) {
+                        return;
+                    }
+                    throw new Error(payload.detail || 'Chunk index out of order');
+                }
+                throw new Error(payload.detail || 'Audio chunk upload failed');
+            } catch (error) {
+                if (attempt === maxAttempts) {
+                    throw error;
+                }
+                await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+            }
+        }
+    }
+
+    async _ensureRecordingAudioPersisted(sessionId) {
+        if (!sessionId) {
+            throw new Error('No recording session found');
+        }
+
+        if (this.captureStoppedPromise) {
+            await this.captureStoppedPromise;
+        }
+
+        await this._processChunkQueue();
+        await this._waitForChunkQueueDrain();
+
+        if (this.uploadedChunkCount > 0 && !this.finalizedChunkAudio) {
+            await this._finalizeChunkedAudio(sessionId);
+            this.finalizedChunkAudio = true;
+            return;
+        }
+
+        if (!this.uploadedChunkCount && this.fallbackBlob) {
+            this.audioUploadPromise = this._uploadSessionAudio(sessionId, this.fallbackBlob, this.fallbackMimeType);
+            await this.audioUploadPromise;
+        }
+    }
+
+    async _waitForChunkQueueDrain(timeoutMs = 20000) {
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < timeoutMs) {
+            if (!this.isUploadingChunks && this.pendingChunks.length === 0) {
+                return;
+            }
+            await new Promise(resolve => setTimeout(resolve, 60));
+            if (!this.isUploadingChunks && this.pendingChunks.length > 0) {
+                await this._processChunkQueue();
+            }
+        }
+        throw new Error('Timed out while uploading recording audio');
+    }
+
+    async _finalizeChunkedAudio(sessionId) {
+        const response = await fetch(`/api/recordings/${sessionId}/audio/finalize`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                mime_type: this.captureStopMeta?.mimeType || this.fallbackMimeType || 'audio/webm',
+                uploaded_chunks: this.uploadedChunkCount,
+            }),
+        });
+
+        if (!response.ok) {
+            const payload = await response.json().catch(() => ({}));
+            const error = new Error(payload.detail || 'Failed to finalize recording audio');
+            console.error('Failed to finalize chunked audio:', error);
+            throw error;
+        }
+    }
+
+    async _waitForExportJob(jobId) {
+        const maxPollMs = 20 * 60 * 1000;
+        const startedAt = Date.now();
+
+        while (Date.now() - startedAt < maxPollMs) {
+            const response = await fetch(`/api/export-jobs/${jobId}`);
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                throw new Error(error.detail || 'Failed to read export status');
+            }
+
+            const job = await response.json();
+            this._setProcessingState({
+                stage: job.stage,
+                message: job.message,
+                transcriptionProgress: Number(job.transcription_progress || 0),
+                summarizationProgress: Number(job.summarization_progress || 0),
+                overallProgress: Number(job.overall_progress || 0),
+            });
+
+            if (job.status === 'completed') {
+                if (job.result) return job.result;
+                throw new Error('Export completed without a result payload');
+            }
+
+            if (job.status === 'failed') {
+                throw new Error(job.error || 'Export job failed');
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 900));
+        }
+
+        throw new Error('Export timed out');
+    }
+
+    _setProcessingState({
+        stage,
+        message,
+        transcriptionProgress,
+        summarizationProgress,
+        overallProgress,
+    }) {
+        if (!this.elements.processingOverlay) return;
+
+        const txPct = Math.max(0, Math.min(100, Math.round(transcriptionProgress * 100)));
+        const sumPct = Math.max(0, Math.min(100, Math.round(summarizationProgress * 100)));
+        const overallPct = Math.max(0, Math.min(100, Math.round(overallProgress * 100)));
+
+        if (this.elements.processingStage) {
+            this.elements.processingStage.textContent = this._formatStage(stage);
+        }
+        if (this.elements.processingText) {
+            this.elements.processingText.textContent = message || 'Processing...';
+        }
+        if (this.elements.processingOverall) {
+            this.elements.processingOverall.textContent = `${overallPct}%`;
+        }
+        if (this.elements.processingTranscriptionText) {
+            this.elements.processingTranscriptionText.textContent = `${txPct}%`;
+        }
+        if (this.elements.processingSummarizationText) {
+            this.elements.processingSummarizationText.textContent = `${sumPct}%`;
+        }
+        if (this.elements.processingTranscriptionFill) {
+            this.elements.processingTranscriptionFill.style.width = `${txPct}%`;
+        }
+        if (this.elements.processingSummarizationFill) {
+            this.elements.processingSummarizationFill.style.width = `${sumPct}%`;
+        }
+    }
+
+    _formatStage(stage) {
+        const map = {
+            queued: 'Queued',
+            transcribing: 'Transcribing Audio',
+            summarizing: 'Generating Summary',
+            writing: 'Writing Note',
+            completed: 'Completed',
+            failed: 'Failed',
+        };
+        return map[stage] || 'Processing';
     }
 }
 

@@ -1,5 +1,6 @@
 """Audio file storage helpers for recording sessions."""
 
+import json
 from pathlib import Path
 
 from config.settings import get_settings
@@ -19,10 +20,7 @@ def get_session_audio_candidates(session_id: str) -> list[Path]:
     """Possible audio files for a session (known extensions first)."""
     audio_dir = get_audio_dir()
     candidates = [audio_dir / f"{session_id}.{ext}" for ext in _KNOWN_AUDIO_EXTENSIONS]
-    existing = [path for path in candidates if path.exists()]
-    if existing:
-        return existing
-    return sorted(audio_dir.glob(f"{session_id}.*"))
+    return [path for path in candidates if path.exists()]
 
 
 def get_session_audio_path(session_id: str) -> Path | None:
@@ -57,3 +55,37 @@ def media_type_for_path(path: Path) -> str:
     if suffix == ".m4a":
         return "audio/mp4"
     return "audio/webm"
+
+
+def get_session_partial_audio_path(session_id: str) -> Path:
+    """Get temporary append-only partial file path for session audio."""
+    return get_audio_dir() / f"{session_id}.part"
+
+
+def get_session_chunk_meta_path(session_id: str) -> Path:
+    """Get metadata file path for chunked uploads."""
+    return get_audio_dir() / f"{session_id}.chunks.json"
+
+
+def read_session_chunk_meta(session_id: str) -> dict | None:
+    """Read chunk upload metadata for a session, if any."""
+    path = get_session_chunk_meta_path(session_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def write_session_chunk_meta(session_id: str, payload: dict) -> None:
+    """Write chunk upload metadata atomically."""
+    path = get_session_chunk_meta_path(session_id)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def clear_session_chunk_upload_state(session_id: str) -> None:
+    """Delete temporary chunk upload files for a session."""
+    for path in (get_session_partial_audio_path(session_id), get_session_chunk_meta_path(session_id)):
+        if path.exists():
+            path.unlink()

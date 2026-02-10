@@ -1,5 +1,6 @@
 """Session and meeting REST endpoints."""
 
+import os
 import re
 from datetime import datetime
 from typing import List, Optional
@@ -9,11 +10,16 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from src.audio.storage import (
+    clear_session_chunk_upload_state,
     extension_from_content_type,
     get_audio_dir,
     get_session_audio_candidates,
+    get_session_chunk_meta_path,
     get_session_audio_path,
+    get_session_partial_audio_path,
     media_type_for_path,
+    read_session_chunk_meta,
+    write_session_chunk_meta,
 )
 from src.sessions.manager import SessionManager
 from src.sessions.repository import Repository
@@ -73,6 +79,11 @@ class MarkImportantRequest(BaseModel):
 class SummarizeRequest(BaseModel):
     prompt_type: str = "default"
     custom_instructions: Optional[str] = None
+
+
+class FinalizeAudioRequest(BaseModel):
+    mime_type: Optional[str] = None
+    uploaded_chunks: Optional[int] = None
 
 
 class SessionResponse(BaseModel):
@@ -405,6 +416,7 @@ async def delete_recording(
     audio_path = get_session_audio_path(session_id)
     if audio_path and audio_path.exists():
         audio_path.unlink()
+    clear_session_chunk_upload_state(session_id)
     return {"status": "deleted", "session_id": session_id}
 
 
@@ -499,6 +511,7 @@ async def upload_recording_audio(
     extension = extension_from_content_type(request.headers.get("content-type", ""))
 
     audio_dir = get_audio_dir()
+    clear_session_chunk_upload_state(session_id)
     for existing in get_session_audio_candidates(session_id):
         existing.unlink()
 
@@ -509,6 +522,123 @@ async def upload_recording_audio(
         "status": "uploaded",
         "session_id": session_id,
         "bytes": len(body),
+        "audio_url": f"/api/recordings/{session_id}/audio",
+    }
+
+
+@router.put("/recordings/{session_id}/audio/chunks/{chunk_index}")
+async def upload_recording_audio_chunk(
+    session_id: str,
+    chunk_index: int,
+    request: Request,
+    repository: Repository = Depends(get_repository),
+):
+    """Append one encoded audio chunk for a recording session."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if chunk_index < 0:
+        raise HTTPException(status_code=400, detail="chunk_index must be non-negative")
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Audio chunk payload is empty")
+
+    incoming_extension = extension_from_content_type(request.headers.get("content-type", ""))
+    meta = read_session_chunk_meta(session_id) or {
+        "next_chunk_index": 0,
+        "extension": incoming_extension,
+    }
+
+    expected_chunk_index = int(meta.get("next_chunk_index", 0))
+    if chunk_index < expected_chunk_index:
+        return {
+            "status": "duplicate",
+            "session_id": session_id,
+            "chunk_index": chunk_index,
+            "expected_chunk_index": expected_chunk_index,
+        }
+    if chunk_index > expected_chunk_index:
+        raise HTTPException(
+            status_code=409,
+            detail="Chunk index out of order",
+            headers={"X-Expected-Chunk-Index": str(expected_chunk_index)},
+        )
+
+    extension = str(meta.get("extension") or incoming_extension or "webm")
+    part_path = get_session_partial_audio_path(session_id)
+    with part_path.open("ab") as handle:
+        handle.write(body)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    meta["next_chunk_index"] = expected_chunk_index + 1
+    meta["extension"] = extension
+    write_session_chunk_meta(session_id, meta)
+
+    return {
+        "status": "appended",
+        "session_id": session_id,
+        "chunk_index": chunk_index,
+        "next_chunk_index": meta["next_chunk_index"],
+        "bytes": len(body),
+    }
+
+
+@router.post("/recordings/{session_id}/audio/finalize")
+async def finalize_recording_audio(
+    session_id: str,
+    request: FinalizeAudioRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Finalize chunked recording audio into stable file for export/playback."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    meta = read_session_chunk_meta(session_id)
+    if not meta:
+        audio_path = get_session_audio_path(session_id)
+        if audio_path:
+            return {
+                "status": "already_finalized",
+                "session_id": session_id,
+                "audio_url": f"/api/recordings/{session_id}/audio",
+            }
+        raise HTTPException(status_code=400, detail="No chunked upload state found")
+
+    expected_chunks = int(meta.get("next_chunk_index", 0))
+    client_chunks = request.uploaded_chunks
+    if client_chunks is not None and client_chunks > expected_chunks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing uploaded chunks (server={expected_chunks}, client={client_chunks})",
+        )
+
+    part_path = get_session_partial_audio_path(session_id)
+    if not part_path.exists() or part_path.stat().st_size == 0:
+        raise HTTPException(status_code=400, detail="Chunked audio file is empty")
+
+    for existing in get_session_audio_candidates(session_id):
+        existing.unlink()
+
+    extension = str(
+        meta.get("extension")
+        or extension_from_content_type(request.mime_type or "")
+        or "webm"
+    )
+    final_path = get_audio_dir() / f"{session_id}.{extension}"
+    part_path.replace(final_path)
+
+    chunk_meta_path = get_session_chunk_meta_path(session_id)
+    if chunk_meta_path.exists():
+        chunk_meta_path.unlink()
+
+    return {
+        "status": "finalized",
+        "session_id": session_id,
+        "chunks": expected_chunks,
+        "bytes": final_path.stat().st_size,
         "audio_url": f"/api/recordings/{session_id}/audio",
     }
 

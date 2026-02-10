@@ -8,6 +8,8 @@ class AudioCapture {
         this.onAudioData = options.onAudioData || (() => {});
         this.onLevelUpdate = options.onLevelUpdate || (() => {});
         this.onEncodedAudio = options.onEncodedAudio || (() => {});
+        this.onEncodedChunk = options.onEncodedChunk || (() => {});
+        this.onCaptureStopped = options.onCaptureStopped || (() => {});
 
         this.audioContext = null;
         this.mediaStream = null;
@@ -16,6 +18,7 @@ class AudioCapture {
         this.mediaRecorder = null;
         this.recordedChunks = [];
         this.recordedMimeType = null;
+        this.chunkIndex = 0;
         this.isCapturing = false;
     }
 
@@ -183,6 +186,7 @@ class AudioCapture {
 
         this.recordedChunks = [];
         this.recordedMimeType = mimeType || 'audio/webm';
+        this.chunkIndex = 0;
 
         this.mediaRecorder = mimeType
             ? new MediaRecorder(this.mediaStream, { mimeType })
@@ -191,14 +195,22 @@ class AudioCapture {
         this.mediaRecorder.ondataavailable = (event) => {
             if (event.data && event.data.size > 0) {
                 this.recordedChunks.push(event.data);
+                this.onEncodedChunk(event.data, this.recordedMimeType, this.chunkIndex);
+                this.chunkIndex += 1;
             }
         };
 
         this.mediaRecorder.onstop = () => {
-            if (!this.recordedChunks.length) return;
-            const blob = new Blob(this.recordedChunks, { type: this.recordedMimeType });
-            this.onEncodedAudio(blob, this.recordedMimeType);
+            if (this.recordedChunks.length) {
+                const blob = new Blob(this.recordedChunks, { type: this.recordedMimeType });
+                this.onEncodedAudio(blob, this.recordedMimeType);
+            }
+            this.onCaptureStopped({
+                chunkCount: this.chunkIndex,
+                mimeType: this.recordedMimeType,
+            });
             this.recordedChunks = [];
+            this.chunkIndex = 0;
         };
 
         this.mediaRecorder.start(1000);
@@ -206,9 +218,11 @@ class AudioCapture {
 
     stop() {
         this.isCapturing = false;
+        let awaitingMediaRecorderStop = false;
 
         if (this.mediaRecorder) {
             if (this.mediaRecorder.state !== 'inactive') {
+                awaitingMediaRecorderStop = true;
                 this.mediaRecorder.stop();
             }
             this.mediaRecorder = null;
@@ -232,6 +246,14 @@ class AudioCapture {
         if (this.mediaStream) {
             this.mediaStream.getTracks().forEach(track => track.stop());
             this.mediaStream = null;
+        }
+
+        if (!awaitingMediaRecorderStop) {
+            this.onCaptureStopped({
+                chunkCount: this.chunkIndex,
+                mimeType: this.recordedMimeType || 'audio/webm',
+            });
+            this.chunkIndex = 0;
         }
     }
 }
