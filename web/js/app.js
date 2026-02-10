@@ -10,7 +10,7 @@ class SidekickApp {
             lastSessionId: null,
             elapsedSeconds: 0,
             recordingStartTime: null,
-            selectedTemplate: 'strategic_review',
+            selectedTemplate: 'meeting',
             livePreviewEnabled: false,
             promptVisible: false,
             promptEdited: false,
@@ -332,7 +332,7 @@ class SidekickApp {
             console.error('Failed to load templates:', error);
             // Fallback to basic template
             this.templates = {
-                meeting: { name: 'Meeting', description: 'General meeting notes', prompt: '' }
+                meeting: { name: 'General Meeting', description: 'General meeting notes', prompt: '' }
             };
             this._renderTemplates();
         }
@@ -342,8 +342,8 @@ class SidekickApp {
         const grid = this.elements.templateGrid;
         grid.innerHTML = '';
 
-        // Define display order
-        const order = ['one_on_one', 'standup', 'strategic_review', 'working_session', 'meeting', 'brainstorm', 'interview', 'lecture', 'custom'];
+        // Show only primary templates in the requested UX order.
+        const order = ['meeting', 'strategic_review', 'working_session', 'standup', 'one_on_one', 'brainstorm', 'custom'];
         const sortedKeys = order.filter(k => k in this.templates);
 
         sortedKeys.forEach(key => {
@@ -372,7 +372,7 @@ class SidekickApp {
         this.elements.promptContainer.classList.add('hidden');
         this.elements.togglePrompt.textContent = 'Show';
         this.elements.togglePrompt.classList.remove('active');
-        this._selectTemplate('strategic_review');
+        this._selectTemplate('meeting');
         this.elements.namingModal.classList.remove('hidden');
         this.elements.recordingTitle.focus();
     }

@@ -53,15 +53,33 @@ Templates are defined in `src/summarization/prompts.py`:
 |----------|-------------|
 | **1-on-1** | Personal meetings - feedback, goals, development |
 | **Standup** | Brief status updates - done, doing, blocked |
-| **Strategic Review** | Leadership meetings - reports, feedback, decisions, timelines (default) |
+| **Strategic Review** | Leadership meetings - reports, feedback, decisions, timelines |
 | **Working Session** | Technical work - high detail, decisions, open questions needing consensus |
-| **General Meeting** | Standard meeting notes |
+| **General Meeting** | Standard meeting notes (default) |
 | **Brainstorm** | Ideas, themes, promising directions |
 | **Interview** | Q&A format with assessment |
 | **Lecture** | Study notes with key concepts |
 | **Custom** | User-provided prompt |
 
 Templates are editable in the UI before export (click "Show" to view/edit prompt).
+
+UI template chooser order (shown templates only):
+1. `meeting` (General Meeting)
+2. `strategic_review`
+3. `working_session`
+4. `standup`
+5. `one_on_one`
+6. `brainstorm`
+7. `custom`
+
+## UX Conventions
+
+- Keep one primary action per step; avoid duplicate entry points for the same action.
+- Recording list cards should stay minimal: `View` and `Delete` only.
+- Re-summarize/export should be initiated from the recording view context, not cards.
+- Download affordances belong in the view modal (`Download Audio`, `Download Transcript`).
+- Template chooser should show only the primary 7 templates in the established order.
+- Keep `General Meeting` as default unless explicit product changes are requested.
 
 ## Key Config (Current)
 
@@ -110,6 +128,10 @@ Templates are editable in the UI before export (click "Show" to view/edit prompt
 - Real-time transcription progress (segment-based)
 - Animated progress bar for summarization
 - Export date added to markdown output
+- Template chooser now shows only primary templates in usage-priority order
+- Default template is General Meeting
+- History cards removed redundant Export and Download Audio actions
+- View modal contains audio download, transcript download, and re-summarize
 - Editable template prompts in UI
 
 ## Notes

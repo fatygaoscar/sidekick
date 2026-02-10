@@ -54,10 +54,28 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 
 - `one_on_one` - 1-on-1 meetings
 - `standup` - Daily standups
-- `strategic_review` - Leadership meetings (default)
+- `strategic_review` - Leadership meetings
 - `working_session` - Technical work sessions
-- `meeting` - General meetings
+- `meeting` - General meetings (default)
 - `brainstorm`, `interview`, `lecture`, `custom`
+
+UI template chooser order (shown templates only):
+1. `meeting` (General Meeting)
+2. `strategic_review`
+3. `working_session`
+4. `standup`
+5. `one_on_one`
+6. `brainstorm`
+7. `custom`
+
+## UX Conventions
+
+- Prefer one clear action per step; remove duplicated actions across list cards and modals.
+- Recording history cards should stay minimal: `View` and `Delete` only.
+- Export/re-summarize actions should happen from the view pane context, not from list cards.
+- Download actions should live in the view pane (`Download Audio`, `Download Transcript`), not cards.
+- Keep template chooser focused to the primary 7 templates in the defined order above.
+- Default template should remain `meeting` unless product direction changes.
 
 ## API Endpoints
 
@@ -83,5 +101,7 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - **WebSocket**: Ping every 25s, unlimited reconnects, visibility-change reconnect
 - **Audio**: Chunked upload during recording, fallback to full blob
 - **Progress**: Real segment-based transcription progress
-- **Templates**: Editable in UI before export
+- **Templates**: Only primary templates shown in chooser, ordered for common usage; prompts still editable before export
+- **History UX**: Removed redundant card actions (no card-level Export/Download Audio)
+- **View Pane Actions**: Audio download kept in view modal, added transcript download button, re-summarize remains primary action
 - **Export**: Includes both recorded and exported timestamps

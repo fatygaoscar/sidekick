@@ -6,7 +6,7 @@ class RecordingsPage {
     constructor() {
         this.recordings = [];
         this.currentRecording = null;
-        this.selectedTemplate = 'strategic_review';
+        this.selectedTemplate = 'meeting';
         this.promptEdited = false;
         this.promptVisible = false;
         this.obsidianUri = null;
@@ -25,6 +25,7 @@ class RecordingsPage {
             viewAudioGroup: document.getElementById('view-audio-group'),
             viewAudioPlayer: document.getElementById('view-audio-player'),
             viewAudioDownload: document.getElementById('view-audio-download'),
+            viewTranscriptDownload: document.getElementById('view-transcript-download'),
             viewTranscript: document.getElementById('view-transcript'),
             resummarizeBtn: document.getElementById('resummarize-btn'),
 
@@ -75,6 +76,7 @@ class RecordingsPage {
             if (e.target === this.elements.viewModal) this._closeViewModal();
         });
         this.elements.resummarizeBtn.addEventListener('click', () => this._showResummarizeModal());
+        this.elements.viewTranscriptDownload.addEventListener('click', () => this._downloadTranscript());
 
         // Re-summarize modal
         this.elements.resummarizeClose.addEventListener('click', () => this._closeResummarizeModal());
@@ -110,7 +112,7 @@ class RecordingsPage {
             this._renderTemplates();
         } catch (error) {
             console.error('Failed to load templates:', error);
-            this.templates = { meeting: { name: 'Meeting', description: 'General meeting notes', prompt: '' } };
+            this.templates = { meeting: { name: 'General Meeting', description: 'General meeting notes', prompt: '' } };
             this._renderTemplates();
         }
     }
@@ -119,7 +121,7 @@ class RecordingsPage {
         const grid = this.elements.templateGrid;
         grid.innerHTML = '';
 
-        const order = ['one_on_one', 'standup', 'strategic_review', 'working_session', 'meeting', 'brainstorm', 'interview', 'lecture', 'custom'];
+        const order = ['meeting', 'strategic_review', 'working_session', 'standup', 'one_on_one', 'brainstorm', 'custom'];
         const sortedKeys = order.filter(k => k in this.templates);
 
         sortedKeys.forEach(key => {
@@ -187,10 +189,6 @@ class RecordingsPage {
             btn.addEventListener('click', () => this._viewRecording(btn.dataset.id));
         });
 
-        this.elements.recordingsList.querySelectorAll('.export-btn').forEach(btn => {
-            btn.addEventListener('click', () => this._quickExport(btn.dataset.id));
-        });
-
         this.elements.recordingsList.querySelectorAll('.delete-btn').forEach(btn => {
             btn.addEventListener('click', () => this._confirmDelete(btn.dataset.id));
         });
@@ -210,13 +208,6 @@ class RecordingsPage {
 
         const duration = this._formatDuration(rec.duration_seconds);
         const title = rec.formatted_title || rec.title || 'Untitled Recording';
-        const audioButtons = rec.has_audio
-            ? `
-                <button class="btn view-btn" data-id="${rec.id}">View</button>
-                <a class="btn" href="/api/recordings/${rec.id}/audio?download=true">Download Audio</a>
-            `
-            : `<button class="btn view-btn" data-id="${rec.id}">View</button>`;
-
         return `
             <div class="recording-card">
                 <div class="recording-date">${dateStr} ${timeStr}</div>
@@ -227,8 +218,7 @@ class RecordingsPage {
                     ${rec.has_summary ? '<span>Has Summary</span>' : ''}
                 </div>
                 <div class="recording-actions">
-                    ${audioButtons}
-                    <button class="btn export-btn" data-id="${rec.id}">Export</button>
+                    <button class="btn view-btn" data-id="${rec.id}">View</button>
                     <button class="btn delete-btn" data-id="${rec.id}">Delete</button>
                 </div>
             </div>
@@ -301,8 +291,10 @@ class RecordingsPage {
                     <span class="text">${this._escapeHtml(seg.text)}</span>
                 </div>
             `).join('');
+            this.elements.viewTranscriptDownload.disabled = false;
         } else {
             this.elements.viewTranscript.innerHTML = '<p class="text-muted">No transcript available</p>';
+            this.elements.viewTranscriptDownload.disabled = true;
         }
 
         this.elements.viewModal.classList.remove('hidden');
@@ -323,7 +315,7 @@ class RecordingsPage {
         this.elements.promptContainer.classList.add('hidden');
         this.elements.togglePrompt.textContent = 'Show';
         this.elements.togglePrompt.classList.remove('active');
-        this._selectTemplate('strategic_review');
+        this._selectTemplate('meeting');
 
         this.elements.resummarizeModal.classList.remove('hidden');
         this.elements.resummarizeTitle.focus();
@@ -362,11 +354,26 @@ class RecordingsPage {
         await this._exportRecording(this.currentRecording.id, title, template, customPrompt);
     }
 
-    async _quickExport(id) {
-        const rec = this.recordings.find(r => r.id === id);
-        const title = rec?.title || `Recording ${new Date(rec.started_at).toLocaleDateString()}`;
+    _downloadTranscript() {
+        const rec = this.currentRecording;
+        if (!rec || !rec.transcript || rec.transcript.length === 0) {
+            return;
+        }
 
-        await this._exportRecording(id, title, 'strategic_review', null);
+        const lines = rec.transcript.map((seg) => `${seg.timestamp} ${seg.text}`);
+        const transcriptText = `${lines.join('\n')}\n`;
+        const blob = new Blob([transcriptText], { type: 'text/plain;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+
+        const title = (rec.formatted_title || rec.title || 'recording').replace(/[<>:"/\\|?*]+/g, '').trim() || 'recording';
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${title} - transcript.txt`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+
+        URL.revokeObjectURL(url);
     }
 
     async _exportRecording(id, title, template, customPrompt) {
