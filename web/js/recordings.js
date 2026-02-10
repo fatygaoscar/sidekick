@@ -321,12 +321,12 @@ class RecordingsPage {
     }
 
     _showResummarizeModal() {
-        if (!this.currentRecording?.has_summary) {
+        if (!this.currentRecording?.has_audio) {
             return;
         }
         this._closeViewModal();
 
-        const title = this.currentRecording?.title || this.currentRecording?.meetings?.[0]?.title || '';
+        const title = this.currentRecording?.title || this.currentRecording?.meetings?.[0]?.title || 'Untitled Recording';
         this.elements.resummarizeTitle.value = title;
         this.promptEdited = false;
         this.promptVisible = false;
@@ -466,8 +466,9 @@ class RecordingsPage {
     }
 
     _syncViewActionButtons(rec) {
+        const canResummarize = !!rec?.has_audio;
         const hasSummary = !!rec?.has_summary;
-        this.elements.resummarizeBtn.disabled = !hasSummary;
+        this.elements.resummarizeBtn.disabled = !canResummarize;
         this.elements.viewOpenObsidianBtn.disabled = !hasSummary || !rec?.open_in_obsidian_uri;
     }
 
