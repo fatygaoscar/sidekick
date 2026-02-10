@@ -1,14 +1,19 @@
 """Prompt templates for summarization."""
 
-SYSTEM_PROMPT = """You are an expert meeting summarizer. Your task is to create clear, actionable summaries from meeting transcripts.
+SYSTEM_PROMPT = """You are an expert meeting summarizer. Your task is to create clear, actionable, and well-structured summaries from meeting transcripts.
 
 Guidelines:
 - Focus on key decisions, action items, and important discussions
-- Use bullet points for clarity
+- Use bullet points and markdown formatting for clarity
 - Highlight any deadlines or assignments mentioned
 - Keep the summary concise but comprehensive
 - Pay special attention to sections marked as [IMPORTANT START]...[IMPORTANT END]
-- If the transcript contains important markers, ensure those topics are prominently featured"""
+- If the transcript contains important markers, ensure those topics are prominently featured
+- Correct obvious transcription errors (e.g., homophones, unclear words) based on context
+- Use proper capitalization for names, companies, and technical terms
+- If speakers are identifiable, attribute key points to them
+- Be specific: include numbers, dates, and concrete details when mentioned
+- Omit filler words, tangents, and off-topic chatter from the summary"""
 
 USER_PROMPT_TEMPLATE = """Please summarize the following meeting transcript. Pay special attention to any sections marked with [IMPORTANT START] and [IMPORTANT END] tags - these indicate topics that were flagged as particularly important during the meeting.
 
@@ -44,6 +49,198 @@ TRANSCRIPT:
 {transcript}"""
 
 # New structured templates for Obsidian export
+
+ONE_ON_ONE_TEMPLATE = """Create a 1-on-1 meeting summary following this structure:
+
+## Overview
+Brief context: who met and the general purpose.
+
+## Discussion Topics
+Summarize each topic discussed with key points.
+
+## Feedback Given
+- Feedback provided (positive or constructive)
+- Specific examples or situations referenced
+
+## Feedback Received
+- Feedback received about your work, team, or processes
+- Concerns or suggestions raised
+
+## Goals & Development
+- Career goals discussed
+- Skills to develop
+- Growth opportunities mentioned
+
+## Action Items
+| Item | Owner | Timeline |
+|------|-------|----------|
+| ... | ... | ... |
+
+## Follow-up For Next 1-on-1
+Topics or items to revisit in the next meeting.
+
+IGNORE: Small talk, scheduling logistics, weather chat.
+
+---
+TRANSCRIPT:
+{transcript}"""
+
+STANDUP_TEMPLATE = """Create a brief standup/status meeting summary. Keep it concise.
+
+## Attendees
+List who participated (if identifiable).
+
+## Updates By Person
+For each person who gave an update:
+
+### [Name]
+- **Completed:** What they finished
+- **Working On:** Current focus
+- **Blockers:** Any impediments (if none, omit)
+
+## Team Blockers
+List any blockers that need escalation or cross-team coordination.
+
+## Announcements
+Any team-wide announcements or reminders shared.
+
+IGNORE: Jokes, off-topic banter, detailed technical discussions (those belong in working sessions).
+KEEP IT BRIEF: This should be scannable in 30 seconds.
+
+---
+TRANSCRIPT:
+{transcript}"""
+
+STRATEGIC_REVIEW_TEMPLATE = """Create an adaptive summary for this leadership/strategic meeting. First, analyze what was actually discussed, then include ONLY the relevant sections below. Do not include empty sections.
+
+## Meeting Context
+Brief 2-3 sentence overview: who attended, what was reviewed, and the primary outcome.
+
+## Report/Dashboard Review
+(Include if reports, dashboards, or metrics were reviewed)
+- Key metrics discussed
+- Trends or anomalies noted
+- Data quality issues raised
+
+## Feedback & Discussion
+(Include if stakeholders provided feedback)
+- Feedback from each stakeholder (attribute by name/role if possible)
+- Concerns raised
+- Suggestions proposed
+
+## Decisions Made
+(Include if decisions were reached)
+For each decision:
+- **Decision:** What was decided
+- **Rationale:** Why (if discussed)
+- **Owner:** Who is responsible
+
+## Strategy & Direction Changes
+(Include if strategy or approach was adjusted)
+- What changed from the previous approach
+- Why the pivot was made
+- Impact on current work
+
+## Timeline & Milestones
+(Include if dates, deadlines, or schedules were discussed)
+| Milestone | Date | Owner | Notes |
+|-----------|------|-------|-------|
+| ... | ... | ... | ... |
+
+## Resource & Prioritization
+(Include if resourcing, priorities, or trade-offs were discussed)
+- Priority changes
+- Resource allocation decisions
+- What's being deprioritized
+
+## Action Items
+| Task | Owner | Due Date |
+|------|-------|----------|
+| ... | ... | ... |
+
+## Open Items
+Questions or topics requiring further discussion or stakeholder input.
+
+## Next Steps
+What happens next and when to reconvene.
+
+IGNORE: Small talk, scheduling logistics, off-topic tangents.
+BE SPECIFIC: Include actual numbers, dates, names, and concrete details.
+
+---
+TRANSCRIPT:
+{transcript}"""
+
+WORKING_SESSION_TEMPLATE = """Create a detailed technical working session summary. This template prioritizes PRESERVING DETAIL because many micro-decisions are made during technical work.
+
+## Session Focus
+What problem, project, or system was being worked on?
+
+## Participants
+Who was involved and their roles (if identifiable).
+
+## Work Completed
+Describe what was actually built, fixed, or changed during the session:
+- Changes made (be specific about tables, fields, queries, models)
+- Problems solved
+- Code or queries written (summarize logic, include key snippets if mentioned)
+
+## Technical Decisions
+For EACH decision made (even small ones), document:
+
+### Decision: [Brief title]
+- **What:** What was decided
+- **Why:** The reasoning or trade-off considered
+- **Alternatives Rejected:** Other options discussed and why they weren't chosen
+- **Impact:** What this affects
+
+(Repeat for each decision)
+
+## Data Model Changes
+(Include if data models, schemas, or structures were modified)
+- Tables/entities affected
+- Fields added, removed, or modified
+- Relationships changed
+- Migration notes
+
+## SQL / Query Notes
+(Include if SQL or queries were discussed)
+- Query logic discussed
+- Performance considerations
+- Key joins or filters
+
+## Issues Discovered
+Problems found during the session that need attention:
+- Bug or data issue
+- Root cause (if identified)
+- Proposed fix
+
+## Outstanding Questions - Needs Consensus
+**These items require input from other departments or leadership (VP/Director/Manager) before proceeding:**
+
+| Question | Context | Who Needs to Decide | Urgency |
+|----------|---------|---------------------|---------|
+| ... | ... | ... | ... |
+
+## Outstanding Questions - Technical
+Technical questions to research or resolve within the team:
+- Question and current thinking
+
+## Next Session Agenda
+What to tackle next time:
+- Carry-over items
+- Next priorities
+
+## Parking Lot
+Ideas or tangents mentioned but not pursued - saved for later consideration.
+
+DO NOT SUMMARIZE AWAY DETAIL: This is a technical log. Preserve specifics.
+ATTRIBUTE DECISIONS: Note who proposed or decided something when identifiable.
+CAPTURE THE "WHY": The reasoning behind decisions is as important as the decision itself.
+
+---
+TRANSCRIPT:
+{transcript}"""
 
 MEETING_TEMPLATE = """Create a comprehensive meeting summary following this structure:
 
@@ -207,6 +404,10 @@ def get_prompt(
         "quick": QUICK_SUMMARY_TEMPLATE,
         "action_items": ACTION_ITEMS_TEMPLATE,
         "decisions": DECISION_LOG_TEMPLATE,
+        "one_on_one": ONE_ON_ONE_TEMPLATE,
+        "standup": STANDUP_TEMPLATE,
+        "strategic_review": STRATEGIC_REVIEW_TEMPLATE,
+        "working_session": WORKING_SESSION_TEMPLATE,
         "meeting": MEETING_TEMPLATE,
         "brainstorm": BRAINSTORM_TEMPLATE,
         "interview": INTERVIEW_TEMPLATE,
@@ -228,9 +429,25 @@ def get_prompt(
 
 # Template metadata for frontend display
 TEMPLATE_INFO = {
+    "one_on_one": {
+        "name": "1-on-1",
+        "description": "Personal meetings - feedback, goals, development",
+    },
+    "standup": {
+        "name": "Standup",
+        "description": "Brief status updates - done, doing, blocked",
+    },
+    "strategic_review": {
+        "name": "Strategic Review",
+        "description": "Leadership meetings - reports, feedback, decisions, timelines",
+    },
+    "working_session": {
+        "name": "Working Session",
+        "description": "Technical work - high detail, decisions, open questions",
+    },
     "meeting": {
-        "name": "Meeting",
-        "description": "Structured meeting notes with decisions and action items",
+        "name": "General Meeting",
+        "description": "Standard meeting notes with decisions and action items",
     },
     "brainstorm": {
         "name": "Brainstorm",
@@ -249,3 +466,26 @@ TEMPLATE_INFO = {
         "description": "Provide your own summarization instructions",
     },
 }
+
+
+def get_template_content(template_key: str) -> str:
+    """Get the raw template content for display/editing in the UI."""
+    templates = {
+        "one_on_one": ONE_ON_ONE_TEMPLATE,
+        "standup": STANDUP_TEMPLATE,
+        "strategic_review": STRATEGIC_REVIEW_TEMPLATE,
+        "working_session": WORKING_SESSION_TEMPLATE,
+        "meeting": MEETING_TEMPLATE,
+        "brainstorm": BRAINSTORM_TEMPLATE,
+        "interview": INTERVIEW_TEMPLATE,
+        "lecture": LECTURE_TEMPLATE,
+        "custom": "",
+    }
+    content = templates.get(template_key, "")
+    # Remove the transcript placeholder section for display
+    if content:
+        # Remove everything from "---\nTRANSCRIPT:" onwards
+        parts = content.split("---\nTRANSCRIPT:")
+        if len(parts) > 1:
+            content = parts[0].strip()
+    return content

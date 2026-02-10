@@ -9,9 +9,14 @@ class SidekickApp {
             sessionId: null,
             lastSessionId: null,
             elapsedSeconds: 0,
-            selectedTemplate: 'meeting',
+            recordingStartTime: null,
+            selectedTemplate: 'strategic_review',
             livePreviewEnabled: false,
+            promptVisible: false,
+            promptEdited: false,
         };
+
+        this.templates = {};
 
         this.timerInterval = null;
         this.audioCapture = null;
@@ -45,8 +50,9 @@ class SidekickApp {
             namingCancel: document.getElementById('naming-cancel'),
             namingSubmit: document.getElementById('naming-submit'),
             recordingTitle: document.getElementById('recording-title'),
-            templateBtns: document.querySelectorAll('.template-btn'),
-            customPromptGroup: document.getElementById('custom-prompt-group'),
+            templateGrid: document.getElementById('template-grid'),
+            togglePrompt: document.getElementById('toggle-prompt'),
+            promptContainer: document.getElementById('prompt-container'),
             customPrompt: document.getElementById('custom-prompt'),
 
             // Confirmation modal
@@ -78,6 +84,7 @@ class SidekickApp {
         this._initWebSocket();
         this._initAudioCapture();
         this._bindEvents();
+        this._loadTemplates();
     }
 
     _initWebSocket() {
@@ -132,9 +139,14 @@ class SidekickApp {
             if (e.target === this.elements.namingModal) this._closeNamingModal();
         });
 
-        // Template buttons
-        this.elements.templateBtns.forEach(btn => {
-            btn.addEventListener('click', () => this._selectTemplate(btn.dataset.template));
+        // Template buttons are bound dynamically in _renderTemplates
+
+        // Toggle prompt visibility
+        this.elements.togglePrompt.addEventListener('click', () => this._togglePromptVisibility());
+
+        // Track if prompt was edited
+        this.elements.customPrompt.addEventListener('input', () => {
+            this.state.promptEdited = true;
         });
 
         // Confirmation modal
@@ -148,6 +160,14 @@ class SidekickApp {
         // Enter key in title input
         this.elements.recordingTitle.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') this._processRecording();
+        });
+
+        // Reconnect WebSocket when tab becomes visible (browser may have killed connection)
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && !this.ws.isConnected) {
+                console.log('Tab visible, reconnecting WebSocket...');
+                this.ws.connect();
+            }
         });
     }
 
@@ -266,21 +286,29 @@ class SidekickApp {
         }
     }
 
-    // Timer
+    // Timer - uses wall clock to avoid drift when tab is inactive
     _startTimer() {
+        this.state.recordingStartTime = Date.now();
         this.state.elapsedSeconds = 0;
         this._updateTimerDisplay();
 
         this.timerInterval = setInterval(() => {
-            this.state.elapsedSeconds++;
-            this._updateTimerDisplay();
-        }, 1000);
+            if (this.state.recordingStartTime) {
+                this.state.elapsedSeconds = Math.floor((Date.now() - this.state.recordingStartTime) / 1000);
+                this._updateTimerDisplay();
+            }
+        }, 250); // Update more frequently for smoother display after tab switch
     }
 
     _stopTimer() {
         if (this.timerInterval) {
             clearInterval(this.timerInterval);
             this.timerInterval = null;
+        }
+        // Capture final elapsed time from wall clock
+        if (this.state.recordingStartTime) {
+            this.state.elapsedSeconds = Math.floor((Date.now() - this.state.recordingStartTime) / 1000);
+            this._updateTimerDisplay();
         }
     }
 
@@ -292,11 +320,59 @@ class SidekickApp {
             `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
     }
 
+    // Templates
+    async _loadTemplates() {
+        try {
+            const response = await fetch('/api/templates');
+            if (!response.ok) throw new Error('Failed to load templates');
+            const data = await response.json();
+            this.templates = data.templates;
+            this._renderTemplates();
+        } catch (error) {
+            console.error('Failed to load templates:', error);
+            // Fallback to basic template
+            this.templates = {
+                meeting: { name: 'Meeting', description: 'General meeting notes', prompt: '' }
+            };
+            this._renderTemplates();
+        }
+    }
+
+    _renderTemplates() {
+        const grid = this.elements.templateGrid;
+        grid.innerHTML = '';
+
+        // Define display order
+        const order = ['one_on_one', 'standup', 'strategic_review', 'working_session', 'meeting', 'brainstorm', 'interview', 'lecture', 'custom'];
+        const sortedKeys = order.filter(k => k in this.templates);
+
+        sortedKeys.forEach(key => {
+            const template = this.templates[key];
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'template-btn';
+            btn.dataset.template = key;
+            btn.textContent = template.name;
+            btn.title = template.description;
+
+            if (key === this.state.selectedTemplate) {
+                btn.classList.add('selected');
+            }
+
+            btn.addEventListener('click', () => this._selectTemplate(key));
+            grid.appendChild(btn);
+        });
+    }
+
     // Naming modal
     _showNamingModal() {
         this.elements.recordingTitle.value = '';
-        this.elements.customPrompt.value = '';
-        this._selectTemplate('meeting');
+        this.state.promptEdited = false;
+        this.state.promptVisible = false;
+        this.elements.promptContainer.classList.add('hidden');
+        this.elements.togglePrompt.textContent = 'Show';
+        this.elements.togglePrompt.classList.remove('active');
+        this._selectTemplate('strategic_review');
         this.elements.namingModal.classList.remove('hidden');
         this.elements.recordingTitle.focus();
     }
@@ -306,18 +382,33 @@ class SidekickApp {
         this._resetTimer();
     }
 
-    _selectTemplate(template) {
-        this.state.selectedTemplate = template;
+    _selectTemplate(templateKey) {
+        this.state.selectedTemplate = templateKey;
+        this.state.promptEdited = false;
 
-        this.elements.templateBtns.forEach(btn => {
-            btn.classList.toggle('selected', btn.dataset.template === template);
+        // Update button states
+        const buttons = this.elements.templateGrid.querySelectorAll('.template-btn');
+        buttons.forEach(btn => {
+            btn.classList.toggle('selected', btn.dataset.template === templateKey);
         });
 
-        if (template === 'custom') {
-            this.elements.customPromptGroup.classList.remove('hidden');
-            this.elements.customPrompt.focus();
+        // Load the template prompt
+        const template = this.templates[templateKey];
+        if (template) {
+            this.elements.customPrompt.value = template.prompt || '';
+        }
+    }
+
+    _togglePromptVisibility() {
+        this.state.promptVisible = !this.state.promptVisible;
+        if (this.state.promptVisible) {
+            this.elements.promptContainer.classList.remove('hidden');
+            this.elements.togglePrompt.textContent = 'Hide';
+            this.elements.togglePrompt.classList.add('active');
         } else {
-            this.elements.customPromptGroup.classList.add('hidden');
+            this.elements.promptContainer.classList.add('hidden');
+            this.elements.togglePrompt.textContent = 'Show';
+            this.elements.togglePrompt.classList.remove('active');
         }
     }
 
@@ -335,7 +426,9 @@ class SidekickApp {
         }
 
         const template = this.state.selectedTemplate;
-        const customPrompt = template === 'custom' ? this.elements.customPrompt.value.trim() : null;
+        // Send custom_prompt if: it's a custom template OR the user edited the prompt
+        const promptValue = this.elements.customPrompt.value.trim();
+        const customPrompt = (template === 'custom' || this.state.promptEdited) ? promptValue : null;
 
         this.elements.namingModal.classList.add('hidden');
         this._setProcessingState({
@@ -401,6 +494,7 @@ class SidekickApp {
 
     _resetTimer() {
         this.state.elapsedSeconds = 0;
+        this.state.recordingStartTime = null;
         this._updateTimerDisplay();
         this.state.sessionId = null;
         this.audioUploadPromise = null;

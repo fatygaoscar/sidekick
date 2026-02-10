@@ -17,7 +17,7 @@ from config.settings import get_settings
 from src.audio.storage import get_session_audio_path
 from src.sessions.repository import Repository
 from src.summarization.manager import SummarizationManager
-from src.summarization.prompts import TEMPLATE_INFO
+from src.summarization.prompts import TEMPLATE_INFO, get_template_content
 from src.transcription.manager import TranscriptionManager
 
 
@@ -82,8 +82,26 @@ _EXPORT_TASKS: dict[str, asyncio.Task] = {}
 
 @router.get("/templates")
 async def get_templates():
-    """Get available summary templates."""
-    return {"templates": TEMPLATE_INFO}
+    """Get available summary templates with their prompts."""
+    templates_with_prompts = {}
+    for key, info in TEMPLATE_INFO.items():
+        templates_with_prompts[key] = {
+            **info,
+            "prompt": get_template_content(key),
+        }
+    return {"templates": templates_with_prompts}
+
+
+@router.get("/templates/{template_key}")
+async def get_template(template_key: str):
+    """Get a specific template's content."""
+    if template_key not in TEMPLATE_INFO:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return {
+        "key": template_key,
+        **TEMPLATE_INFO[template_key],
+        "prompt": get_template_content(template_key),
+    }
 
 
 def _utc_now_iso() -> str:
@@ -294,14 +312,17 @@ async def _run_export_pipeline(
     full_transcript = "\n".join(transcript_lines).strip()
 
     # Generate summary using the selected template
+    # If custom_prompt is provided, use it as the full prompt (user edited the template)
     template = request_payload.template
-    custom_instructions = request_payload.custom_prompt if template == "custom" else None
+    custom_instructions = request_payload.custom_prompt if request_payload.custom_prompt else None
+    # When user provides edited prompt, treat as custom to use their exact wording
+    effective_template = "custom" if custom_instructions else template
 
     await _emit_progress(progress_callback, "summarizing", "Generating summary", 1.0, 0.08)
     try:
         summary_result = await summarization_manager.summarize(
             transcript=full_transcript,
-            prompt_type=template,
+            prompt_type=effective_template,
             custom_instructions=custom_instructions,
         )
     except Exception as e:

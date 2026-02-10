@@ -6,12 +6,14 @@ class SidekickWebSocket {
     constructor(options = {}) {
         this.url = options.url || this._getDefaultUrl();
         this.reconnectInterval = options.reconnectInterval || 3000;
-        this.maxReconnectAttempts = options.maxReconnectAttempts || 10;
+        this.maxReconnectAttempts = options.maxReconnectAttempts || Infinity;
+        this.pingInterval = options.pingInterval || 25000; // 25 seconds
 
         this.ws = null;
         this.reconnectAttempts = 0;
         this.isConnected = false;
         this.shouldReconnect = true;
+        this.pingTimer = null;
 
         // Event handlers
         this.onOpen = options.onOpen || (() => {});
@@ -41,18 +43,21 @@ class SidekickWebSocket {
                 console.log('WebSocket connected');
                 this.isConnected = true;
                 this.reconnectAttempts = 0;
+                this._startPing();
                 this.onOpen();
             };
 
             this.ws.onclose = (event) => {
                 console.log('WebSocket closed', event.code, event.reason);
                 this.isConnected = false;
+                this._stopPing();
                 this.onClose(event);
 
                 if (this.shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
                     this.reconnectAttempts++;
-                    console.log(`Reconnecting... attempt ${this.reconnectAttempts}`);
-                    setTimeout(() => this.connect(), this.reconnectInterval);
+                    const delay = Math.min(this.reconnectInterval * Math.pow(1.5, this.reconnectAttempts - 1), 30000);
+                    console.log(`Reconnecting... attempt ${this.reconnectAttempts} in ${Math.round(delay)}ms`);
+                    setTimeout(() => this.connect(), delay);
                 }
             };
 
@@ -73,9 +78,26 @@ class SidekickWebSocket {
 
     disconnect() {
         this.shouldReconnect = false;
+        this._stopPing();
         if (this.ws) {
             this.ws.close();
             this.ws = null;
+        }
+    }
+
+    _startPing() {
+        this._stopPing();
+        this.pingTimer = setInterval(() => {
+            if (this.isConnected) {
+                this.ping();
+            }
+        }, this.pingInterval);
+    }
+
+    _stopPing() {
+        if (this.pingTimer) {
+            clearInterval(this.pingTimer);
+            this.pingTimer = null;
         }
     }
 

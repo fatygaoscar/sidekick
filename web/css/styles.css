@@ -282,7 +282,7 @@ body {
     background-color: var(--bg-elevated);
     border: 1px solid var(--border);
     width: 100%;
-    max-width: 480px;
+    max-width: 560px;
     max-height: 90vh;
     overflow-y: auto;
 }
@@ -370,7 +370,7 @@ textarea.form-input {
 /* Template Selector */
 .template-grid {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: 8px;
 }
 
@@ -399,6 +399,57 @@ textarea.form-input {
 
 .template-btn.full-width {
     grid-column: span 2;
+}
+
+/* Prompt Editor */
+.prompt-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.btn-toggle {
+    font-family: inherit;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-toggle:hover {
+    border-color: var(--text-dim);
+    color: var(--text);
+}
+
+.btn-toggle.active {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+#prompt-container {
+    margin-top: 8px;
+}
+
+.form-textarea {
+    min-height: 200px;
+    max-height: 300px;
+    resize: vertical;
+    font-family: inherit;
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.prompt-hint {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 6px;
+    letter-spacing: 0.05em;
 }
 
 /* Confirmation Modal */
@@ -727,11 +778,17 @@ textarea.form-input {
     }
 
     .template-grid {
-        grid-template-columns: 1fr;
+        grid-template-columns: repeat(2, 1fr);
     }
 
     .template-btn.full-width {
         grid-column: span 1;
+    }
+}
+
+@media (max-width: 400px) {
+    .template-grid {
+        grid-template-columns: 1fr;
     }
 
     .modal-content {

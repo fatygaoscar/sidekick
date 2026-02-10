@@ -47,7 +47,7 @@ python -m src.main
 ## Key Config (Current)
 
 - `TRANSCRIPTION_BACKEND=local`
-- `WHISPER_MODEL_SIZE=medium`
+- `WHISPER_MODEL_SIZE=large-v3`
 - `WHISPER_DEVICE=cuda`
 - `WHISPER_COMPUTE_TYPE=float16`
 - `SUMMARIZATION_BACKEND=ollama`
