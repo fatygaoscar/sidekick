@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from src.core.datetime_utils import localize_datetime, timezone_label, to_utc_iso
 from src.audio.storage import (
     clear_session_chunk_upload_state,
     extension_from_content_type,
@@ -35,11 +36,29 @@ def _sanitize_title_for_filename(title: str) -> str:
     return sanitized or "Untitled Recording"
 
 
-def _build_formatted_title(started_at: datetime, title: str | None) -> str:
+def _build_formatted_title(
+    started_at: datetime,
+    title: str | None,
+    timezone_name: str | None = None,
+    timezone_offset_minutes: int | None = None,
+) -> str:
     """Build the canonical recording title shown in history."""
-    timestamp = started_at.strftime("%Y-%m-%d-%H%M")
+    local_started_at = localize_datetime(started_at, timezone_name, timezone_offset_minutes)
+    timestamp = local_started_at.strftime("%Y-%m-%d-%H%M")
     base_title = (title or "Untitled Recording").strip() or "Untitled Recording"
     return f"{timestamp} - {base_title}"
+
+
+def _build_recorded_labels(
+    started_at: datetime,
+    timezone_name: str | None,
+    timezone_offset_minutes: int | None,
+) -> tuple[str, str, str]:
+    local_started_at = localize_datetime(started_at, timezone_name, timezone_offset_minutes)
+    date_label = local_started_at.strftime("%b %d, %Y")
+    time_label = local_started_at.strftime("%I:%M %p").lstrip("0")
+    tz_label = timezone_label(timezone_name, timezone_offset_minutes)
+    return date_label, time_label, tz_label
 
 
 def get_session_manager(request: Request) -> SessionManager:
@@ -61,6 +80,8 @@ def get_repository(request: Request) -> Repository:
 class StartSessionRequest(BaseModel):
     mode: str = "work"
     submode: Optional[str] = None
+    timezone_name: Optional[str] = None
+    timezone_offset_minutes: Optional[int] = None
 
 
 class StartMeetingRequest(BaseModel):
@@ -90,6 +111,8 @@ class SessionResponse(BaseModel):
     id: str
     mode: str
     submode: Optional[str]
+    timezone_name: Optional[str]
+    timezone_offset_minutes: Optional[int]
     is_active: bool
     started_at: str
     ended_at: Optional[str]
@@ -146,14 +169,18 @@ async def start_session(
     session = await session_manager.start_session(
         mode=request.mode,
         submode=request.submode,
+        timezone_name=request.timezone_name,
+        timezone_offset_minutes=request.timezone_offset_minutes,
     )
     return SessionResponse(
         id=session.id,
         mode=session.mode,
         submode=session.submode,
+        timezone_name=session.timezone_name,
+        timezone_offset_minutes=session.timezone_offset_minutes,
         is_active=session.is_active,
-        started_at=session.started_at.isoformat(),
-        ended_at=session.ended_at.isoformat() if session.ended_at else None,
+        started_at=to_utc_iso(session.started_at),
+        ended_at=to_utc_iso(session.ended_at),
     )
 
 
@@ -169,9 +196,11 @@ async def get_current_session(
         id=session.id,
         mode=session.mode,
         submode=session.submode,
+        timezone_name=session.timezone_name,
+        timezone_offset_minutes=session.timezone_offset_minutes,
         is_active=session.is_active,
-        started_at=session.started_at.isoformat(),
-        ended_at=session.ended_at.isoformat() if session.ended_at else None,
+        started_at=to_utc_iso(session.started_at),
+        ended_at=to_utc_iso(session.ended_at),
     )
 
 
@@ -208,8 +237,8 @@ async def start_meeting(
         session_id=meeting.session_id,
         title=meeting.title,
         is_active=meeting.is_active,
-        key_start=meeting.key_start.isoformat(),
-        key_stop=meeting.key_stop.isoformat() if meeting.key_stop else None,
+        key_start=to_utc_iso(meeting.key_start),
+        key_stop=to_utc_iso(meeting.key_stop),
     )
 
 
@@ -242,8 +271,8 @@ async def end_or_update_meeting(
         session_id=meeting.session_id,
         title=meeting.title,
         is_active=meeting.is_active,
-        key_start=meeting.key_start.isoformat(),
-        key_stop=meeting.key_stop.isoformat() if meeting.key_stop else None,
+        key_start=to_utc_iso(meeting.key_start),
+        key_stop=to_utc_iso(meeting.key_stop),
     )
 
 
@@ -261,8 +290,8 @@ async def get_current_meeting(
         session_id=meeting.session_id,
         title=meeting.title,
         is_active=meeting.is_active,
-        key_start=meeting.key_start.isoformat(),
-        key_stop=meeting.key_stop.isoformat() if meeting.key_stop else None,
+        key_start=to_utc_iso(meeting.key_start),
+        key_stop=to_utc_iso(meeting.key_stop),
     )
 
 
@@ -288,7 +317,7 @@ async def mark_important(
         id=marker.id,
         session_id=marker.session_id,
         meeting_id=marker.meeting_id,
-        marked_at=marker.marked_at.isoformat(),
+        marked_at=to_utc_iso(marker.marked_at),
         duration_seconds=marker.duration_seconds,
         note=marker.note,
     )
@@ -326,7 +355,7 @@ async def summarize_meeting(
         content=summary.content,
         backend=summary.backend,
         model=summary.model,
-        created_at=summary.created_at.isoformat(),
+        created_at=to_utc_iso(summary.created_at),
         prompt_tokens=summary.prompt_tokens,
         completion_tokens=summary.completion_tokens,
     )
@@ -362,7 +391,7 @@ async def get_meeting_summaries(
                 content=s.content,
                 backend=s.backend,
                 model=s.model,
-                created_at=s.created_at.isoformat(),
+                created_at=to_utc_iso(s.created_at),
                 prompt_tokens=s.prompt_tokens,
                 completion_tokens=s.completion_tokens,
             )
@@ -376,6 +405,11 @@ class RecordingResponse(BaseModel):
     id: str
     title: Optional[str]
     formatted_title: str
+    timezone_name: Optional[str]
+    timezone_offset_minutes: Optional[int]
+    recorded_date_label: str
+    recorded_time_label: str
+    recorded_timezone_label: str
     started_at: str
     ended_at: Optional[str]
     duration_seconds: int
@@ -396,8 +430,23 @@ async def list_recordings(
     """List past recording sessions."""
     sessions = await repository.get_sessions_list(limit=limit, offset=offset)
     for recording in sessions:
-        started_at = datetime.fromisoformat(recording["started_at"])
-        recording["formatted_title"] = _build_formatted_title(started_at, recording.get("title"))
+        started_at = datetime.fromisoformat(recording["started_at"].replace("Z", "+00:00"))
+        timezone_name = recording.get("timezone_name")
+        timezone_offset_minutes = recording.get("timezone_offset_minutes")
+        recording["formatted_title"] = _build_formatted_title(
+            started_at,
+            recording.get("title"),
+            timezone_name=timezone_name,
+            timezone_offset_minutes=timezone_offset_minutes,
+        )
+        date_label, time_label, tz_label = _build_recorded_labels(
+            started_at,
+            timezone_name=timezone_name,
+            timezone_offset_minutes=timezone_offset_minutes,
+        )
+        recording["recorded_date_label"] = date_label
+        recording["recorded_time_label"] = time_label
+        recording["recorded_timezone_label"] = tz_label
         recording["has_audio"] = get_session_audio_path(recording["id"]) is not None
     return sessions
 
@@ -467,12 +516,28 @@ async def get_recording(
 
     audio_path = get_session_audio_path(session.id)
 
+    date_label, time_label, tz_label = _build_recorded_labels(
+        session.started_at,
+        session.timezone_name,
+        session.timezone_offset_minutes,
+    )
+
     return {
         "id": session.id,
         "title": title,
-        "formatted_title": _build_formatted_title(session.started_at, title),
-        "started_at": session.started_at.isoformat(),
-        "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+        "formatted_title": _build_formatted_title(
+            session.started_at,
+            title,
+            timezone_name=session.timezone_name,
+            timezone_offset_minutes=session.timezone_offset_minutes,
+        ),
+        "timezone_name": session.timezone_name,
+        "timezone_offset_minutes": session.timezone_offset_minutes,
+        "recorded_date_label": date_label,
+        "recorded_time_label": time_label,
+        "recorded_timezone_label": tz_label,
+        "started_at": to_utc_iso(session.started_at),
+        "ended_at": to_utc_iso(session.ended_at),
         "duration_seconds": duration_seconds,
         "segment_count": len(segments),
         "has_audio": audio_path is not None,
@@ -485,8 +550,8 @@ async def get_recording(
             {
                 "id": m.id,
                 "title": m.title,
-                "key_start": m.key_start.isoformat(),
-                "key_stop": m.key_stop.isoformat() if m.key_stop else None,
+                "key_start": to_utc_iso(m.key_start),
+                "key_stop": to_utc_iso(m.key_stop),
             }
             for m in meetings
         ],
@@ -665,7 +730,12 @@ async def get_recording_audio(
             title = meeting.title
             break
 
-    stem = _build_formatted_title(session.started_at, title)
+    stem = _build_formatted_title(
+        session.started_at,
+        title,
+        timezone_name=session.timezone_name,
+        timezone_offset_minutes=session.timezone_offset_minutes,
+    )
     safe_name = _sanitize_title_for_filename(stem)
     filename = f"{safe_name}{audio_path.suffix.lower()}"
     media_type = media_type_for_path(audio_path)

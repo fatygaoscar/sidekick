@@ -6,7 +6,7 @@ import asyncio
 import re
 import urllib.parse
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from config.settings import get_settings
 from src.audio.storage import get_session_audio_path
+from src.core.datetime_utils import localize_datetime, timezone_label, to_utc_iso
 from src.sessions.repository import Repository
 from src.summarization.manager import SummarizationManager
 from src.summarization.prompts import TEMPLATE_INFO, get_template_content
@@ -105,7 +106,7 @@ async def get_template(template_key: str):
 
 
 def _utc_now_iso() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return to_utc_iso(datetime.now(timezone.utc)) or ""
 
 
 def _compute_overall_progress(stage: str, transcription_progress: float, summarization_progress: float) -> float:
@@ -351,17 +352,29 @@ async def _run_export_pipeline(
     duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     # Build filename: YYYY-MM-DD-HHMM - [title] [Template].md
-    timestamp = session.started_at.strftime("%Y-%m-%d-%H%M")
+    local_started_at = localize_datetime(
+        session.started_at,
+        session.timezone_name,
+        session.timezone_offset_minutes,
+    )
+    local_exported_at = localize_datetime(
+        datetime.now(timezone.utc),
+        session.timezone_name,
+        session.timezone_offset_minutes,
+    )
+    tz_label = timezone_label(session.timezone_name, session.timezone_offset_minutes)
+
+    timestamp = local_started_at.strftime("%Y-%m-%d-%H%M")
     template_label = TEMPLATE_INFO.get(template, {}).get("name", template.title())
     safe_title = re.sub(r'[<>:"/\\|?*]', '', request_payload.title)  # Remove invalid filename chars
     filename = f"{timestamp} - {safe_title} [{template_label}].md"
 
     # Build markdown content
-    recorded_at = session.started_at.strftime("%Y-%m-%d %H:%M")
-    exported_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    recorded_at = local_started_at.strftime("%Y-%m-%d %H:%M")
+    exported_at = local_exported_at.strftime("%Y-%m-%d %H:%M")
     markdown_content = f"""**Template**: {template_label}
-**Recorded**: {recorded_at}
-**Exported**: {exported_at}
+**Recorded**: {recorded_at} ({tz_label})
+**Exported**: {exported_at} ({tz_label})
 **Duration**: {duration_str}
 
 ---

@@ -37,13 +37,24 @@ class SessionManager:
             return 0.0
         return (datetime.utcnow() - self._session_start_time).total_seconds()
 
-    async def start_session(self, mode: str = "work", submode: str | None = None) -> Session:
+    async def start_session(
+        self,
+        mode: str = "work",
+        submode: str | None = None,
+        timezone_name: str | None = None,
+        timezone_offset_minutes: int | None = None,
+    ) -> Session:
         """Start a new session."""
         # End any existing active session
         if self._current_session:
             await self.end_session()
 
-        self._current_session = await self._repo.create_session(mode=mode, submode=submode)
+        self._current_session = await self._repo.create_session(
+            mode=mode,
+            submode=submode,
+            timezone_name=timezone_name,
+            timezone_offset_minutes=timezone_offset_minutes,
+        )
         self._session_start_time = self._current_session.started_at
 
         await self._event_bus.emit(

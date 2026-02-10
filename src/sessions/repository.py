@@ -3,11 +3,12 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
 
 from .models import Base, ImportantMarker, Meeting, Session, Summary, TranscriptSegment
+from src.core.datetime_utils import to_utc_iso
 
 
 class Repository:
@@ -23,16 +24,28 @@ class Repository:
         """Initialize database and create tables."""
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await self._ensure_session_timezone_columns(conn)
 
     async def close(self) -> None:
         """Close database connection."""
         await self._engine.dispose()
 
     # Session operations
-    async def create_session(self, mode: str = "work", submode: str | None = None) -> Session:
+    async def create_session(
+        self,
+        mode: str = "work",
+        submode: str | None = None,
+        timezone_name: str | None = None,
+        timezone_offset_minutes: int | None = None,
+    ) -> Session:
         """Create a new session."""
         async with self._session_factory() as db:
-            session = Session(mode=mode, submode=submode)
+            session = Session(
+                mode=mode,
+                submode=submode,
+                timezone_name=timezone_name,
+                timezone_offset_minutes=timezone_offset_minutes,
+            )
             db.add(session)
             await db.commit()
             await db.refresh(session)
@@ -360,11 +373,24 @@ class Repository:
                 recordings.append({
                     "id": session.id,
                     "title": title,
-                    "started_at": session.started_at.isoformat(),
-                    "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+                    "timezone_name": session.timezone_name,
+                    "timezone_offset_minutes": session.timezone_offset_minutes,
+                    "started_at": to_utc_iso(session.started_at),
+                    "ended_at": to_utc_iso(session.ended_at),
                     "duration_seconds": duration_seconds,
                     "segment_count": len(segments),
                     "has_summary": has_summary,
                 })
 
             return recordings
+
+    async def _ensure_session_timezone_columns(self, conn) -> None:
+        """Backfill schema for timezone metadata on existing SQLite DBs."""
+        result = await conn.execute(text("PRAGMA table_info(sessions)"))
+        column_names = {row[1] for row in result.fetchall()}
+
+        if "timezone_name" not in column_names:
+            await conn.execute(text("ALTER TABLE sessions ADD COLUMN timezone_name VARCHAR(128)"))
+
+        if "timezone_offset_minutes" not in column_names:
+            await conn.execute(text("ALTER TABLE sessions ADD COLUMN timezone_offset_minutes INTEGER"))

@@ -23,6 +23,8 @@ class Session(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     mode: Mapped[str] = mapped_column(String(50), nullable=False, default="work")
     submode: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    timezone_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    timezone_offset_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

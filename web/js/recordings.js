@@ -195,22 +195,23 @@ class RecordingsPage {
     }
 
     _renderCard(rec) {
-        const date = new Date(rec.started_at);
-        const dateStr = date.toLocaleDateString('en-US', {
+        const fallbackDate = new Date(rec.started_at);
+        const dateStr = rec.recorded_date_label || fallbackDate.toLocaleDateString('en-US', {
             year: 'numeric',
             month: 'short',
             day: 'numeric',
         });
-        const timeStr = date.toLocaleTimeString('en-US', {
+        const timeStr = rec.recorded_time_label || fallbackDate.toLocaleTimeString('en-US', {
             hour: '2-digit',
             minute: '2-digit',
         });
+        const tzStr = rec.recorded_timezone_label ? ` ${rec.recorded_timezone_label}` : '';
 
         const duration = this._formatDuration(rec.duration_seconds);
         const title = rec.formatted_title || rec.title || 'Untitled Recording';
         return `
             <div class="recording-card">
-                <div class="recording-date">${dateStr} ${timeStr}</div>
+                <div class="recording-date">${dateStr} ${timeStr}${tzStr}</div>
                 <div class="recording-title">${this._escapeHtml(title)}</div>
                 <div class="recording-meta">
                     <span>Duration: ${duration}</span>
@@ -263,11 +264,17 @@ class RecordingsPage {
 
     _showViewModal() {
         const rec = this.currentRecording;
-        const date = new Date(rec.started_at);
+        const fallbackDate = new Date(rec.started_at);
+        const dateLabel = rec.recorded_date_label || fallbackDate.toLocaleDateString();
+        const timeLabel = rec.recorded_time_label || fallbackDate.toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+        });
+        const tzLabel = rec.recorded_timezone_label ? ` (${rec.recorded_timezone_label})` : '';
 
         this.elements.viewTitle.textContent = rec.formatted_title || rec.title || 'Recording';
         this.elements.viewMeta.innerHTML = `
-            <span>Date: ${date.toLocaleDateString()}</span>
+            <span>Date: ${dateLabel} ${timeLabel}${tzLabel}</span>
             <span>Duration: ${this._formatDuration(rec.duration_seconds)}</span>
             <span>Segments: ${rec.segment_count}</span>
         `;
@@ -276,11 +283,15 @@ class RecordingsPage {
             this.elements.viewAudioGroup.classList.remove('hidden');
             this.elements.viewAudioPlayer.src = rec.audio_url;
             this.elements.viewAudioDownload.href = rec.audio_download_url || `${rec.audio_url}?download=true`;
+            this.elements.viewAudioDownload.classList.remove('hidden');
+            this.elements.viewAudioDownload.setAttribute('aria-disabled', 'false');
         } else {
             this.elements.viewAudioGroup.classList.add('hidden');
             this.elements.viewAudioPlayer.removeAttribute('src');
             this.elements.viewAudioPlayer.load();
             this.elements.viewAudioDownload.removeAttribute('href');
+            this.elements.viewAudioDownload.classList.add('hidden');
+            this.elements.viewAudioDownload.setAttribute('aria-disabled', 'true');
         }
 
         // Render transcript

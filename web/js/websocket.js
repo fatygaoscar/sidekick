@@ -140,7 +140,18 @@ class SidekickWebSocket {
     }
 
     startSession() {
-        this.sendCommand('start_session', { mode: 'work' });
+        let timezoneName = null;
+        try {
+            timezoneName = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+        } catch (_error) {
+            timezoneName = null;
+        }
+
+        this.sendCommand('start_session', {
+            mode: 'work',
+            timezone_name: timezoneName,
+            timezone_offset_minutes: new Date().getTimezoneOffset(),
+        });
     }
 
     endSession() {
