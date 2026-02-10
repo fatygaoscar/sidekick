@@ -216,9 +216,22 @@ async def _run_export_pipeline(
 
     # Export transcription pipeline is source of truth:
     # transcribe full recording audio, then replace transcript segments for session.
-    await _emit_progress(progress_callback, "transcribing", "Transcribing audio", 0.08, 0.0)
+    await _emit_progress(progress_callback, "transcribing", "Starting transcription", 0.05, 0.0)
+
+    # Create a callback for real-time transcription progress
+    # This is called from a thread pool, so it must be synchronous
+    def on_transcription_progress(progress: float, message: str) -> None:
+        if progress_callback:
+            # Transcription progress maps to 0.05-0.95 of the transcription phase
+            adjusted_progress = 0.05 + (progress * 0.90)
+            # Call the progress callback directly (it's synchronous in _run_export_job)
+            progress_callback("transcribing", message, adjusted_progress, 0.0)
+
     try:
-        transcription_result, audio_duration_seconds = await transcription_manager.transcribe_file(audio_path)
+        transcription_result, audio_duration_seconds = await transcription_manager.transcribe_file(
+            audio_path,
+            progress_callback=on_transcription_progress,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to transcribe recording audio: {str(e)}")
 
@@ -345,8 +358,10 @@ async def _run_export_pipeline(
 
     # Build markdown content
     recorded_at = session.started_at.strftime("%Y-%m-%d %H:%M")
+    exported_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     markdown_content = f"""**Template**: {template_label}
 **Recorded**: {recorded_at}
+**Exported**: {exported_at}
 **Duration**: {duration_str}
 
 ---

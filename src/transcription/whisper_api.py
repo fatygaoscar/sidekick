@@ -1,7 +1,7 @@
 """Cloud transcription using OpenAI Whisper API."""
 
 import io
-from typing import Any
+from typing import Any, Callable, Optional
 
 import numpy as np
 from scipy.io import wavfile
@@ -9,6 +9,8 @@ from scipy.io import wavfile
 from config.settings import get_settings
 
 from .base import TranscriptionEngine, TranscriptionResult
+
+ProgressCallback = Callable[[float, str], None]
 
 
 class WhisperAPIEngine(TranscriptionEngine):
@@ -56,10 +58,16 @@ class WhisperAPIEngine(TranscriptionEngine):
         audio: np.ndarray,
         sample_rate: int = 16000,
         language: str | None = None,
+        progress_callback: Optional[ProgressCallback] = None,
+        audio_duration: Optional[float] = None,
     ) -> TranscriptionResult:
         """Transcribe audio using OpenAI Whisper API."""
         if not self._initialized:
             await self.initialize()
+
+        # API doesn't support incremental progress, just report start/end
+        if progress_callback:
+            progress_callback(0.1, "Uploading to OpenAI")
 
         # Convert numpy array to WAV bytes
         audio_bytes = self._array_to_wav_bytes(audio, sample_rate)
@@ -95,6 +103,9 @@ class WhisperAPIEngine(TranscriptionEngine):
             if words:
                 start_time = words[0]["start"]
                 end_time = words[-1]["end"]
+
+        if progress_callback:
+            progress_callback(1.0, "Transcription complete")
 
         return TranscriptionResult(
             text=text,

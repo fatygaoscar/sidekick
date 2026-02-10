@@ -1,30 +1,32 @@
 # Sidekick - Personal Audio Transcription Assistant
 
-A Python-based web application that provides real-time audio transcription with mode-based behavior, meeting controls, and AI-powered summarization.
+A Python-based web application for recording, transcribing, and summarizing meetings with AI-powered templates and real-time progress tracking.
 
 ## Features
 
-- **Real-time audio transcription** from microphone via browser
-- **Mode system** - Work mode with Meeting sub-mode
-- **Meeting controls** - Key Start/Key Stop buttons to delineate meeting time
-- **Important marker** - Button to flag discussions for emphasis in summaries
-- **AI summarization** - Configurable backends (local Ollama or cloud APIs)
+- **Browser-based recording** with real-time audio visualization
+- **Local transcription** using faster-whisper (large-v3 model, CUDA accelerated)
+- **Smart templates** for different meeting types (1-on-1, standup, strategic review, working session, etc.)
+- **Editable prompts** - customize any template before export
+- **Real-time progress** - watch transcription progress as segments complete
+- **Obsidian integration** - exports directly to your vault with proper formatting
+- **Mobile-friendly** - works on phone via ngrok tunnel
 
 ## Tech Stack
 
 - **Backend**: Python + FastAPI (async WebSocket support)
-- **Frontend**: HTML/CSS/JS (vanilla JS with WebSocket)
-- **Transcription**: faster-whisper (local default) / OpenAI Whisper API (cloud option)
+- **Frontend**: Vanilla HTML/CSS/JS
+- **Transcription**: faster-whisper (local GPU) / OpenAI Whisper API (cloud option)
 - **Summarization**: Ollama (local) / OpenAI / Claude (configurable)
 - **Database**: SQLite with SQLAlchemy async
 
 ## Quick Start
 
 ```bash
-# Start managed background server (creates venv and installs deps if needed)
+# Start managed background server
 ./start.sh
 
-# Start with ngrok public URL for phone testing
+# Start with ngrok public URL for phone access
 ./start.sh --ngrok
 
 # Check status
@@ -36,46 +38,67 @@ A Python-based web application that provides real-time audio transcription with 
 
 Then open http://localhost:8000 in your browser.
 
-Manual run is still available:
-
-```bash
-source venv/bin/activate
-python -m src.main
-```
-
-Managed ngrok artifacts:
-- `data/ngrok.pid`
-- `data/ngrok.log`
-- `data/ngrok.url`
-
 ## Configuration
 
-See `.env.example` for all available configuration options including:
-- Transcription backend (local faster-whisper or OpenAI API)
-- Summarization backend (Ollama, OpenAI, or Anthropic)
-- Audio settings
-- API keys
+Copy `.env.example` to `.env` and configure:
+
+```bash
+# Transcription
+TRANSCRIPTION_BACKEND=local
+WHISPER_MODEL_SIZE=large-v3
+WHISPER_DEVICE=cuda
+
+# Summarization
+SUMMARIZATION_BACKEND=ollama
+OLLAMA_MODEL=qwen2.5:14b
+
+# Export location
+OBSIDIAN_VAULT_PATH=/path/to/your/vault
+```
 
 ## Usage
 
-1. Start the application
-2. Click "Start Session" to begin recording
-3. Use "Key Start" to mark the beginning of a meeting
-4. Press "Mark Important" to flag key moments
-5. Use "Key Stop" to end the meeting
-6. Click "Generate Summary" to create an AI-powered summary
+1. **Record** - Click the record button to start capturing audio
+2. **Stop** - Click again to stop recording
+3. **Select Template** - Choose from:
+   - 1-on-1, Standup, Strategic Review, Working Session
+   - General Meeting, Brainstorm, Interview, Lecture
+   - Custom (write your own prompt)
+4. **Edit Prompt** (optional) - Click "Show" to view and customize the template
+5. **Process** - Watch real-time progress as your recording is transcribed and summarized
+6. **Open in Obsidian** - Click to jump directly to your new note
 
-## Transcription Pipelines
+## Templates
 
-Sidekick now has two explicit transcription pipelines:
+| Template | Best For |
+|----------|----------|
+| **1-on-1** | Manager/report meetings - feedback, goals, development |
+| **Standup** | Daily status updates - brief, blockers-focused |
+| **Strategic Review** | Leadership meetings - reports, decisions, timelines |
+| **Working Session** | Technical work - high detail, decision tracking, open questions |
+| **General Meeting** | Standard meetings with action items |
+| **Brainstorm** | Idea generation sessions |
+| **Interview** | Q&A format with assessment |
+| **Lecture** | Learning sessions with key concepts |
 
-- **Live Preview pipeline (optional)**:
-  `microphone stream -> websocket chunks -> live preview text`
-  - Controlled by `LIVE_TRANSCRIPTION_PREVIEW` (`true` by default).
-  - Used only for UX feedback while recording.
-  - Not used as export source of truth.
+## Architecture
 
-- **Export pipeline (authoritative)**:
-  `saved recording audio -> full transcription -> transcript segments -> summary -> markdown export`
-  - Runs when you click Process/Export.
-  - Rebuilds transcript segments from saved audio for deterministic exports.
+Two transcription pipelines:
+
+1. **Live Preview** (optional): Real-time transcription preview while recording
+2. **Export Pipeline** (authoritative): Full transcription from saved audio at export time
+
+This ensures consistent, high-quality exports regardless of network conditions during recording.
+
+## Requirements
+
+- Python 3.10+
+- CUDA-capable GPU (for local transcription)
+- Ollama running locally (for local summarization)
+- ngrok account (optional, for phone access)
+
+## Data Storage
+
+- Database: `data/sidekick.db`
+- Audio files: `data/audio/`
+- Logs: `data/sidekick.log`

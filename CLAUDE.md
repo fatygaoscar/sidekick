@@ -21,8 +21,8 @@ python -m src.main
 
 1. Record audio in browser
 2. Stop recording
-3. Enter title + template
-4. Process/export to Obsidian markdown
+3. Select template (with optional prompt editing)
+4. Process/export to Obsidian markdown with real-time progress
 
 ## Architecture: Two Transcription Pipelines
 
@@ -41,8 +41,27 @@ python -m src.main
 
 - Implemented in `src/api/routes/export.py`
 - Uses saved session audio from `data/audio/`
+- Async job-based with real-time progress tracking
 - Rebuilds transcript segments at export time
 - Deterministic export behavior, independent of live preview timing
+
+## Summary Templates
+
+Templates are defined in `src/summarization/prompts.py`:
+
+| Template | Description |
+|----------|-------------|
+| **1-on-1** | Personal meetings - feedback, goals, development |
+| **Standup** | Brief status updates - done, doing, blocked |
+| **Strategic Review** | Leadership meetings - reports, feedback, decisions, timelines (default) |
+| **Working Session** | Technical work - high detail, decisions, open questions needing consensus |
+| **General Meeting** | Standard meeting notes |
+| **Brainstorm** | Ideas, themes, promising directions |
+| **Interview** | Q&A format with assessment |
+| **Lecture** | Study notes with key concepts |
+| **Custom** | User-provided prompt |
+
+Templates are editable in the UI before export (click "Show" to view/edit prompt).
 
 ## Key Config (Current)
 
@@ -57,8 +76,8 @@ python -m src.main
 ## Output Format (Current)
 
 - Filename: `YYYY-MM-DD-HHMM - [Title] [Template].md`
-- Markdown body has **no top H1 title**
-- Includes metadata, summary, and transcript details block
+- Markdown metadata: Template, Recorded date, Exported date, Duration
+- Includes summary and collapsible transcript
 
 ## Data Locations
 
@@ -71,14 +90,30 @@ python -m src.main
 
 - `GET /` main UI
 - `GET /recordings` history UI
+- `GET /api/templates` list templates with prompts
 - `GET /api/recordings` list recordings
 - `GET /api/recordings/{id}` recording details
 - `PUT /api/recordings/{id}/audio` upload encoded audio
+- `PUT /api/recordings/{id}/audio/chunks/{index}` chunked upload
+- `POST /api/recordings/{id}/audio/finalize` finalize chunked upload
 - `GET /api/recordings/{id}/audio` stream/download audio
-- `POST /api/recordings/{id}/export-obsidian` authoritative transcribe+summarize+export
+- `POST /api/recordings/{id}/export-obsidian` sync export (legacy)
+- `POST /api/recordings/{id}/export-obsidian-job` async export with progress
+- `GET /api/export-jobs/{job_id}` poll export job status
 - `WS /ws/audio` live stream + optional live preview transcript
+
+## Recent Changes
+
+- Timer uses wall clock (no drift when tab inactive)
+- WebSocket keepalive ping every 25s prevents disconnects
+- Chunked audio upload during recording for reliability
+- Real-time transcription progress (segment-based)
+- Animated progress bar for summarization
+- Export date added to markdown output
+- Editable template prompts in UI
 
 ## Notes
 
 - Obsidian Sync is near-real-time, not truly instant.
 - If `start.sh` reports port in use, `./stop.sh` can stop managed or detected unmanaged Sidekick process.
+- First startup with large-v3 model may be slow (downloading ~3GB model).

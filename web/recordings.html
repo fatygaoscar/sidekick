@@ -70,18 +70,20 @@
 
                 <div class="form-group">
                     <label class="form-label">Template</label>
-                    <div class="template-grid">
-                        <button type="button" class="template-btn selected" data-template="meeting">Meeting</button>
-                        <button type="button" class="template-btn" data-template="brainstorm">Brainstorm</button>
-                        <button type="button" class="template-btn" data-template="interview">Interview</button>
-                        <button type="button" class="template-btn" data-template="lecture">Lecture</button>
-                        <button type="button" class="template-btn full-width" data-template="custom">Custom</button>
+                    <div id="resummarize-template-grid" class="template-grid">
+                        <!-- Templates loaded dynamically -->
                     </div>
                 </div>
 
-                <div class="form-group hidden" id="resummarize-custom-group">
-                    <label class="form-label">Custom Prompt</label>
-                    <textarea id="resummarize-custom-prompt" class="form-input" placeholder="Describe how you want the recording summarized..."></textarea>
+                <div class="form-group" id="resummarize-prompt-group">
+                    <div class="prompt-header">
+                        <label class="form-label">Prompt</label>
+                        <button type="button" class="btn-toggle" id="resummarize-toggle-prompt">Show</button>
+                    </div>
+                    <div id="resummarize-prompt-container" class="hidden">
+                        <textarea id="resummarize-custom-prompt" class="form-input form-textarea" placeholder="Template prompt will appear here..."></textarea>
+                        <div class="prompt-hint">Edit to customize for this recording</div>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer">
@@ -112,8 +114,34 @@
 
     <!-- Processing Overlay -->
     <div id="processing-overlay" class="processing-overlay hidden">
-        <div class="processing-spinner"></div>
-        <div class="processing-text">Processing...</div>
+        <div class="processing-panel">
+            <div class="processing-panel-header">
+                <div class="processing-title">EXPORT PIPELINE</div>
+                <div id="processing-overall" class="processing-overall">0%</div>
+            </div>
+            <div id="processing-stage" class="processing-stage">Queued</div>
+            <div class="processing-grid">
+                <div class="processing-row">
+                    <div class="processing-label-wrap">
+                        <span class="processing-label">TRANSCRIPTION</span>
+                        <span id="processing-transcription-text" class="processing-percent">0%</span>
+                    </div>
+                    <div class="processing-bar">
+                        <div id="processing-transcription-fill" class="processing-bar-fill"></div>
+                    </div>
+                </div>
+                <div class="processing-row">
+                    <div class="processing-label-wrap">
+                        <span class="processing-label">SUMMARIZATION</span>
+                        <span id="processing-summarization-text" class="processing-percent">0%</span>
+                    </div>
+                    <div class="processing-bar">
+                        <div id="processing-summarization-fill" class="processing-bar-fill"></div>
+                    </div>
+                </div>
+            </div>
+            <div id="processing-text" class="processing-text">Preparing export...</div>
+        </div>
     </div>
 
     <script src="/static/js/recordings.js"></script>

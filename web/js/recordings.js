@@ -6,8 +6,11 @@ class RecordingsPage {
     constructor() {
         this.recordings = [];
         this.currentRecording = null;
-        this.selectedTemplate = 'meeting';
+        this.selectedTemplate = 'strategic_review';
+        this.promptEdited = false;
+        this.promptVisible = false;
         this.obsidianUri = null;
+        this.templates = {};
 
         this.elements = {
             recordingsList: document.getElementById('recordings-list'),
@@ -31,8 +34,9 @@ class RecordingsPage {
             resummarizeCancel: document.getElementById('resummarize-cancel'),
             resummarizeSubmit: document.getElementById('resummarize-submit'),
             resummarizeTitle: document.getElementById('resummarize-title'),
-            templateBtns: document.querySelectorAll('.template-btn'),
-            resummarizeCustomGroup: document.getElementById('resummarize-custom-group'),
+            templateGrid: document.getElementById('resummarize-template-grid'),
+            togglePrompt: document.getElementById('resummarize-toggle-prompt'),
+            promptContainer: document.getElementById('resummarize-prompt-container'),
             resummarizeCustomPrompt: document.getElementById('resummarize-custom-prompt'),
 
             // Confirmation modal
@@ -45,6 +49,13 @@ class RecordingsPage {
 
             // Processing
             processingOverlay: document.getElementById('processing-overlay'),
+            processingText: document.getElementById('processing-text'),
+            processingStage: document.getElementById('processing-stage'),
+            processingOverall: document.getElementById('processing-overall'),
+            processingTranscriptionText: document.getElementById('processing-transcription-text'),
+            processingSummarizationText: document.getElementById('processing-summarization-text'),
+            processingTranscriptionFill: document.getElementById('processing-transcription-fill'),
+            processingSummarizationFill: document.getElementById('processing-summarization-fill'),
         };
 
         this._init();
@@ -52,6 +63,7 @@ class RecordingsPage {
 
     async _init() {
         this._bindEvents();
+        await this._loadTemplates();
         await this._loadRecordings();
     }
 
@@ -72,9 +84,12 @@ class RecordingsPage {
             if (e.target === this.elements.resummarizeModal) this._closeResummarizeModal();
         });
 
-        // Template buttons
-        this.elements.templateBtns.forEach(btn => {
-            btn.addEventListener('click', () => this._selectTemplate(btn.dataset.template));
+        // Toggle prompt visibility
+        this.elements.togglePrompt.addEventListener('click', () => this._togglePromptVisibility());
+
+        // Track if prompt was edited
+        this.elements.resummarizeCustomPrompt.addEventListener('input', () => {
+            this.promptEdited = true;
         });
 
         // Confirmation modal
@@ -84,6 +99,58 @@ class RecordingsPage {
         this.elements.confirmationModal.addEventListener('click', (e) => {
             if (e.target === this.elements.confirmationModal) this._closeConfirmationModal();
         });
+    }
+
+    async _loadTemplates() {
+        try {
+            const response = await fetch('/api/templates');
+            if (!response.ok) throw new Error('Failed to load templates');
+            const data = await response.json();
+            this.templates = data.templates;
+            this._renderTemplates();
+        } catch (error) {
+            console.error('Failed to load templates:', error);
+            this.templates = { meeting: { name: 'Meeting', description: 'General meeting notes', prompt: '' } };
+            this._renderTemplates();
+        }
+    }
+
+    _renderTemplates() {
+        const grid = this.elements.templateGrid;
+        grid.innerHTML = '';
+
+        const order = ['one_on_one', 'standup', 'strategic_review', 'working_session', 'meeting', 'brainstorm', 'interview', 'lecture', 'custom'];
+        const sortedKeys = order.filter(k => k in this.templates);
+
+        sortedKeys.forEach(key => {
+            const template = this.templates[key];
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'template-btn';
+            btn.dataset.template = key;
+            btn.textContent = template.name;
+            btn.title = template.description;
+
+            if (key === this.selectedTemplate) {
+                btn.classList.add('selected');
+            }
+
+            btn.addEventListener('click', () => this._selectTemplate(key));
+            grid.appendChild(btn);
+        });
+    }
+
+    _togglePromptVisibility() {
+        this.promptVisible = !this.promptVisible;
+        if (this.promptVisible) {
+            this.elements.promptContainer.classList.remove('hidden');
+            this.elements.togglePrompt.textContent = 'Hide';
+            this.elements.togglePrompt.classList.add('active');
+        } else {
+            this.elements.promptContainer.classList.add('hidden');
+            this.elements.togglePrompt.textContent = 'Show';
+            this.elements.togglePrompt.classList.remove('active');
+        }
     }
 
     async _loadRecordings() {
@@ -249,10 +316,14 @@ class RecordingsPage {
     _showResummarizeModal() {
         this._closeViewModal();
 
-        const title = this.currentRecording?.title || this.currentRecording?.meetings[0]?.title || '';
+        const title = this.currentRecording?.title || this.currentRecording?.meetings?.[0]?.title || '';
         this.elements.resummarizeTitle.value = title;
-        this.elements.resummarizeCustomPrompt.value = '';
-        this._selectTemplate('meeting');
+        this.promptEdited = false;
+        this.promptVisible = false;
+        this.elements.promptContainer.classList.add('hidden');
+        this.elements.togglePrompt.textContent = 'Show';
+        this.elements.togglePrompt.classList.remove('active');
+        this._selectTemplate('strategic_review');
 
         this.elements.resummarizeModal.classList.remove('hidden');
         this.elements.resummarizeTitle.focus();
@@ -262,18 +333,18 @@ class RecordingsPage {
         this.elements.resummarizeModal.classList.add('hidden');
     }
 
-    _selectTemplate(template) {
-        this.selectedTemplate = template;
+    _selectTemplate(templateKey) {
+        this.selectedTemplate = templateKey;
+        this.promptEdited = false;
 
-        this.elements.templateBtns.forEach(btn => {
-            btn.classList.toggle('selected', btn.dataset.template === template);
+        const buttons = this.elements.templateGrid.querySelectorAll('.template-btn');
+        buttons.forEach(btn => {
+            btn.classList.toggle('selected', btn.dataset.template === templateKey);
         });
 
-        if (template === 'custom') {
-            this.elements.resummarizeCustomGroup.classList.remove('hidden');
-            this.elements.resummarizeCustomPrompt.focus();
-        } else {
-            this.elements.resummarizeCustomGroup.classList.add('hidden');
+        const template = this.templates[templateKey];
+        if (template) {
+            this.elements.resummarizeCustomPrompt.value = template.prompt || '';
         }
     }
 
@@ -285,25 +356,32 @@ class RecordingsPage {
         }
 
         const template = this.selectedTemplate;
-        const customPrompt = template === 'custom' ? this.elements.resummarizeCustomPrompt.value.trim() : null;
+        const promptValue = this.elements.resummarizeCustomPrompt.value.trim();
+        const customPrompt = (template === 'custom' || this.promptEdited) ? promptValue : null;
 
         await this._exportRecording(this.currentRecording.id, title, template, customPrompt);
     }
 
     async _quickExport(id) {
-        // Find the recording to get its title
         const rec = this.recordings.find(r => r.id === id);
         const title = rec?.title || `Recording ${new Date(rec.started_at).toLocaleDateString()}`;
 
-        await this._exportRecording(id, title, 'meeting', null);
+        await this._exportRecording(id, title, 'strategic_review', null);
     }
 
     async _exportRecording(id, title, template, customPrompt) {
         this.elements.resummarizeModal.classList.add('hidden');
+        this._setProcessingState({
+            stage: 'queued',
+            message: 'Preparing export...',
+            transcriptionProgress: 0,
+            summarizationProgress: 0,
+            overallProgress: 0,
+        });
         this.elements.processingOverlay.classList.remove('hidden');
 
         try {
-            const response = await fetch(`/api/recordings/${id}/export-obsidian`, {
+            const createResponse = await fetch(`/api/recordings/${id}/export-obsidian-job`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -313,12 +391,13 @@ class RecordingsPage {
                 }),
             });
 
-            if (!response.ok) {
-                const error = await response.json();
+            if (!createResponse.ok) {
+                const error = await createResponse.json();
                 throw new Error(error.detail || 'Export failed');
             }
 
-            const result = await response.json();
+            const job = await createResponse.json();
+            const result = await this._waitForExportJob(job.job_id);
             this._showConfirmation(result);
 
         } catch (error) {
@@ -326,6 +405,93 @@ class RecordingsPage {
             this.elements.processingOverlay.classList.add('hidden');
             alert(`Export failed: ${error.message}`);
         }
+    }
+
+    async _waitForExportJob(jobId) {
+        const maxPollMs = 20 * 60 * 1000;
+        const startedAt = Date.now();
+
+        while (Date.now() - startedAt < maxPollMs) {
+            const response = await fetch(`/api/export-jobs/${jobId}`);
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                throw new Error(error.detail || 'Failed to read export status');
+            }
+
+            const job = await response.json();
+            this._setProcessingState({
+                stage: job.stage,
+                message: job.message,
+                transcriptionProgress: Number(job.transcription_progress || 0),
+                summarizationProgress: Number(job.summarization_progress || 0),
+                overallProgress: Number(job.overall_progress || 0),
+            });
+
+            if (job.status === 'completed') {
+                if (job.result) return job.result;
+                throw new Error('Export completed without a result payload');
+            }
+
+            if (job.status === 'failed') {
+                throw new Error(job.error || 'Export job failed');
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 900));
+        }
+
+        throw new Error('Export timed out');
+    }
+
+    _setProcessingState({ stage, message, transcriptionProgress, summarizationProgress, overallProgress }) {
+        if (!this.elements.processingOverlay) return;
+
+        const txPct = Math.max(0, Math.min(100, Math.round(transcriptionProgress * 100)));
+        const sumPct = Math.max(0, Math.min(100, Math.round(summarizationProgress * 100)));
+        const overallPct = Math.max(0, Math.min(100, Math.round(overallProgress * 100)));
+
+        if (this.elements.processingStage) {
+            this.elements.processingStage.textContent = this._formatStage(stage);
+        }
+        if (this.elements.processingText) {
+            this.elements.processingText.textContent = message || 'Processing...';
+        }
+        if (this.elements.processingOverall) {
+            this.elements.processingOverall.textContent = `${overallPct}%`;
+        }
+        if (this.elements.processingTranscriptionText) {
+            this.elements.processingTranscriptionText.textContent = `${txPct}%`;
+        }
+        if (this.elements.processingTranscriptionFill) {
+            this.elements.processingTranscriptionFill.style.width = `${txPct}%`;
+            this.elements.processingTranscriptionFill.classList.remove('indeterminate');
+        }
+        if (this.elements.processingSummarizationFill) {
+            const isSummarizing = stage === 'summarizing';
+            this.elements.processingSummarizationFill.classList.toggle('indeterminate', isSummarizing);
+            if (isSummarizing) {
+                this.elements.processingSummarizationFill.style.width = '';
+                if (this.elements.processingSummarizationText) {
+                    this.elements.processingSummarizationText.textContent = '...';
+                }
+            } else {
+                this.elements.processingSummarizationFill.style.width = `${sumPct}%`;
+                if (this.elements.processingSummarizationText) {
+                    this.elements.processingSummarizationText.textContent = `${sumPct}%`;
+                }
+            }
+        }
+    }
+
+    _formatStage(stage) {
+        const map = {
+            queued: 'Queued',
+            transcribing: 'Transcribing Audio',
+            summarizing: 'Generating Summary',
+            writing: 'Writing Note',
+            completed: 'Completed',
+            failed: 'Failed',
+        };
+        return map[stage] || 'Processing';
     }
 
     _showConfirmation(result) {

@@ -1,84 +1,87 @@
 # Sidekick Agent Handoff
 
-## Current Runtime
+Quick reference for AI agents working on this codebase.
+
+## Runtime Commands
 
 ```bash
-# Managed lifecycle
-./start.sh
-./start.sh --ngrok
-./status.sh
-./stop.sh
+./start.sh          # Start server
+./start.sh --ngrok  # Start with public URL
+./status.sh         # Check status
+./stop.sh           # Stop server
 ```
 
-Manual run is still supported:
+## Project Structure
 
-```bash
-source venv/bin/activate
-python -m src.main
+```
+src/
+├── api/routes/
+│   ├── export.py       # Async export jobs with progress
+│   ├── sessions.py     # Recording CRUD, chunked upload
+│   └── websocket.py    # Live audio streaming
+├── transcription/
+│   ├── whisper_local.py  # faster-whisper with progress callbacks
+│   └── manager.py        # Transcription orchestration
+├── summarization/
+│   ├── prompts.py        # Template definitions
+│   ├── ollama_backend.py # Local LLM
+│   └── manager.py        # Summarization orchestration
+└── audio/
+    └── storage.py        # Audio file management
+
+web/
+├── index.html          # Main recording UI
+├── recordings.html     # History/re-export UI
+├── css/styles.css      # All styles
+└── js/
+    ├── app.js          # Main app logic
+    ├── recordings.js   # History page logic
+    ├── audio.js        # AudioCapture, visualizer
+    └── websocket.js    # WebSocket client with keepalive
 ```
 
-## Product Flow
+## Key Config (.env)
 
-1. Record audio in browser
-2. Stop recording
-3. Enter title + template
-4. Process/export to Obsidian markdown
+```
+WHISPER_MODEL_SIZE=large-v3
+WHISPER_DEVICE=cuda
+SUMMARIZATION_BACKEND=ollama
+OLLAMA_MODEL=qwen2.5:14b
+OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
+```
 
-## Architecture: Two Transcription Pipelines
+## Templates (src/summarization/prompts.py)
 
-### 1) Live Preview Pipeline (optional UX)
+- `one_on_one` - 1-on-1 meetings
+- `standup` - Daily standups
+- `strategic_review` - Leadership meetings (default)
+- `working_session` - Technical work sessions
+- `meeting` - General meetings
+- `brainstorm`, `interview`, `lecture`, `custom`
 
-`microphone stream -> websocket chunks -> live preview text`
+## API Endpoints
 
-- Implemented in `src/api/routes/websocket.py`
-- Controlled by `.env` setting: `LIVE_TRANSCRIPTION_PREVIEW=true|false`
-- Used only for in-session preview on web UI
-- Not source of truth for export
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/templates` | List templates with prompts |
+| `POST /api/recordings/{id}/export-obsidian-job` | Start async export |
+| `GET /api/export-jobs/{job_id}` | Poll export progress |
+| `PUT /api/recordings/{id}/audio/chunks/{n}` | Upload audio chunk |
+| `POST /api/recordings/{id}/audio/finalize` | Finalize chunked upload |
 
-### 2) Export Pipeline (authoritative)
+## Export Progress Flow
 
-`saved audio file -> full transcription -> transcript segments -> summary -> markdown`
+1. Frontend calls `POST /export-obsidian-job` → returns `job_id`
+2. Frontend polls `GET /export-jobs/{job_id}` every 900ms
+3. Backend updates job state as transcription segments complete
+4. Transcription progress: real segment-based (0-100%)
+5. Summarization progress: animated/indeterminate (LLM timing unpredictable)
 
-- Implemented in `src/api/routes/export.py`
-- Uses saved session audio from `data/audio/`
-- Rebuilds transcript segments at export time
-- Deterministic export behavior, independent of live preview timing
+## Recent Improvements
 
-## Key Config (Current)
-
-- `TRANSCRIPTION_BACKEND=local`
-- `WHISPER_MODEL_SIZE=medium`
-- `WHISPER_DEVICE=cuda`
-- `WHISPER_COMPUTE_TYPE=float16`
-- `SUMMARIZATION_BACKEND=ollama`
-- `OLLAMA_MODEL=qwen2.5:14b`
-- `OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault`
-
-## Output Format (Current)
-
-- Filename: `YYYY-MM-DD-HHMM - [Title] [Template].md`
-- Markdown body has **no top H1 title**
-- Includes metadata, summary, and transcript details block
-
-## Data Locations
-
-- DB: `data/sidekick.db`
-- Audio: `data/audio/{session_id}.{ext}`
-- Sidekick logs/PID: `data/sidekick.log`, `data/sidekick.pid`
-- ngrok logs/PID/URL: `data/ngrok.log`, `data/ngrok.pid`, `data/ngrok.url`
-
-## Important Endpoints
-
-- `GET /` main UI
-- `GET /recordings` history UI
-- `GET /api/recordings` list recordings
-- `GET /api/recordings/{id}` recording details
-- `PUT /api/recordings/{id}/audio` upload encoded audio
-- `GET /api/recordings/{id}/audio` stream/download audio
-- `POST /api/recordings/{id}/export-obsidian` authoritative transcribe+summarize+export
-- `WS /ws/audio` live stream + optional live preview transcript
-
-## Notes
-
-- Obsidian Sync is near-real-time, not truly instant.
-- If `start.sh` reports port in use, `./stop.sh` can stop managed or detected unmanaged Sidekick process.
+- **Timer**: Uses `Date.now()` wall clock, no drift when tab inactive
+- **WebSocket**: Ping every 25s, unlimited reconnects, visibility-change reconnect
+- **Audio**: Chunked upload during recording, fallback to full blob
+- **Progress**: Real segment-based transcription progress
+- **Templates**: Editable in UI before export
+- **Export**: Includes both recorded and exported timestamps

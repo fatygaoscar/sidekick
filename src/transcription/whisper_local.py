@@ -2,13 +2,17 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, Callable, Optional
 
 import numpy as np
 
 from config.settings import get_settings
 
 from .base import TranscriptionEngine, TranscriptionResult
+
+# Progress callback type: (progress: float, message: str) -> None
+# progress is 0.0 to 1.0, message is a status string
+ProgressCallback = Callable[[float, str], None]
 
 
 class WhisperLocalEngine(TranscriptionEngine):
@@ -87,10 +91,16 @@ class WhisperLocalEngine(TranscriptionEngine):
         audio: np.ndarray,
         sample_rate: int = 16000,
         language: str | None = None,
+        progress_callback: Optional[ProgressCallback] = None,
+        audio_duration: Optional[float] = None,
     ) -> TranscriptionResult:
         """Transcribe audio using faster-whisper."""
         if not self._initialized:
             await self.initialize()
+
+        # Calculate duration if not provided
+        if audio_duration is None:
+            audio_duration = len(audio) / sample_rate
 
         # Run transcription in thread pool
         loop = asyncio.get_event_loop()
@@ -100,6 +110,8 @@ class WhisperLocalEngine(TranscriptionEngine):
             audio,
             sample_rate,
             language,
+            progress_callback,
+            audio_duration,
         )
         return result
 
@@ -108,6 +120,8 @@ class WhisperLocalEngine(TranscriptionEngine):
         audio: np.ndarray,
         sample_rate: int,
         language: str | None,
+        progress_callback: Optional[ProgressCallback] = None,
+        audio_duration: Optional[float] = None,
     ) -> TranscriptionResult:
         """Synchronous transcription (runs in thread pool)."""
         # Ensure audio is float32 and correct shape
@@ -120,11 +134,20 @@ class WhisperLocalEngine(TranscriptionEngine):
             num_samples = int(len(audio) * 16000 / sample_rate)
             audio = signal.resample(audio, num_samples)
 
+        # Calculate total duration for progress reporting
+        if audio_duration is None:
+            audio_duration = len(audio) / 16000  # Assume 16kHz after resampling
+
+        # Report initial progress
+        if progress_callback:
+            progress_callback(0.05, "Starting transcription")
+
         # Transcribe
         segments, info = self._model.transcribe(
             audio,
             language=language,
             beam_size=5,
+            word_timestamps=True,
             vad_filter=True,
             vad_parameters=dict(
                 min_silence_duration_ms=500,
@@ -132,11 +155,12 @@ class WhisperLocalEngine(TranscriptionEngine):
             ),
         )
 
-        # Collect segments
+        # Collect segments and report progress as we go
         texts = []
         words_list = []
         start_time = 0.0
         end_time = 0.0
+        last_progress_report = 0.0
 
         for segment in segments:
             texts.append(segment.text)
@@ -150,11 +174,23 @@ class WhisperLocalEngine(TranscriptionEngine):
                     }
                     for w in segment.words
                 ])
-            if not texts:
+            if len(texts) == 1:
                 start_time = segment.start
             end_time = segment.end
 
+            # Report progress based on segment end time vs total duration
+            if progress_callback and audio_duration > 0:
+                progress = min(0.95, end_time / audio_duration)
+                # Only report if progress increased by at least 2%
+                if progress - last_progress_report >= 0.02:
+                    progress_callback(progress, f"Transcribing ({int(progress * 100)}%)")
+                    last_progress_report = progress
+
         full_text = " ".join(texts).strip()
+
+        # Report completion
+        if progress_callback:
+            progress_callback(1.0, "Transcription complete")
 
         return TranscriptionResult(
             text=full_text,

@@ -721,9 +721,20 @@ class SidekickApp {
         }
         if (this.elements.processingTranscriptionFill) {
             this.elements.processingTranscriptionFill.style.width = `${txPct}%`;
+            this.elements.processingTranscriptionFill.classList.remove('indeterminate');
         }
         if (this.elements.processingSummarizationFill) {
-            this.elements.processingSummarizationFill.style.width = `${sumPct}%`;
+            // Use indeterminate animation during summarization (LLM timing is unpredictable)
+            const isSummarizing = stage === 'summarizing';
+            this.elements.processingSummarizationFill.classList.toggle('indeterminate', isSummarizing);
+            if (isSummarizing) {
+                this.elements.processingSummarizationFill.style.width = '';
+                if (this.elements.processingSummarizationText) {
+                    this.elements.processingSummarizationText.textContent = '...';
+                }
+            } else {
+                this.elements.processingSummarizationFill.style.width = `${sumPct}%`;
+            }
         }
     }
 
