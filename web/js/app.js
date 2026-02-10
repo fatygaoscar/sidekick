@@ -264,8 +264,10 @@ class SidekickApp {
     }
 
     async _stopRecording() {
-        const sessionId = this.state.sessionId;
-        this.state.lastSessionId = sessionId;
+        const sessionId = this.state.sessionId || this.state.lastSessionId;
+        if (sessionId) {
+            this.state.lastSessionId = sessionId;
+        }
         this.captureStoppedPromise = new Promise((resolve) => {
             this.resolveCaptureStopped = resolve;
         });
@@ -378,9 +380,21 @@ class SidekickApp {
         this.elements.recordingTitle.focus();
     }
 
-    _closeNamingModal() {
+    async _closeNamingModal() {
         this.elements.namingModal.classList.add('hidden');
+        await this._persistRecordingAudioInBackground();
         this._resetTimer();
+    }
+
+    async _persistRecordingAudioInBackground() {
+        const sessionId = this.state.sessionId || this.state.lastSessionId;
+        if (!sessionId) return;
+
+        try {
+            await this._ensureRecordingAudioPersisted(sessionId);
+        } catch (error) {
+            console.warn('Best-effort background audio persistence failed:', error);
+        }
     }
 
     _selectTemplate(templateKey) {

@@ -11,6 +11,8 @@ NC='\033[0m'
 PID_FILE="data/sidekick.pid"
 NGROK_PID_FILE="data/ngrok.pid"
 NGROK_URL_FILE="data/ngrok.url"
+CLOUDFLARE_PID_FILE="data/cloudflare.pid"
+CLOUDFLARE_URL_FILE="data/cloudflare.url"
 PORT="${PORT:-8000}"
 
 is_running() {
@@ -79,4 +81,12 @@ if [ -f "$NGROK_PID_FILE" ]; then
         stop_pid_graceful "$NGROK_PID" "ngrok"
     fi
     rm -f "$NGROK_PID_FILE" "$NGROK_URL_FILE"
+fi
+
+if [ -f "$CLOUDFLARE_PID_FILE" ]; then
+    CLOUDFLARE_PID="$(cat "$CLOUDFLARE_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$CLOUDFLARE_PID" ]; then
+        stop_pid_graceful "$CLOUDFLARE_PID" "cloudflare tunnel"
+    fi
+    rm -f "$CLOUDFLARE_PID_FILE" "$CLOUDFLARE_URL_FILE"
 fi

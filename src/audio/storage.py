@@ -29,6 +29,37 @@ def get_session_audio_path(session_id: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def ensure_session_audio_path(
+    session_id: str,
+    preferred_extension: str | None = None,
+) -> Path | None:
+    """Return finalized audio path, recovering from chunked partial uploads when possible."""
+    existing = get_session_audio_path(session_id)
+    if existing:
+        return existing
+
+    part_path = get_session_partial_audio_path(session_id)
+    if not part_path.exists() or part_path.stat().st_size == 0:
+        return None
+
+    meta = read_session_chunk_meta(session_id) or {}
+    extension = str(meta.get("extension") or preferred_extension or "webm").strip(". ").lower()
+    if extension not in _KNOWN_AUDIO_EXTENSIONS:
+        extension = "webm"
+
+    final_path = get_audio_dir() / f"{session_id}.{extension}"
+    try:
+        part_path.replace(final_path)
+    except Exception:
+        return None
+
+    chunk_meta_path = get_session_chunk_meta_path(session_id)
+    if chunk_meta_path.exists():
+        chunk_meta_path.unlink()
+
+    return final_path if final_path.exists() else None
+
+
 def extension_from_content_type(content_type: str) -> str:
     """Infer extension from upload content-type."""
     lowered = (content_type or "").lower()

@@ -7,6 +7,7 @@ Quick reference for AI agents working on this codebase.
 ```bash
 ./start.sh          # Start server
 ./start.sh --ngrok  # Start with public URL
+./start.sh --cloudflare  # Start with Cloudflare quick tunnel URL
 ./status.sh         # Check status
 ./stop.sh           # Stop server
 ```
@@ -105,3 +106,17 @@ UI template chooser order (shown templates only):
 - **History UX**: Removed redundant card actions (no card-level Export/Download Audio)
 - **View Pane Actions**: Audio download kept in view modal, added transcript download button, re-summarize remains primary action
 - **Export**: Includes both recorded and exported timestamps
+
+## Handoff Notes (2026-02-10)
+
+- **Audio Recovery Fix**: If user stops recording and closes naming modal without processing, audio is now still recoverable for later history re-summarize/export.
+  - Frontend `web/js/app.js` now does best-effort background audio persistence before modal close resets state.
+  - Backend `src/audio/storage.py` adds `ensure_session_audio_path()` to promote chunk partial (`.part`) into finalized session audio when possible.
+  - Recovery is used in `src/api/routes/sessions.py` (recording list/detail/audio endpoints + finalize flow) and `src/api/routes/export.py` (authoritative transcription path).
+- **Obsidian Open Reliability**:
+  - Export URI now opens exact `.md` filename (`obsidian://open?...&file=<name>.md`) instead of extensionless file path.
+  - Recording view now prefers direct `obsidian://open` to resolved exported note; falls back to `obsidian://search` only when no filename match is found.
+- **Cloudflare Tunnel Behavior**:
+  - `--cloudflare` uses quick tunnel (`*.trycloudflare.com`) and URL is ephemeral.
+  - URL generally changes after restart; keep process running for temporary stability.
+  - Stable URL requires named tunnel + owned domain (not available with quick tunnel only).

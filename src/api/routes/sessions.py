@@ -14,10 +14,10 @@ from config.settings import get_settings
 from src.core.datetime_utils import localize_datetime, timezone_label, to_utc_iso
 from src.audio.storage import (
     clear_session_chunk_upload_state,
+    ensure_session_audio_path,
     extension_from_content_type,
     get_audio_dir,
     get_session_audio_candidates,
-    get_session_chunk_meta_path,
     get_session_audio_path,
     get_session_partial_audio_path,
     media_type_for_path,
@@ -71,11 +71,28 @@ def _has_exported_note_in_vault(
     timezone_offset_minutes: int | None,
 ) -> bool:
     """Best-effort check for an exported note file for this recording."""
+    return _find_exported_note_filename(
+        vault_path=vault_path,
+        started_at=started_at,
+        title=title,
+        timezone_name=timezone_name,
+        timezone_offset_minutes=timezone_offset_minutes,
+    ) is not None
+
+
+def _find_exported_note_filename(
+    vault_path: str | None,
+    started_at: datetime,
+    title: str | None,
+    timezone_name: str | None,
+    timezone_offset_minutes: int | None,
+) -> str | None:
+    """Find the most recent exported note filename for a recording."""
     if not vault_path:
-        return False
+        return None
     try:
         if not os.path.isdir(vault_path):
-            return False
+            return None
         prefix = _build_formatted_title(
             started_at,
             title,
@@ -84,12 +101,21 @@ def _has_exported_note_in_vault(
         )
         # Export filenames use: "{prefix} [Template].md"
         file_prefix = f"{prefix} ["
-        for name in os.listdir(vault_path):
-            if name.startswith(file_prefix) and name.endswith(".md"):
-                return True
+        matches = [
+            name
+            for name in os.listdir(vault_path)
+            if name.startswith(file_prefix) and name.endswith(".md")
+        ]
+        if not matches:
+            return None
+
+        matches.sort(
+            key=lambda name: os.path.getmtime(os.path.join(vault_path, name)),
+            reverse=True,
+        )
+        return matches[0]
     except Exception:
-        return False
-    return False
+        return None
 
 
 def get_session_manager(request: Request) -> SessionManager:
@@ -485,6 +511,8 @@ async def list_recordings(
             recording["recorded_time_label"] = None
             recording["recorded_timezone_label"] = None
         recording["has_audio"] = get_session_audio_path(recording["id"]) is not None
+        if not recording["has_audio"] and recording.get("ended_at"):
+            recording["has_audio"] = ensure_session_audio_path(recording["id"]) is not None
     return sessions
 
 
@@ -553,6 +581,8 @@ async def get_recording(
                 break
 
     audio_path = get_session_audio_path(session.id)
+    if not audio_path and session.ended_at:
+        audio_path = ensure_session_audio_path(session.id)
 
     has_summary = False
     for meeting in meetings:
@@ -587,13 +617,27 @@ async def get_recording(
         timezone_name=session.timezone_name,
         timezone_offset_minutes=session.timezone_offset_minutes,
     )
+    exported_note_filename = _find_exported_note_filename(
+        settings.obsidian_vault_path,
+        session.started_at,
+        title,
+        session.timezone_name,
+        session.timezone_offset_minutes,
+    )
     open_in_obsidian_uri = None
     if has_summary and vault_name:
-        open_in_obsidian_uri = (
-            f"obsidian://search?"
-            f"vault={urllib.parse.quote(vault_name)}&"
-            f"query={urllib.parse.quote(search_query)}"
-        )
+        if exported_note_filename:
+            open_in_obsidian_uri = (
+                f"obsidian://open?"
+                f"vault={urllib.parse.quote(vault_name)}&"
+                f"file={urllib.parse.quote(exported_note_filename)}"
+            )
+        else:
+            open_in_obsidian_uri = (
+                f"obsidian://search?"
+                f"vault={urllib.parse.quote(vault_name)}&"
+                f"query={urllib.parse.quote(search_query)}"
+            )
 
     return {
         "id": session.id,
@@ -737,18 +781,17 @@ async def finalize_recording_audio(
     if not session:
         raise HTTPException(status_code=404, detail="Recording not found")
 
-    meta = read_session_chunk_meta(session_id)
-    if not meta:
-        audio_path = get_session_audio_path(session_id)
-        if audio_path:
-            return {
-                "status": "already_finalized",
-                "session_id": session_id,
-                "audio_url": f"/api/recordings/{session_id}/audio",
-            }
-        raise HTTPException(status_code=400, detail="No chunked upload state found")
+    existing_audio_path = get_session_audio_path(session_id)
+    if existing_audio_path:
+        return {
+            "status": "already_finalized",
+            "session_id": session_id,
+            "audio_url": f"/api/recordings/{session_id}/audio",
+        }
 
-    expected_chunks = int(meta.get("next_chunk_index", 0))
+    meta = read_session_chunk_meta(session_id)
+
+    expected_chunks = int(meta.get("next_chunk_index", 0)) if meta else 0
     client_chunks = request.uploaded_chunks
     if client_chunks is not None and client_chunks > expected_chunks:
         raise HTTPException(
@@ -756,29 +799,19 @@ async def finalize_recording_audio(
             detail=f"Missing uploaded chunks (server={expected_chunks}, client={client_chunks})",
         )
 
-    part_path = get_session_partial_audio_path(session_id)
-    if not part_path.exists() or part_path.stat().st_size == 0:
-        raise HTTPException(status_code=400, detail="Chunked audio file is empty")
-
-    for existing in get_session_audio_candidates(session_id):
-        existing.unlink()
-
-    extension = str(
-        meta.get("extension")
-        or extension_from_content_type(request.mime_type or "")
-        or "webm"
+    extension = (
+        str(meta.get("extension") or "").strip()
+        if meta
+        else extension_from_content_type(request.mime_type or "")
     )
-    final_path = get_audio_dir() / f"{session_id}.{extension}"
-    part_path.replace(final_path)
-
-    chunk_meta_path = get_session_chunk_meta_path(session_id)
-    if chunk_meta_path.exists():
-        chunk_meta_path.unlink()
+    final_path = ensure_session_audio_path(session_id, preferred_extension=extension)
+    if not final_path:
+        raise HTTPException(status_code=400, detail="No chunked audio available to finalize")
 
     return {
         "status": "finalized",
         "session_id": session_id,
-        "chunks": expected_chunks,
+        "chunks": expected_chunks if meta else 0,
         "bytes": final_path.stat().st_size,
         "audio_url": f"/api/recordings/{session_id}/audio",
     }
@@ -796,6 +829,8 @@ async def get_recording_audio(
         raise HTTPException(status_code=404, detail="Recording not found")
 
     audio_path = get_session_audio_path(session_id)
+    if not audio_path and session.ended_at:
+        audio_path = ensure_session_audio_path(session_id)
     if not audio_path:
         raise HTTPException(status_code=404, detail="Recording audio not found")
 

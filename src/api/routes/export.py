@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from config.settings import get_settings
-from src.audio.storage import get_session_audio_path
+from src.audio.storage import ensure_session_audio_path, get_session_audio_path
 from src.core.datetime_utils import localize_datetime, timezone_label, to_utc_iso
 from src.sessions.repository import Repository
 from src.summarization.manager import SummarizationManager
@@ -250,6 +250,8 @@ async def _transcribe_and_persist_session(
     progress_callback: Optional[TranscriptionProgressCallback] = None,
 ) -> tuple[str, float]:
     audio_path = get_session_audio_path(session_id)
+    if not audio_path and session.ended_at:
+        audio_path = ensure_session_audio_path(session_id)
     if not audio_path:
         raise HTTPException(status_code=400, detail="No recording audio available for this session")
 
@@ -504,11 +506,10 @@ async def _run_export_pipeline(
 
     # Build Obsidian URI
     vault_name = vault_path.name
-    file_without_ext = filename.rsplit('.', 1)[0]
     obsidian_uri = (
         f"obsidian://open?"
         f"vault={urllib.parse.quote(vault_name)}&"
-        f"file={urllib.parse.quote(file_without_ext)}"
+        f"file={urllib.parse.quote(filename)}"
     )
 
     # Summary preview (first 200 chars)
