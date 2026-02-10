@@ -220,16 +220,22 @@ body {
 
 /* Buttons */
 .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     font-family: inherit;
     font-size: 12px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
+    text-align: center;
     padding: 12px 24px;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--text);
+    text-decoration: none;
     cursor: pointer;
     transition: all 0.2s ease;
+    -webkit-tap-highlight-color: transparent;
 }
 
 .btn:hover:not(:disabled) {
@@ -240,6 +246,15 @@ body {
 .btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
+}
+
+.btn:focus {
+    outline: none;
+}
+
+.btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
 }
 
 .btn-primary {
@@ -257,6 +272,11 @@ body {
 .btn-large {
     padding: 16px 32px;
     font-size: 13px;
+}
+
+.btn-small {
+    padding: 8px 14px;
+    font-size: 10px;
 }
 
 /* Modal */
@@ -283,8 +303,10 @@ body {
     border: 1px solid var(--border);
     width: 100%;
     max-width: 560px;
-    max-height: 90vh;
-    overflow-y: auto;
+    max-height: calc(100dvh - 48px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
 
 .modal-header {
@@ -318,14 +340,24 @@ body {
 
 .modal-body {
     padding: 24px;
+    overflow-y: auto;
+    min-height: 0;
 }
 
 .modal-footer {
     display: flex;
     justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 12px;
     padding: 20px 24px;
     border-top: 1px solid var(--border);
+}
+
+.download-actions {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 /* Form Elements */
@@ -420,6 +452,7 @@ textarea.form-input {
     color: var(--text-dim);
     cursor: pointer;
     transition: all 0.2s ease;
+    -webkit-tap-highlight-color: transparent;
 }
 
 .btn-toggle:hover {
@@ -432,14 +465,30 @@ textarea.form-input {
     color: var(--accent);
 }
 
+.btn-toggle:focus,
+.template-btn:focus,
+.modal-close:focus,
+.record-btn:focus {
+    outline: none;
+}
+
+.btn-toggle:focus-visible,
+.template-btn:focus-visible,
+.modal-close:focus-visible,
+.record-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
 #prompt-container {
     margin-top: 8px;
 }
 
 .form-textarea {
-    min-height: 200px;
-    max-height: 300px;
-    resize: vertical;
+    min-height: 240px;
+    max-height: none;
+    resize: none;
+    overflow-y: hidden;
     font-family: inherit;
     font-size: 11px;
     line-height: 1.5;
@@ -721,11 +770,13 @@ textarea.form-input {
 
 /* Transcript View */
 .transcript-view {
-    max-height: 300px;
-    overflow-y: auto;
     padding: 16px;
     background: var(--bg);
     border: 1px solid var(--border);
+}
+
+#view-transcript-more-btn {
+    margin-top: 10px;
 }
 
 .transcript-segment {
@@ -778,6 +829,25 @@ textarea.form-input {
 
 /* Responsive */
 @media (max-width: 600px) {
+    .modal {
+        padding: 12px;
+    }
+
+    .modal-content {
+        max-height: calc(100dvh - 24px);
+    }
+
+    .modal-body,
+    .modal-footer,
+    .modal-header {
+        padding-left: 16px;
+        padding-right: 16px;
+    }
+
+    .modal-footer .btn {
+        flex: 1 1 140px;
+    }
+
     .header {
         padding: 10px 16px;
     }
@@ -826,6 +896,31 @@ textarea.form-input {
     }
 }
 
+@media (hover: none) {
+    .btn:hover:not(:disabled),
+    .btn-primary:hover:not(:disabled),
+    .template-btn:hover,
+    .btn-toggle:hover,
+    .record-btn:hover,
+    .header-link:hover,
+    .back-link:hover,
+    .modal-close:hover {
+        border-color: var(--border);
+        color: var(--text);
+        background: transparent;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+        border-color: var(--text);
+        background: var(--text);
+        color: var(--bg);
+    }
+
+    .recording-card:hover {
+        border-color: var(--border);
+    }
+}
+
 @media (max-width: 400px) {
     .template-grid {
         grid-template-columns: 1fr;
@@ -833,6 +928,10 @@ textarea.form-input {
 
     .modal-content {
         max-width: 100%;
+    }
+
+    .download-actions .btn {
+        width: 100%;
     }
 }
 

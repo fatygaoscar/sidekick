@@ -25,6 +25,7 @@ class Repository:
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             await self._ensure_session_timezone_columns(conn)
+            await self._ensure_session_transcription_column(conn)
 
     async def close(self) -> None:
         """Close database connection."""
@@ -119,6 +120,19 @@ class Repository:
         async with self._session_factory() as db:
             await db.execute(
                 update(Session).where(Session.id == session_id).values(mode=mode, submode=submode)
+            )
+            await db.commit()
+            return await self.get_session(session_id)
+
+    async def set_session_has_transcription(
+        self, session_id: str, has_transcription: bool = True
+    ) -> Session | None:
+        """Mark whether authoritative transcription has been run for a session."""
+        async with self._session_factory() as db:
+            await db.execute(
+                update(Session)
+                .where(Session.id == session_id)
+                .values(has_transcription=has_transcription)
             )
             await db.commit()
             return await self.get_session(session_id)
@@ -375,6 +389,7 @@ class Repository:
                     "title": title,
                     "timezone_name": session.timezone_name,
                     "timezone_offset_minutes": session.timezone_offset_minutes,
+                    "has_transcription": bool(session.has_transcription),
                     "started_at": to_utc_iso(session.started_at),
                     "ended_at": to_utc_iso(session.ended_at),
                     "duration_seconds": duration_seconds,
@@ -394,3 +409,10 @@ class Repository:
 
         if "timezone_offset_minutes" not in column_names:
             await conn.execute(text("ALTER TABLE sessions ADD COLUMN timezone_offset_minutes INTEGER"))
+
+    async def _ensure_session_transcription_column(self, conn) -> None:
+        """Backfill schema for transcription state on existing SQLite DBs."""
+        result = await conn.execute(text("PRAGMA table_info(sessions)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "has_transcription" not in column_names:
+            await conn.execute(text("ALTER TABLE sessions ADD COLUMN has_transcription BOOLEAN DEFAULT 0"))

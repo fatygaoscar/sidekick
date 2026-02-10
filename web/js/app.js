@@ -147,6 +147,7 @@ class SidekickApp {
         // Track if prompt was edited
         this.elements.customPrompt.addEventListener('input', () => {
             this.state.promptEdited = true;
+            this._autoResizePrompt(this.elements.customPrompt);
         });
 
         // Confirmation modal
@@ -396,6 +397,7 @@ class SidekickApp {
         const template = this.templates[templateKey];
         if (template) {
             this.elements.customPrompt.value = template.prompt || '';
+            this._autoResizePrompt(this.elements.customPrompt);
         }
     }
 
@@ -405,6 +407,7 @@ class SidekickApp {
             this.elements.promptContainer.classList.remove('hidden');
             this.elements.togglePrompt.textContent = 'Hide';
             this.elements.togglePrompt.classList.add('active');
+            this._autoResizePrompt(this.elements.customPrompt);
         } else {
             this.elements.promptContainer.classList.add('hidden');
             this.elements.togglePrompt.textContent = 'Show';
@@ -511,6 +514,12 @@ class SidekickApp {
 
     _resetLivePreview() {
         this.elements.livePreviewText.textContent = 'Listening...';
+    }
+
+    _autoResizePrompt(textarea) {
+        if (!textarea) return;
+        textarea.style.height = 'auto';
+        textarea.style.height = `${Math.max(textarea.scrollHeight, 240)}px`;
     }
 
     async _uploadSessionAudio(sessionId, blob, mimeType) {

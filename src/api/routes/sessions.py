@@ -2,6 +2,7 @@
 
 import os
 import re
+import urllib.parse
 from datetime import datetime
 from typing import List, Optional
 
@@ -9,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from config.settings import get_settings
 from src.core.datetime_utils import localize_datetime, timezone_label, to_utc_iso
 from src.audio.storage import (
     clear_session_chunk_upload_state,
@@ -59,6 +61,35 @@ def _build_recorded_labels(
     time_label = local_started_at.strftime("%I:%M %p").lstrip("0")
     tz_label = timezone_label(timezone_name, timezone_offset_minutes)
     return date_label, time_label, tz_label
+
+
+def _has_exported_note_in_vault(
+    vault_path: str | None,
+    started_at: datetime,
+    title: str | None,
+    timezone_name: str | None,
+    timezone_offset_minutes: int | None,
+) -> bool:
+    """Best-effort check for an exported note file for this recording."""
+    if not vault_path:
+        return False
+    try:
+        if not os.path.isdir(vault_path):
+            return False
+        prefix = _build_formatted_title(
+            started_at,
+            title,
+            timezone_name=timezone_name,
+            timezone_offset_minutes=timezone_offset_minutes,
+        )
+        # Export filenames use: "{prefix} [Template].md"
+        file_prefix = f"{prefix} ["
+        for name in os.listdir(vault_path):
+            if name.startswith(file_prefix) and name.endswith(".md"):
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def get_session_manager(request: Request) -> SessionManager:
@@ -407,13 +438,14 @@ class RecordingResponse(BaseModel):
     formatted_title: str
     timezone_name: Optional[str]
     timezone_offset_minutes: Optional[int]
-    recorded_date_label: str
-    recorded_time_label: str
-    recorded_timezone_label: str
+    recorded_date_label: Optional[str]
+    recorded_time_label: Optional[str]
+    recorded_timezone_label: Optional[str]
     started_at: str
     ended_at: Optional[str]
     duration_seconds: int
     segment_count: int
+    has_transcription: bool
     has_summary: bool
     has_audio: bool
 
@@ -439,14 +471,19 @@ async def list_recordings(
             timezone_name=timezone_name,
             timezone_offset_minutes=timezone_offset_minutes,
         )
-        date_label, time_label, tz_label = _build_recorded_labels(
-            started_at,
-            timezone_name=timezone_name,
-            timezone_offset_minutes=timezone_offset_minutes,
-        )
-        recording["recorded_date_label"] = date_label
-        recording["recorded_time_label"] = time_label
-        recording["recorded_timezone_label"] = tz_label
+        if timezone_name is not None or timezone_offset_minutes is not None:
+            date_label, time_label, tz_label = _build_recorded_labels(
+                started_at,
+                timezone_name=timezone_name,
+                timezone_offset_minutes=timezone_offset_minutes,
+            )
+            recording["recorded_date_label"] = date_label
+            recording["recorded_time_label"] = time_label
+            recording["recorded_timezone_label"] = tz_label
+        else:
+            recording["recorded_date_label"] = None
+            recording["recorded_time_label"] = None
+            recording["recorded_timezone_label"] = None
         recording["has_audio"] = get_session_audio_path(recording["id"]) is not None
     return sessions
 
@@ -493,18 +530,19 @@ async def get_recording(
         elapsed = (session.ended_at - session.started_at).total_seconds()
         duration_seconds = max(0, int(elapsed))
 
-    # Build transcript
+    # Build transcript only after authoritative transcription has been run.
     transcript_lines = []
-    for segment in segments:
-        mins = int(segment.start_time // 60)
-        secs = int(segment.start_time % 60)
-        timestamp = f"[{mins:02d}:{secs:02d}]"
-        transcript_lines.append({
-            "timestamp": timestamp,
-            "text": segment.text,
-            "is_important": segment.is_important,
-            "start_time": segment.start_time,
-        })
+    if session.has_transcription:
+        for segment in segments:
+            mins = int(segment.start_time // 60)
+            secs = int(segment.start_time % 60)
+            timestamp = f"[{mins:02d}:{secs:02d}]"
+            transcript_lines.append({
+                "timestamp": timestamp,
+                "text": segment.text,
+                "is_important": segment.is_important,
+                "start_time": segment.start_time,
+            })
 
     title = None
     if meetings:
@@ -516,11 +554,46 @@ async def get_recording(
 
     audio_path = get_session_audio_path(session.id)
 
-    date_label, time_label, tz_label = _build_recorded_labels(
+    has_summary = False
+    for meeting in meetings:
+        summaries = await repository.get_summaries(meeting.id)
+        if summaries:
+            has_summary = True
+            break
+
+    settings = get_settings()
+    if not has_summary:
+        has_summary = _has_exported_note_in_vault(
+            settings.obsidian_vault_path,
+            session.started_at,
+            title,
+            session.timezone_name,
+            session.timezone_offset_minutes,
+        )
+
+    if session.timezone_name is not None or session.timezone_offset_minutes is not None:
+        date_label, time_label, tz_label = _build_recorded_labels(
+            session.started_at,
+            session.timezone_name,
+            session.timezone_offset_minutes,
+        )
+    else:
+        date_label, time_label, tz_label = None, None, None
+
+    vault_name = os.path.basename(settings.obsidian_vault_path.rstrip("/")) if settings.obsidian_vault_path else ""
+    search_query = _build_formatted_title(
         session.started_at,
-        session.timezone_name,
-        session.timezone_offset_minutes,
+        title,
+        timezone_name=session.timezone_name,
+        timezone_offset_minutes=session.timezone_offset_minutes,
     )
+    open_in_obsidian_uri = None
+    if has_summary and vault_name:
+        open_in_obsidian_uri = (
+            f"obsidian://search?"
+            f"vault={urllib.parse.quote(vault_name)}&"
+            f"query={urllib.parse.quote(search_query)}"
+        )
 
     return {
         "id": session.id,
@@ -540,6 +613,9 @@ async def get_recording(
         "ended_at": to_utc_iso(session.ended_at),
         "duration_seconds": duration_seconds,
         "segment_count": len(segments),
+        "has_transcription": bool(session.has_transcription),
+        "has_summary": has_summary,
+        "open_in_obsidian_uri": open_in_obsidian_uri,
         "has_audio": audio_path is not None,
         "audio_url": f"/api/recordings/{session.id}/audio" if audio_path else None,
         "audio_download_url": (

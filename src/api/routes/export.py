@@ -75,10 +75,32 @@ class ExportJobStatus(BaseModel):
     updated_at: str
 
 
+class TranscriptionJobCreateResponse(BaseModel):
+    job_id: str
+    status: str
+    poll_url: str
+
+
+class TranscriptionJobStatus(BaseModel):
+    job_id: str
+    session_id: str
+    status: str
+    stage: str
+    message: str
+    transcription_progress: float
+    overall_progress: float
+    created_at: str
+    updated_at: str
+    error: Optional[str] = None
+
+
 ProgressCallback = Callable[[str, str, Optional[float], Optional[float]], Awaitable[None] | None]
+TranscriptionProgressCallback = Callable[[str, str, Optional[float]], Awaitable[None] | None]
 
 _EXPORT_JOBS: dict[str, dict] = {}
 _EXPORT_TASKS: dict[str, asyncio.Task] = {}
+_TRANSCRIPTION_JOBS: dict[str, dict] = {}
+_TRANSCRIPTION_TASKS: dict[str, asyncio.Task] = {}
 
 
 @router.get("/templates")
@@ -124,6 +146,18 @@ def _compute_overall_progress(stage: str, transcription_progress: float, summari
     return min(0.65 * transcription_progress + 0.30 * summarization_progress, 0.95)
 
 
+def _compute_transcription_job_progress(stage: str, transcription_progress: float) -> float:
+    if stage == "queued":
+        return 0.0
+    if stage == "transcribing":
+        return max(0.0, min(transcription_progress, 0.99))
+    if stage == "writing":
+        return 0.99
+    if stage == "completed":
+        return 1.0
+    return max(0.0, min(transcription_progress, 1.0))
+
+
 def _create_export_job(session_id: str) -> dict:
     job_id = str(uuid.uuid4())
     now = _utc_now_iso()
@@ -145,6 +179,25 @@ def _create_export_job(session_id: str) -> dict:
     return payload
 
 
+def _create_transcription_job(session_id: str) -> dict:
+    job_id = str(uuid.uuid4())
+    now = _utc_now_iso()
+    payload = {
+        "job_id": job_id,
+        "session_id": session_id,
+        "status": "queued",
+        "stage": "queued",
+        "message": "Queued",
+        "transcription_progress": 0.0,
+        "overall_progress": 0.0,
+        "error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    _TRANSCRIPTION_JOBS[job_id] = payload
+    return payload
+
+
 def _update_export_job(job_id: str, **fields) -> None:
     job = _EXPORT_JOBS.get(job_id)
     if not job:
@@ -159,6 +212,17 @@ def _update_export_job(job_id: str, **fields) -> None:
         transcription_progress,
         summarization_progress,
     )
+    job["updated_at"] = _utc_now_iso()
+
+
+def _update_transcription_job(job_id: str, **fields) -> None:
+    job = _TRANSCRIPTION_JOBS.get(job_id)
+    if not job:
+        return
+    job.update(fields)
+    stage = str(job.get("stage", "queued"))
+    transcription_progress = float(job.get("transcription_progress", 0.0))
+    job["overall_progress"] = _compute_transcription_job_progress(stage, transcription_progress)
     job["updated_at"] = _utc_now_iso()
 
 
@@ -177,56 +241,27 @@ async def _emit_progress(
         await maybe_awaitable
 
 
-async def _run_export_pipeline(
+async def _transcribe_and_persist_session(
     session_id: str,
-    request_payload: ExportRequest,
-    summarization_manager: SummarizationManager,
+    session,
     repository: Repository,
     transcription_manager: TranscriptionManager,
-    progress_callback: Optional[ProgressCallback] = None,
-) -> ExportResponse:
-    """Export a recording to Obsidian vault.
-
-    Authoritative export pipeline:
-      audio file -> transcription -> transcript segments -> summary -> markdown
-    """
-    settings = get_settings()
-
-    await _emit_progress(progress_callback, "transcribing", "Preparing recording", 0.03, 0.0)
-
-    # Get session and its transcript
-    session = await repository.get_session(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
+    primary_meeting_id: str,
+    progress_callback: Optional[TranscriptionProgressCallback] = None,
+) -> tuple[str, float]:
     audio_path = get_session_audio_path(session_id)
     if not audio_path:
         raise HTTPException(status_code=400, detail="No recording audio available for this session")
 
-    # Persist the user-provided title for history/recordings pages.
-    meetings = sorted(session.meetings, key=lambda m: m.key_start) if session.meetings else []
-    primary_meeting_id = None
-    if meetings:
-        primary_meeting = meetings[0]
-        primary_meeting_id = primary_meeting.id
-        if primary_meeting.title != request_payload.title:
-            await repository.update_meeting_title(primary_meeting.id, request_payload.title)
-    else:
-        meeting = await repository.create_meeting(session_id=session.id, title=request_payload.title)
-        primary_meeting_id = meeting.id
+    if progress_callback:
+        maybe_awaitable = progress_callback("transcribing", "Starting transcription", 0.05)
+        if asyncio.iscoroutine(maybe_awaitable):
+            await maybe_awaitable
 
-    # Export transcription pipeline is source of truth:
-    # transcribe full recording audio, then replace transcript segments for session.
-    await _emit_progress(progress_callback, "transcribing", "Starting transcription", 0.05, 0.0)
-
-    # Create a callback for real-time transcription progress
-    # This is called from a thread pool, so it must be synchronous
     def on_transcription_progress(progress: float, message: str) -> None:
         if progress_callback:
-            # Transcription progress maps to 0.05-0.95 of the transcription phase
-            adjusted_progress = 0.05 + (progress * 0.90)
-            # Call the progress callback directly (it's synchronous in _run_export_job)
-            progress_callback("transcribing", message, adjusted_progress, 0.0)
+            adjusted = 0.05 + (progress * 0.90)
+            progress_callback("transcribing", message, adjusted)
 
     try:
         transcription_result, audio_duration_seconds = await transcription_manager.transcribe_file(
@@ -243,7 +278,6 @@ async def _run_export_pipeline(
     await repository.delete_segments_for_session(session_id)
 
     if transcription_result.words:
-        # Create readable transcript segments from word timestamps.
         buffer_words: list[dict] = []
         max_words_per_segment = 24
         max_segment_duration = 14.0
@@ -308,13 +342,12 @@ async def _run_export_pipeline(
             confidence=transcription_result.confidence,
         )
 
-    await _emit_progress(progress_callback, "transcribing", "Transcript complete", 1.0, 0.0)
+    await repository.set_session_has_transcription(session_id, True)
 
     segments = await repository.get_segments(session_id=session_id)
     if not segments:
         raise HTTPException(status_code=500, detail="Failed to build transcript segments from recording audio")
 
-    # Build transcript with timestamps
     transcript_lines = []
     for segment in segments:
         mins = int(segment.start_time // 60)
@@ -323,7 +356,60 @@ async def _run_export_pipeline(
         marker = " [IMPORTANT]" if segment.is_important else ""
         transcript_lines.append(f"{timestamp}{marker} {segment.text}")
 
-    full_transcript = "\n".join(transcript_lines).strip()
+    if progress_callback:
+        maybe_awaitable = progress_callback("transcribing", "Transcription complete", 1.0)
+        if asyncio.iscoroutine(maybe_awaitable):
+            await maybe_awaitable
+
+    return "\n".join(transcript_lines).strip(), audio_duration_seconds
+
+
+async def _run_export_pipeline(
+    session_id: str,
+    request_payload: ExportRequest,
+    summarization_manager: SummarizationManager,
+    repository: Repository,
+    transcription_manager: TranscriptionManager,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> ExportResponse:
+    """Export a recording to Obsidian vault.
+
+    Authoritative export pipeline:
+      audio file -> transcription -> transcript segments -> summary -> markdown
+    """
+    settings = get_settings()
+
+    await _emit_progress(progress_callback, "transcribing", "Preparing recording", 0.03, 0.0)
+
+    # Get session and its transcript
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Persist the user-provided title for history/recordings pages.
+    meetings = sorted(session.meetings, key=lambda m: m.key_start) if session.meetings else []
+    primary_meeting_id = None
+    if meetings:
+        primary_meeting = meetings[0]
+        primary_meeting_id = primary_meeting.id
+        if primary_meeting.title != request_payload.title:
+            await repository.update_meeting_title(primary_meeting.id, request_payload.title)
+    else:
+        meeting = await repository.create_meeting(session_id=session.id, title=request_payload.title)
+        primary_meeting_id = meeting.id
+
+    full_transcript, audio_duration_seconds = await _transcribe_and_persist_session(
+        session_id=session_id,
+        session=session,
+        repository=repository,
+        transcription_manager=transcription_manager,
+        primary_meeting_id=primary_meeting_id,
+        progress_callback=(
+            lambda stage, message, progress: (
+                progress_callback(stage, message, progress, 0.0) if progress_callback else None
+            )
+        ),
+    )
 
     # Generate summary using the selected template
     # If custom_prompt is provided, use it as the full prompt (user edited the template)
@@ -343,6 +429,16 @@ async def _run_export_pipeline(
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
 
     await _emit_progress(progress_callback, "summarizing", "Summary complete", 1.0, 1.0)
+
+    # Persist summary metadata so history/view actions can reflect summarized state.
+    await repository.add_summary(
+        meeting_id=primary_meeting_id,
+        content=summary_result.content,
+        backend=summary_result.backend,
+        model=summary_result.model,
+        prompt_tokens=summary_result.prompt_tokens,
+        completion_tokens=summary_result.completion_tokens,
+    )
 
     # Calculate duration
     duration_seconds = int(audio_duration_seconds)
@@ -489,6 +585,69 @@ async def _run_export_job(
         )
 
 
+async def _run_transcription_job(
+    job_id: str,
+    session_id: str,
+    repository: Repository,
+    transcription_manager: TranscriptionManager,
+) -> None:
+    def update_progress(stage: str, message: str, transcription_progress: Optional[float]) -> None:
+        updates = {
+            "status": "running",
+            "stage": stage,
+            "message": message,
+        }
+        if transcription_progress is not None:
+            updates["transcription_progress"] = max(0.0, min(1.0, transcription_progress))
+        _update_transcription_job(job_id, **updates)
+
+    try:
+        session = await repository.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        meetings = sorted(session.meetings, key=lambda m: m.key_start) if session.meetings else []
+        if meetings:
+            primary_meeting_id = meetings[0].id
+        else:
+            meeting = await repository.create_meeting(session_id=session.id, title="Untitled Recording")
+            primary_meeting_id = meeting.id
+
+        await _transcribe_and_persist_session(
+            session_id=session_id,
+            session=session,
+            repository=repository,
+            transcription_manager=transcription_manager,
+            primary_meeting_id=primary_meeting_id,
+            progress_callback=update_progress,
+        )
+
+        _update_transcription_job(
+            job_id,
+            status="completed",
+            stage="completed",
+            message="Transcription complete",
+            transcription_progress=1.0,
+            error=None,
+        )
+    except HTTPException as exc:
+        _update_transcription_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            message="Transcription failed",
+            error=str(exc.detail),
+        )
+    except Exception as exc:
+        _update_transcription_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            message="Transcription failed",
+            error=str(exc),
+        )
+
+
 @router.post("/recordings/{session_id}/export-obsidian", response_model=ExportResponse)
 async def export_to_obsidian(
     session_id: str,
@@ -504,6 +663,39 @@ async def export_to_obsidian(
         summarization_manager=summarization_manager,
         repository=repository,
         transcription_manager=transcription_manager,
+    )
+
+
+@router.post("/recordings/{session_id}/transcription-job", response_model=TranscriptionJobCreateResponse)
+async def start_transcription_job(
+    session_id: str,
+    repository: Repository = Depends(get_repository),
+    transcription_manager: TranscriptionManager = Depends(get_transcription_manager),
+):
+    """Run authoritative transcription only (no summary/export)."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    job = _create_transcription_job(session_id)
+    job_id = str(job["job_id"])
+    _update_transcription_job(job_id, message="Starting transcription")
+
+    task = asyncio.create_task(
+        _run_transcription_job(
+            job_id=job_id,
+            session_id=session_id,
+            repository=repository,
+            transcription_manager=transcription_manager,
+        )
+    )
+    _TRANSCRIPTION_TASKS[job_id] = task
+    task.add_done_callback(lambda _t: _TRANSCRIPTION_TASKS.pop(job_id, None))
+
+    return TranscriptionJobCreateResponse(
+        job_id=job_id,
+        status="queued",
+        poll_url=f"/api/transcription-jobs/{job_id}",
     )
 
 
@@ -551,3 +743,12 @@ async def get_export_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Export job not found")
     return ExportJobStatus(**job)
+
+
+@router.get("/transcription-jobs/{job_id}", response_model=TranscriptionJobStatus)
+async def get_transcription_job(job_id: str):
+    """Get transcription-only job status."""
+    job = _TRANSCRIPTION_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Transcription job not found")
+    return TranscriptionJobStatus(**job)

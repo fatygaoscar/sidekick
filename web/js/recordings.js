@@ -4,8 +4,10 @@
 
 class RecordingsPage {
     constructor() {
+        this.TRANSCRIPT_PAGE_SIZE = 100;
         this.recordings = [];
         this.currentRecording = null;
+        this.transcriptVisibleCount = 0;
         this.selectedTemplate = 'meeting';
         this.promptEdited = false;
         this.promptVisible = false;
@@ -19,15 +21,17 @@ class RecordingsPage {
             // View modal
             viewModal: document.getElementById('view-modal'),
             viewClose: document.getElementById('view-close'),
-            viewCloseBtn: document.getElementById('view-close-btn'),
             viewTitle: document.getElementById('view-title'),
             viewMeta: document.getElementById('view-meta'),
             viewAudioGroup: document.getElementById('view-audio-group'),
             viewAudioPlayer: document.getElementById('view-audio-player'),
             viewAudioDownload: document.getElementById('view-audio-download'),
             viewTranscriptDownload: document.getElementById('view-transcript-download'),
+            viewTranscriptGroup: document.getElementById('view-transcript-group'),
             viewTranscript: document.getElementById('view-transcript'),
+            viewTranscriptMoreBtn: document.getElementById('view-transcript-more-btn'),
             resummarizeBtn: document.getElementById('resummarize-btn'),
+            viewOpenObsidianBtn: document.getElementById('view-open-obsidian-btn'),
 
             // Re-summarize modal
             resummarizeModal: document.getElementById('resummarize-modal'),
@@ -71,12 +75,13 @@ class RecordingsPage {
     _bindEvents() {
         // View modal
         this.elements.viewClose.addEventListener('click', () => this._closeViewModal());
-        this.elements.viewCloseBtn.addEventListener('click', () => this._closeViewModal());
         this.elements.viewModal.addEventListener('click', (e) => {
             if (e.target === this.elements.viewModal) this._closeViewModal();
         });
         this.elements.resummarizeBtn.addEventListener('click', () => this._showResummarizeModal());
+        this.elements.viewOpenObsidianBtn.addEventListener('click', () => this._openRecordingInObsidian());
         this.elements.viewTranscriptDownload.addEventListener('click', () => this._downloadTranscript());
+        this.elements.viewTranscriptMoreBtn.addEventListener('click', () => this._showMoreTranscript());
 
         // Re-summarize modal
         this.elements.resummarizeClose.addEventListener('click', () => this._closeResummarizeModal());
@@ -92,6 +97,7 @@ class RecordingsPage {
         // Track if prompt was edited
         this.elements.resummarizeCustomPrompt.addEventListener('input', () => {
             this.promptEdited = true;
+            this._autoResizePrompt(this.elements.resummarizeCustomPrompt);
         });
 
         // Confirmation modal
@@ -148,6 +154,7 @@ class RecordingsPage {
             this.elements.promptContainer.classList.remove('hidden');
             this.elements.togglePrompt.textContent = 'Hide';
             this.elements.togglePrompt.classList.add('active');
+            this._autoResizePrompt(this.elements.resummarizeCustomPrompt);
         } else {
             this.elements.promptContainer.classList.add('hidden');
             this.elements.togglePrompt.textContent = 'Show';
@@ -195,27 +202,25 @@ class RecordingsPage {
     }
 
     _renderCard(rec) {
-        const fallbackDate = new Date(rec.started_at);
-        const dateStr = rec.recorded_date_label || fallbackDate.toLocaleDateString('en-US', {
+        const date = new Date(rec.started_at);
+        const dateStr = date.toLocaleDateString('en-US', {
             year: 'numeric',
             month: 'short',
             day: 'numeric',
         });
-        const timeStr = rec.recorded_time_label || fallbackDate.toLocaleTimeString('en-US', {
+        const timeStr = date.toLocaleTimeString('en-US', {
             hour: '2-digit',
             minute: '2-digit',
         });
-        const tzStr = rec.recorded_timezone_label ? ` ${rec.recorded_timezone_label}` : '';
 
         const duration = this._formatDuration(rec.duration_seconds);
-        const title = rec.formatted_title || rec.title || 'Untitled Recording';
+        const title = this._buildRecordingDeviceFormattedTitle(rec);
         return `
             <div class="recording-card">
-                <div class="recording-date">${dateStr} ${timeStr}${tzStr}</div>
+                <div class="recording-date">${dateStr} ${timeStr}</div>
                 <div class="recording-title">${this._escapeHtml(title)}</div>
                 <div class="recording-meta">
                     <span>Duration: ${duration}</span>
-                    <span>Segments: ${rec.segment_count}</span>
                     ${rec.has_summary ? '<span>Has Summary</span>' : ''}
                 </div>
                 <div class="recording-actions">
@@ -264,19 +269,17 @@ class RecordingsPage {
 
     _showViewModal() {
         const rec = this.currentRecording;
-        const fallbackDate = new Date(rec.started_at);
-        const dateLabel = rec.recorded_date_label || fallbackDate.toLocaleDateString();
-        const timeLabel = rec.recorded_time_label || fallbackDate.toLocaleTimeString([], {
+        const date = new Date(rec.started_at);
+        const dateLabel = date.toLocaleDateString();
+        const timeLabel = date.toLocaleTimeString([], {
             hour: '2-digit',
             minute: '2-digit',
         });
-        const tzLabel = rec.recorded_timezone_label ? ` (${rec.recorded_timezone_label})` : '';
 
-        this.elements.viewTitle.textContent = rec.formatted_title || rec.title || 'Recording';
+        this.elements.viewTitle.textContent = this._buildRecordingDeviceFormattedTitle(rec);
         this.elements.viewMeta.innerHTML = `
-            <span>Date: ${dateLabel} ${timeLabel}${tzLabel}</span>
+            <span>Date: ${dateLabel} ${timeLabel}</span>
             <span>Duration: ${this._formatDuration(rec.duration_seconds)}</span>
-            <span>Segments: ${rec.segment_count}</span>
         `;
 
         if (rec.has_audio && rec.audio_url) {
@@ -294,19 +297,20 @@ class RecordingsPage {
             this.elements.viewAudioDownload.setAttribute('aria-disabled', 'true');
         }
 
-        // Render transcript
-        if (rec.transcript && rec.transcript.length > 0) {
-            this.elements.viewTranscript.innerHTML = rec.transcript.map(seg => `
-                <div class="transcript-segment${seg.is_important ? ' important' : ''}">
-                    <span class="timestamp">${seg.timestamp}</span>
-                    <span class="text">${this._escapeHtml(seg.text)}</span>
-                </div>
-            `).join('');
-            this.elements.viewTranscriptDownload.disabled = false;
+        // Render transcript only after authoritative transcription has been run.
+        if (rec.has_transcription && rec.transcript && rec.transcript.length > 0) {
+            this.elements.viewTranscriptGroup.classList.remove('hidden');
+            this.transcriptVisibleCount = Math.min(this.TRANSCRIPT_PAGE_SIZE, rec.transcript.length);
+            this._renderTranscriptPreview();
         } else {
-            this.elements.viewTranscript.innerHTML = '<p class="text-muted">No transcript available</p>';
-            this.elements.viewTranscriptDownload.disabled = true;
+            this.elements.viewTranscriptGroup.classList.add('hidden');
+            this.elements.viewTranscript.innerHTML = '';
+            this.transcriptVisibleCount = 0;
+            this.elements.viewTranscriptMoreBtn.classList.add('hidden');
         }
+
+        this._syncTranscriptActionButton(rec);
+        this._syncViewActionButtons(rec);
 
         this.elements.viewModal.classList.remove('hidden');
     }
@@ -317,6 +321,9 @@ class RecordingsPage {
     }
 
     _showResummarizeModal() {
+        if (!this.currentRecording?.has_summary) {
+            return;
+        }
         this._closeViewModal();
 
         const title = this.currentRecording?.title || this.currentRecording?.meetings?.[0]?.title || '';
@@ -348,7 +355,14 @@ class RecordingsPage {
         const template = this.templates[templateKey];
         if (template) {
             this.elements.resummarizeCustomPrompt.value = template.prompt || '';
+            this._autoResizePrompt(this.elements.resummarizeCustomPrompt);
         }
+    }
+
+    _autoResizePrompt(textarea) {
+        if (!textarea) return;
+        textarea.style.height = 'auto';
+        textarea.style.height = `${Math.max(textarea.scrollHeight, 240)}px`;
     }
 
     async _processResummarize() {
@@ -367,7 +381,13 @@ class RecordingsPage {
 
     _downloadTranscript() {
         const rec = this.currentRecording;
-        if (!rec || !rec.transcript || rec.transcript.length === 0) {
+        if (!rec) {
+            return;
+        }
+
+        if (!rec.has_transcription || !rec.transcript || rec.transcript.length === 0) {
+            this._syncTranscriptActionButton(rec, true);
+            this._runTranscriptionForCurrentRecording();
             return;
         }
 
@@ -376,7 +396,8 @@ class RecordingsPage {
         const blob = new Blob([transcriptText], { type: 'text/plain;charset=utf-8' });
         const url = URL.createObjectURL(blob);
 
-        const title = (rec.formatted_title || rec.title || 'recording').replace(/[<>:"/\\|?*]+/g, '').trim() || 'recording';
+        const baseTitle = this._buildRecordingDeviceFormattedTitle(rec);
+        const title = baseTitle.replace(/[<>:"/\\|?*]+/g, '').trim() || 'recording';
         const link = document.createElement('a');
         link.href = url;
         link.download = `${title} - transcript.txt`;
@@ -385,6 +406,201 @@ class RecordingsPage {
         link.remove();
 
         URL.revokeObjectURL(url);
+    }
+
+    _syncTranscriptActionButton(rec, isProcessing = false) {
+        if (!this.elements.viewTranscriptDownload) return;
+
+        if (isProcessing) {
+            this.elements.viewTranscriptDownload.textContent = 'Transcribing...';
+            this.elements.viewTranscriptDownload.disabled = true;
+            return;
+        }
+
+        const ready = !!(rec && rec.has_transcription && rec.transcript && rec.transcript.length > 0);
+        this.elements.viewTranscriptDownload.textContent = ready ? 'Download Transcript' : 'Transcribe Audio';
+        this.elements.viewTranscriptDownload.disabled = false;
+    }
+
+    _renderTranscriptPreview() {
+        const rec = this.currentRecording;
+        if (!rec || !rec.transcript || rec.transcript.length === 0) {
+            this.elements.viewTranscript.innerHTML = '';
+            this.elements.viewTranscriptMoreBtn.classList.add('hidden');
+            return;
+        }
+
+        const visible = rec.transcript.slice(0, this.transcriptVisibleCount);
+        this.elements.viewTranscript.innerHTML = visible.map(seg => `
+            <div class="transcript-segment${seg.is_important ? ' important' : ''}">
+                <span class="timestamp">${seg.timestamp}</span>
+                <span class="text">${this._escapeHtml(seg.text)}</span>
+            </div>
+        `).join('');
+
+        if (this.transcriptVisibleCount < rec.transcript.length) {
+            this.elements.viewTranscriptMoreBtn.classList.remove('hidden');
+            this.elements.viewTranscriptMoreBtn.textContent = `Show More (${this.transcriptVisibleCount}/${rec.transcript.length})`;
+        } else if (rec.transcript.length > this.TRANSCRIPT_PAGE_SIZE) {
+            this.elements.viewTranscriptMoreBtn.classList.remove('hidden');
+            this.elements.viewTranscriptMoreBtn.textContent = 'Show Less';
+        } else {
+            this.elements.viewTranscriptMoreBtn.classList.add('hidden');
+        }
+    }
+
+    _showMoreTranscript() {
+        const rec = this.currentRecording;
+        if (!rec || !rec.transcript || rec.transcript.length === 0) return;
+
+        if (this.transcriptVisibleCount < rec.transcript.length) {
+            this.transcriptVisibleCount = Math.min(
+                rec.transcript.length,
+                this.transcriptVisibleCount + this.TRANSCRIPT_PAGE_SIZE
+            );
+        } else {
+            this.transcriptVisibleCount = Math.min(this.TRANSCRIPT_PAGE_SIZE, rec.transcript.length);
+            this.elements.viewTranscriptGroup.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+        this._renderTranscriptPreview();
+    }
+
+    _syncViewActionButtons(rec) {
+        const hasSummary = !!rec?.has_summary;
+        this.elements.resummarizeBtn.disabled = !hasSummary;
+        this.elements.viewOpenObsidianBtn.disabled = !hasSummary || !rec?.open_in_obsidian_uri;
+    }
+
+    _openRecordingInObsidian() {
+        const rec = this.currentRecording;
+        if (!rec || !rec.has_summary || !rec.open_in_obsidian_uri) {
+            return;
+        }
+        window.open(rec.open_in_obsidian_uri, '_blank');
+    }
+
+    async _runTranscriptionForCurrentRecording() {
+        const rec = this.currentRecording;
+        if (!rec) return;
+
+        this._closeViewModal();
+        this._setProcessingState({
+            stage: 'queued',
+            message: 'Preparing transcription...',
+            transcriptionProgress: 0,
+            summarizationProgress: 0,
+            overallProgress: 0,
+        });
+        this.elements.processingOverlay.classList.remove('hidden');
+
+        try {
+            const createResponse = await fetch(`/api/recordings/${rec.id}/transcription-job`, {
+                method: 'POST',
+            });
+            if (!createResponse.ok) {
+                const error = await createResponse.json().catch(() => ({}));
+                if (createResponse.status === 404 && error.detail === 'Not Found') {
+                    throw new Error('Transcription endpoint is unavailable. Restart Sidekick and try again.');
+                }
+                throw new Error(error.detail || 'Failed to start transcription');
+            }
+
+            const job = await createResponse.json();
+            await this._waitForTranscriptionJob(job.job_id);
+            this.elements.processingOverlay.classList.add('hidden');
+            await this._viewRecording(rec.id);
+        } catch (error) {
+            console.error('Transcription failed:', error);
+            this.elements.processingOverlay.classList.add('hidden');
+            this._syncTranscriptActionButton(rec, false);
+            alert(`Transcription failed: ${error.message}`);
+        }
+    }
+
+    async _waitForTranscriptionJob(jobId) {
+        const maxPollMs = 20 * 60 * 1000;
+        const startedAt = Date.now();
+
+        while (Date.now() - startedAt < maxPollMs) {
+            const response = await fetch(`/api/transcription-jobs/${jobId}`);
+            if (!response.ok) {
+                const error = await response.json().catch(() => ({}));
+                throw new Error(error.detail || 'Failed to read transcription status');
+            }
+
+            const job = await response.json();
+            this._setProcessingState({
+                stage: job.stage,
+                message: job.message,
+                transcriptionProgress: Number(job.transcription_progress || 0),
+                summarizationProgress: 0,
+                overallProgress: Number(job.overall_progress || 0),
+            });
+
+            if (job.status === 'completed') return;
+            if (job.status === 'failed') {
+                throw new Error(job.error || 'Transcription job failed');
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 900));
+        }
+
+        throw new Error('Transcription timed out');
+    }
+
+    _buildLocalFormattedTitle(date, title) {
+        const yyyy = date.getFullYear();
+        const mm = String(date.getMonth() + 1).padStart(2, '0');
+        const dd = String(date.getDate()).padStart(2, '0');
+        const hh = String(date.getHours()).padStart(2, '0');
+        const min = String(date.getMinutes()).padStart(2, '0');
+        const baseTitle = (title || 'Untitled Recording').trim() || 'Untitled Recording';
+        return `${yyyy}-${mm}-${dd}-${hh}${min} - ${baseTitle}`;
+    }
+
+    _buildRecordingDeviceFormattedTitle(rec) {
+        const startedAt = new Date(rec.started_at);
+        const baseTitle = (rec?.title || 'Untitled Recording').trim() || 'Untitled Recording';
+
+        // Prefer recording device IANA timezone when available.
+        if (rec?.timezone_name) {
+            try {
+                const parts = new Intl.DateTimeFormat('en-CA', {
+                    timeZone: rec.timezone_name,
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: false,
+                }).formatToParts(startedAt);
+                const byType = Object.fromEntries(parts.map(p => [p.type, p.value]));
+                const yyyy = byType.year;
+                const mm = byType.month;
+                const dd = byType.day;
+                const hh = byType.hour;
+                const min = byType.minute;
+                return `${yyyy}-${mm}-${dd}-${hh}${min} - ${baseTitle}`;
+            } catch (_error) {
+                // Fall through to numeric-offset fallback.
+            }
+        }
+
+        // Fallback: use recording device UTC offset if captured.
+        if (typeof rec?.timezone_offset_minutes === 'number' && !Number.isNaN(rec.timezone_offset_minutes)) {
+            // JS offset semantics: UTC - local (minutes). local = UTC - offset.
+            const localMillis = startedAt.getTime() - (rec.timezone_offset_minutes * 60000);
+            const shifted = new Date(localMillis);
+            const yyyy = shifted.getUTCFullYear();
+            const mm = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+            const dd = String(shifted.getUTCDate()).padStart(2, '0');
+            const hh = String(shifted.getUTCHours()).padStart(2, '0');
+            const min = String(shifted.getUTCMinutes()).padStart(2, '0');
+            return `${yyyy}-${mm}-${dd}-${hh}${min} - ${baseTitle}`;
+        }
+
+        // Legacy recordings without timezone metadata: viewer-local fallback.
+        return this._buildLocalFormattedTitle(startedAt, baseTitle);
     }
 
     async _exportRecording(id, title, template, customPrompt) {

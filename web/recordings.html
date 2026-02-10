@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Recordings - Sidekick</title>
-    <link rel="stylesheet" href="/static/css/styles.css">
+    <link rel="stylesheet" href="/static/css/styles.css?v=20260210g">
 </head>
 <body>
     <div class="app">
@@ -39,19 +39,23 @@
                 <div class="form-group" id="view-audio-group">
                     <label class="form-label">Audio</label>
                     <audio id="view-audio-player" controls style="width: 100%;"></audio>
-                    <div style="margin-top: 8px;">
-                        <a id="view-audio-download" class="btn" download>Download Audio</a>
-                    </div>
                 </div>
                 <div class="form-group">
+                    <label class="form-label">Downloads</label>
+                    <div class="download-actions">
+                        <a id="view-audio-download" class="btn" download>Download Audio</a>
+                        <button class="btn" id="view-transcript-download">Download Transcript</button>
+                    </div>
+                </div>
+                <div class="form-group" id="view-transcript-group">
                     <label class="form-label">Transcript</label>
                     <div class="transcript-view" id="view-transcript"></div>
+                    <button class="btn btn-small hidden" id="view-transcript-more-btn" type="button">Show More</button>
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn" id="view-close-btn">Close</button>
-                <button class="btn" id="view-transcript-download">Download Transcript</button>
-                <button class="btn btn-primary" id="resummarize-btn">Re-summarize</button>
+                <button class="btn" id="resummarize-btn">Re-summarize</button>
+                <button class="btn btn-primary" id="view-open-obsidian-btn">Open in Obsidian</button>
             </div>
         </div>
     </div>
@@ -145,6 +149,6 @@
         </div>
     </div>
 
-    <script src="/static/js/recordings.js"></script>
+    <script src="/static/js/recordings.js?v=20260210h"></script>
 </body>
 </html>
