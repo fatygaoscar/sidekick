@@ -381,6 +381,33 @@ TRANSCRIPT:
 USER INSTRUCTIONS:
 {custom_prompt}"""
 
+# Default prompt shown in the UI when "Custom" template is selected
+CUSTOM_DEFAULT_PROMPT = """Review the transcript and extract only the parts that are relevant to [insert audience or artifact here, e.g. "Account Manager dashboard", "Leadership report", "Product X rollout", "Incentive design"].
+
+Ignore casual conversation, side topics, and implementation details unless they directly affect the design, scope, audience, timing, or guardrails.
+
+For the relevant sections, produce:
+
+Where the topic is discussed (what moments in the conversation matter, summarized concisely — not verbatim quotes unless critical)
+
+Explicit decisions and implied direction (what was decided, even if not stated formally)
+
+Non-negotiable constraints / guardrails
+
+Audience definition and access expectations
+
+Timeline and sequencing expectations
+
+Then synthesize that into:
+
+A clear, forward-looking summary of what the team wants to build or deliver
+
+Written as if it will be handed to someone who was not in the meeting
+
+Do not restate the transcript.
+Do not speculate beyond what the conversation supports.
+Optimize for clarity, alignment, and reusability."""
+
 
 def get_prompt(
     prompt_type: str = "default",
@@ -463,7 +490,7 @@ TEMPLATE_INFO = {
     },
     "custom": {
         "name": "Custom",
-        "description": "Provide your own summarization instructions",
+        "description": "Targeted extraction for a specific audience or artifact",
     },
 }
 
@@ -479,7 +506,7 @@ def get_template_content(template_key: str) -> str:
         "brainstorm": BRAINSTORM_TEMPLATE,
         "interview": INTERVIEW_TEMPLATE,
         "lecture": LECTURE_TEMPLATE,
-        "custom": "",
+        "custom": CUSTOM_DEFAULT_PROMPT,
     }
     content = templates.get(template_key, "")
     # Remove the transcript placeholder section for display
