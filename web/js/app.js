@@ -24,9 +24,15 @@ class SidekickApp {
         this.ws = null;
         this.obsidianUri = null;
         this.audioUploadPromise = null;
-        this.pendingChunks = [];
-        this.isUploadingChunks = false;
-        this.uploadedChunkCount = 0;
+
+        // Unique ID for this browser tab - prevents cross-device chunk conflicts
+        this.clientId = crypto.randomUUID();
+
+        // Track chunk uploads (parallel, fire-and-forget)
+        this.chunkUploads = new Map();  // chunkIndex -> Promise
+        this.chunkResults = new Map();  // chunkIndex -> {success: bool, error?: string}
+        this.expectedChunkCount = 0;
+
         this.finalizedChunkAudio = false;
         this.captureStoppedPromise = null;
         this.captureStopMeta = null;
@@ -106,16 +112,17 @@ class SidekickApp {
                 }
             },
             onEncodedAudio: (blob, mimeType) => {
-                // Keep full blob as fallback if chunk persistence fails.
+                // Keep full blob as fallback - this is authoritative if chunks fail.
                 this.fallbackBlob = blob;
                 this.fallbackMimeType = mimeType;
             },
             onEncodedChunk: (blob, mimeType, chunkIndex) => {
-                this.pendingChunks.push({ blob, mimeType, chunkIndex });
-                this._processChunkQueue();
+                // Fire-and-forget parallel upload (best effort)
+                this._uploadChunkBestEffort(blob, mimeType, chunkIndex);
             },
             onCaptureStopped: (meta) => {
                 this.captureStopMeta = meta;
+                this.expectedChunkCount = meta.chunkCount || 0;
                 if (this.resolveCaptureStopped) {
                     this.resolveCaptureStopped(meta);
                     this.resolveCaptureStopped = null;
@@ -237,9 +244,12 @@ class SidekickApp {
             }
             this.state.lastSessionId = startedSessionId;
             this.audioUploadPromise = null;
-            this.pendingChunks = [];
-            this.isUploadingChunks = false;
-            this.uploadedChunkCount = 0;
+
+            // Reset chunk tracking for parallel uploads
+            this.chunkUploads = new Map();
+            this.chunkResults = new Map();
+            this.expectedChunkCount = 0;
+
             this.finalizedChunkAudio = false;
             this.captureStopMeta = null;
             this.captureStoppedPromise = null;
@@ -515,9 +525,12 @@ class SidekickApp {
         this._updateTimerDisplay();
         this.state.sessionId = null;
         this.audioUploadPromise = null;
-        this.pendingChunks = [];
-        this.isUploadingChunks = false;
-        this.uploadedChunkCount = 0;
+
+        // Reset chunk tracking
+        this.chunkUploads = new Map();
+        this.chunkResults = new Map();
+        this.expectedChunkCount = 0;
+
         this.finalizedChunkAudio = false;
         this.captureStoppedPromise = null;
         this.captureStopMeta = null;
@@ -562,37 +575,48 @@ class SidekickApp {
         return null;
     }
 
-    async _processChunkQueue() {
-        if (this.isUploadingChunks) return;
-        this.isUploadingChunks = true;
-
-        try {
-            while (this.pendingChunks.length > 0) {
-                const sessionId = this.state.sessionId || this.state.lastSessionId;
-                if (!sessionId) break;
-
-                const nextChunk = this.pendingChunks[0];
-                await this._uploadSessionAudioChunk(sessionId, nextChunk);
-                this.pendingChunks.shift();
-                this.uploadedChunkCount += 1;
-            }
-        } finally {
-            this.isUploadingChunks = false;
+    /**
+     * Fire-and-forget parallel chunk upload. Tracks result for later inspection.
+     */
+    async _uploadChunkBestEffort(blob, mimeType, chunkIndex) {
+        const sessionId = this.state.sessionId || this.state.lastSessionId;
+        if (!sessionId) {
+            this.chunkResults.set(chunkIndex, { success: false, error: 'No session ID' });
+            return;
         }
+
+        // Start the upload and track the promise
+        const uploadPromise = this._doChunkUpload(sessionId, blob, mimeType, chunkIndex);
+        this.chunkUploads.set(chunkIndex, uploadPromise);
+
+        // Don't await - let it run in parallel
+        uploadPromise.then(
+            () => {
+                this.chunkResults.set(chunkIndex, { success: true });
+            },
+            (error) => {
+                console.warn(`Chunk ${chunkIndex} upload failed:`, error.message);
+                this.chunkResults.set(chunkIndex, { success: false, error: error.message });
+            }
+        );
     }
 
-    async _uploadSessionAudioChunk(sessionId, chunk) {
-        const maxAttempts = 4;
+    /**
+     * Actually perform the chunk upload with retries.
+     */
+    async _doChunkUpload(sessionId, blob, mimeType, chunkIndex) {
+        const maxAttempts = 3;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             try {
                 const response = await fetch(
-                    `/api/recordings/${sessionId}/audio/chunks/${chunk.chunkIndex}`,
+                    `/api/recordings/${sessionId}/audio/chunks/${chunkIndex}`,
                     {
                         method: 'PUT',
                         headers: {
-                            'Content-Type': chunk.mimeType || 'audio/webm',
+                            'Content-Type': mimeType || 'audio/webm',
+                            'X-Client-ID': this.clientId,
                         },
-                        body: chunk.blob,
+                        body: blob,
                     }
                 );
 
@@ -601,62 +625,103 @@ class SidekickApp {
                 }
 
                 const payload = await response.json().catch(() => ({}));
-                if (response.status === 409) {
-                    const expected = Number(
-                        payload.expected_chunk_index
-                        || response.headers.get('X-Expected-Chunk-Index')
-                    );
-                    if (!Number.isNaN(expected) && chunk.chunkIndex < expected) {
-                        return;
-                    }
-                    throw new Error(payload.detail || 'Chunk index out of order');
-                }
-                throw new Error(payload.detail || 'Audio chunk upload failed');
+                throw new Error(payload.detail || `HTTP ${response.status}`);
             } catch (error) {
                 if (attempt === maxAttempts) {
                     throw error;
                 }
-                await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+                // Brief backoff before retry
+                await new Promise(resolve => setTimeout(resolve, 100 * attempt));
             }
         }
     }
 
+    /**
+     * Wait for all in-flight chunk uploads to settle (success or failure).
+     */
+    async _waitForChunkUploadsToSettle(timeoutMs = 30000) {
+        const startedAt = Date.now();
+        const promises = Array.from(this.chunkUploads.values());
+
+        // Wait for all uploads to complete (don't throw on individual failures)
+        await Promise.race([
+            Promise.allSettled(promises),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Chunk upload timeout')), timeoutMs)
+            ),
+        ]).catch(() => {
+            // Timeout - some uploads may still be pending
+            console.warn('Some chunk uploads may have timed out');
+        });
+    }
+
+    /**
+     * Check if all expected chunks were uploaded successfully.
+     */
+    _allChunksSucceeded() {
+        if (this.expectedChunkCount === 0) return false;
+
+        for (let i = 0; i < this.expectedChunkCount; i++) {
+            const result = this.chunkResults.get(i);
+            if (!result || !result.success) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Ensure recording audio is persisted to the server.
+     *
+     * Strategy:
+     * 1. Wait for MediaRecorder to finish (produces fallbackBlob)
+     * 2. Wait for all in-flight chunk uploads to settle
+     * 3. If ALL chunks uploaded successfully: try to finalize
+     * 4. If finalize fails OR any chunks missing: upload full blob as fallback
+     *
+     * The full blob upload is the guaranteed recovery path.
+     */
     async _ensureRecordingAudioPersisted(sessionId) {
         if (!sessionId) {
             throw new Error('No recording session found');
         }
 
+        // Wait for MediaRecorder to finish and produce the fallback blob
         if (this.captureStoppedPromise) {
             await this.captureStoppedPromise;
         }
 
-        await this._processChunkQueue();
-        await this._waitForChunkQueueDrain();
+        // Wait for all chunk uploads to settle (success or failure)
+        await this._waitForChunkUploadsToSettle();
 
-        if (this.uploadedChunkCount > 0 && !this.finalizedChunkAudio) {
-            await this._finalizeChunkedAudio(sessionId);
-            this.finalizedChunkAudio = true;
-            return;
+        // Check if we should try chunk-based finalization
+        const allChunksOk = this._allChunksSucceeded();
+
+        if (allChunksOk && this.expectedChunkCount > 0 && !this.finalizedChunkAudio) {
+            // Try to finalize from chunks
+            try {
+                await this._finalizeChunkedAudio(sessionId);
+                this.finalizedChunkAudio = true;
+                return; // Success - chunks assembled
+            } catch (error) {
+                console.warn('Chunk finalization failed, falling back to full blob:', error.message);
+                // Fall through to blob upload
+            }
         }
 
-        if (!this.uploadedChunkCount && this.fallbackBlob) {
-            this.audioUploadPromise = this._uploadSessionAudio(sessionId, this.fallbackBlob, this.fallbackMimeType);
+        // Fallback: upload the complete blob
+        // This handles: chunk failures, partial uploads, finalize failures, etc.
+        if (this.fallbackBlob) {
+            console.log('Using fallback blob upload');
+            this.audioUploadPromise = this._uploadSessionAudio(
+                sessionId,
+                this.fallbackBlob,
+                this.fallbackMimeType
+            );
             await this.audioUploadPromise;
+        } else if (!this.finalizedChunkAudio) {
+            throw new Error('No audio data available (no chunks and no fallback blob)');
         }
-    }
-
-    async _waitForChunkQueueDrain(timeoutMs = 20000) {
-        const startedAt = Date.now();
-        while (Date.now() - startedAt < timeoutMs) {
-            if (!this.isUploadingChunks && this.pendingChunks.length === 0) {
-                return;
-            }
-            await new Promise(resolve => setTimeout(resolve, 60));
-            if (!this.isUploadingChunks && this.pendingChunks.length > 0) {
-                await this._processChunkQueue();
-            }
-        }
-        throw new Error('Timed out while uploading recording audio');
     }
 
     async _finalizeChunkedAudio(sessionId) {
@@ -664,10 +729,11 @@ class SidekickApp {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                'X-Client-ID': this.clientId,
             },
             body: JSON.stringify({
                 mime_type: this.captureStopMeta?.mimeType || this.fallbackMimeType || 'audio/webm',
-                uploaded_chunks: this.uploadedChunkCount,
+                expected_chunks: this.expectedChunkCount,
             }),
         });
 

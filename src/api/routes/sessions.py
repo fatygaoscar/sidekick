@@ -13,16 +13,18 @@ from pydantic import BaseModel
 from config.settings import get_settings
 from src.core.datetime_utils import localize_datetime, timezone_label, to_utc_iso
 from src.audio.storage import (
+    assemble_chunks,
+    cleanup_chunk_storage,
     clear_session_chunk_upload_state,
     ensure_session_audio_path,
     extension_from_content_type,
     get_audio_dir,
+    get_available_chunks,
+    get_missing_chunk_indices,
     get_session_audio_candidates,
     get_session_audio_path,
-    get_session_partial_audio_path,
     media_type_for_path,
-    read_session_chunk_meta,
-    write_session_chunk_meta,
+    write_chunk,
 )
 from src.sessions.manager import SessionManager
 from src.sessions.repository import Repository
@@ -162,6 +164,7 @@ class SummarizeRequest(BaseModel):
 class FinalizeAudioRequest(BaseModel):
     mime_type: Optional[str] = None
     uploaded_chunks: Optional[int] = None
+    expected_chunks: Optional[int] = None  # New: total expected chunk count
 
 
 class SessionResponse(BaseModel):
@@ -530,7 +533,10 @@ async def delete_recording(
     audio_path = get_session_audio_path(session_id)
     if audio_path and audio_path.exists():
         audio_path.unlink()
+    # Clear old sequential append state
     clear_session_chunk_upload_state(session_id)
+    # Clear new chunk storage (all clients)
+    cleanup_chunk_storage(session_id)
     return {"status": "deleted", "session_id": session_id}
 
 
@@ -684,7 +690,11 @@ async def upload_recording_audio(
     request: Request,
     repository: Repository = Depends(get_repository),
 ):
-    """Upload encoded audio for a completed recording session."""
+    """Upload encoded audio for a completed recording session.
+
+    This is the authoritative, guaranteed upload path. It clears ALL chunk
+    storage for the session (all clients) and overwrites any partial data.
+    """
     session = await repository.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Recording not found")
@@ -696,7 +706,11 @@ async def upload_recording_audio(
     extension = extension_from_content_type(request.headers.get("content-type", ""))
 
     audio_dir = get_audio_dir()
+    # Clear old sequential append state
     clear_session_chunk_upload_state(session_id)
+    # Clear new chunk storage (all clients)
+    cleanup_chunk_storage(session_id)
+    # Remove any existing finalized audio
     for existing in get_session_audio_candidates(session_id):
         existing.unlink()
 
@@ -718,7 +732,17 @@ async def upload_recording_audio_chunk(
     request: Request,
     repository: Repository = Depends(get_repository),
 ):
-    """Append one encoded audio chunk for a recording session."""
+    """Store one encoded audio chunk for a recording session.
+
+    Chunks are stored individually by index, namespaced by client ID.
+    This is idempotent and order-independent - chunks can arrive in any order.
+
+    Requires X-Client-ID header to isolate uploads from different devices.
+    """
+    client_id = request.headers.get("X-Client-ID")
+    if not client_id:
+        raise HTTPException(status_code=400, detail="X-Client-ID header required")
+
     session = await repository.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Recording not found")
@@ -729,58 +753,35 @@ async def upload_recording_audio_chunk(
     if not body:
         raise HTTPException(status_code=400, detail="Audio chunk payload is empty")
 
-    incoming_extension = extension_from_content_type(request.headers.get("content-type", ""))
-    meta = read_session_chunk_meta(session_id) or {
-        "next_chunk_index": 0,
-        "extension": incoming_extension,
-    }
-
-    expected_chunk_index = int(meta.get("next_chunk_index", 0))
-    if chunk_index < expected_chunk_index:
-        return {
-            "status": "duplicate",
-            "session_id": session_id,
-            "chunk_index": chunk_index,
-            "expected_chunk_index": expected_chunk_index,
-        }
-    if chunk_index > expected_chunk_index:
-        raise HTTPException(
-            status_code=409,
-            detail="Chunk index out of order",
-            headers={"X-Expected-Chunk-Index": str(expected_chunk_index)},
-        )
-
-    extension = str(meta.get("extension") or incoming_extension or "webm")
-    part_path = get_session_partial_audio_path(session_id)
-    with part_path.open("ab") as handle:
-        handle.write(body)
-        handle.flush()
-        os.fsync(handle.fileno())
-
-    meta["next_chunk_index"] = expected_chunk_index + 1
-    meta["extension"] = extension
-    write_session_chunk_meta(session_id, meta)
+    # Store chunk (idempotent - skips if same size already exists)
+    chunk_path = write_chunk(session_id, client_id, chunk_index, body)
 
     return {
-        "status": "appended",
+        "status": "stored",
         "session_id": session_id,
         "chunk_index": chunk_index,
-        "next_chunk_index": meta["next_chunk_index"],
         "bytes": len(body),
+        "path": str(chunk_path.name),
     }
 
 
 @router.post("/recordings/{session_id}/audio/finalize")
 async def finalize_recording_audio(
     session_id: str,
-    request: FinalizeAudioRequest,
+    body: FinalizeAudioRequest,
+    request: Request,
     repository: Repository = Depends(get_repository),
 ):
-    """Finalize chunked recording audio into stable file for export/playback."""
+    """Finalize chunked recording audio into stable file for export/playback.
+
+    Requires X-Client-ID header - only assembles chunks from that specific client.
+    Returns 409 with missing chunk indices if incomplete.
+    """
     session = await repository.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Recording not found")
 
+    # Check for already finalized audio
     existing_audio_path = get_session_audio_path(session_id)
     if existing_audio_path:
         return {
@@ -789,29 +790,36 @@ async def finalize_recording_audio(
             "audio_url": f"/api/recordings/{session_id}/audio",
         }
 
-    meta = read_session_chunk_meta(session_id)
+    client_id = request.headers.get("X-Client-ID")
+    if not client_id:
+        raise HTTPException(status_code=400, detail="X-Client-ID header required")
 
-    expected_chunks = int(meta.get("next_chunk_index", 0)) if meta else 0
-    client_chunks = request.uploaded_chunks
-    if client_chunks is not None and client_chunks > expected_chunks:
+    # Determine expected chunk count
+    expected_count = body.expected_chunks or body.uploaded_chunks
+    if expected_count is None or expected_count <= 0:
+        raise HTTPException(status_code=400, detail="expected_chunks or uploaded_chunks required")
+
+    # Check for missing chunks
+    missing = get_missing_chunk_indices(session_id, client_id, expected_count)
+    if missing:
         raise HTTPException(
-            status_code=400,
-            detail=f"Missing uploaded chunks (server={expected_chunks}, client={client_chunks})",
+            status_code=409,
+            detail=f"Incomplete chunks: missing {len(missing)} of {expected_count}",
+            headers={"X-Missing-Chunks": ",".join(str(i) for i in missing[:20])},
         )
 
-    extension = (
-        str(meta.get("extension") or "").strip()
-        if meta
-        else extension_from_content_type(request.mime_type or "")
-    )
-    final_path = ensure_session_audio_path(session_id, preferred_extension=extension)
+    # Determine extension
+    extension = extension_from_content_type(body.mime_type or "")
+
+    # Assemble chunks from this client
+    final_path = assemble_chunks(session_id, client_id, expected_count, extension)
     if not final_path:
-        raise HTTPException(status_code=400, detail="No chunked audio available to finalize")
+        raise HTTPException(status_code=400, detail="Failed to assemble chunks")
 
     return {
         "status": "finalized",
         "session_id": session_id,
-        "chunks": expected_chunks if meta else 0,
+        "chunks": expected_count,
         "bytes": final_path.stat().st_size,
         "audio_url": f"/api/recordings/{session_id}/audio",
     }
