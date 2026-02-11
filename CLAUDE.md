@@ -102,6 +102,7 @@ UI template chooser order (shown templates only):
 
 - DB: `data/sidekick.db`
 - Audio: `data/audio/{session_id}.{ext}`
+- Chunk storage: `data/audio/chunks/{session_id}/{client_id}/` (temporary, during upload)
 - Sidekick logs/PID: `data/sidekick.log`, `data/sidekick.pid`
 - ngrok logs/PID/URL: `data/ngrok.log`, `data/ngrok.pid`, `data/ngrok.url`
 
@@ -112,9 +113,9 @@ UI template chooser order (shown templates only):
 - `GET /api/templates` list templates with prompts
 - `GET /api/recordings` list recordings
 - `GET /api/recordings/{id}` recording details
-- `PUT /api/recordings/{id}/audio` upload encoded audio
-- `PUT /api/recordings/{id}/audio/chunks/{index}` chunked upload
-- `POST /api/recordings/{id}/audio/finalize` finalize chunked upload
+- `PUT /api/recordings/{id}/audio` upload full audio blob (authoritative fallback)
+- `PUT /api/recordings/{id}/audio/chunks/{index}` chunked upload (requires `X-Client-ID` header)
+- `POST /api/recordings/{id}/audio/finalize` finalize chunked upload (requires `X-Client-ID` header)
 - `GET /api/recordings/{id}/audio` stream/download audio
 - `POST /api/recordings/{id}/export-obsidian` sync export (legacy)
 - `POST /api/recordings/{id}/export-obsidian-job` async export with progress
@@ -125,7 +126,7 @@ UI template chooser order (shown templates only):
 
 - Timer uses wall clock (no drift when tab inactive)
 - WebSocket keepalive ping every 25s prevents disconnects
-- Chunked audio upload during recording for reliability
+- Audio upload redesign: parallel chunks with client isolation, blob-first fallback
 - Real-time transcription progress (segment-based)
 - Animated progress bar for summarization
 - Export date added to markdown output
@@ -134,6 +135,17 @@ UI template chooser order (shown templates only):
 - History cards removed redundant Export and Download Audio actions
 - View modal contains audio download, transcript download, and re-summarize
 - Editable template prompts in UI
+
+## Handoff Notes (2026-02-11)
+
+- **Audio Upload Redesign**: Prevents multi-device corruption and ensures reliable audio persistence.
+  - **Client isolation**: Each browser tab gets a unique `X-Client-ID`; chunks stored at `data/audio/chunks/{session_id}/{client_id}/`.
+  - **Order-independent**: Chunks can arrive in any order; no more 409 errors for out-of-order uploads.
+  - **Idempotent writes**: Re-uploading same chunk is a no-op (skips if same size exists).
+  - **Parallel uploads**: Frontend fires chunks in parallel (fire-and-forget), tracks success/failure.
+  - **Blob-first fallback**: If any chunks fail or finalize fails, full blob upload is always used as recovery.
+  - **API changes**: `PUT .../audio/chunks/{n}` and `POST .../audio/finalize` now require `X-Client-ID` header.
+  - **Legacy compat**: Old `.part` file recovery still works for previously started recordings.
 
 ## Handoff Notes (2026-02-10)
 

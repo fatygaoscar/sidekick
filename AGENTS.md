@@ -85,8 +85,9 @@ UI template chooser order (shown templates only):
 | `GET /api/templates` | List templates with prompts |
 | `POST /api/recordings/{id}/export-obsidian-job` | Start async export |
 | `GET /api/export-jobs/{job_id}` | Poll export progress |
-| `PUT /api/recordings/{id}/audio/chunks/{n}` | Upload audio chunk |
-| `POST /api/recordings/{id}/audio/finalize` | Finalize chunked upload |
+| `PUT /api/recordings/{id}/audio` | Upload full audio blob (authoritative fallback) |
+| `PUT /api/recordings/{id}/audio/chunks/{n}` | Upload chunk (requires `X-Client-ID` header) |
+| `POST /api/recordings/{id}/audio/finalize` | Finalize chunks (requires `X-Client-ID` header) |
 
 ## Export Progress Flow
 
@@ -100,12 +101,21 @@ UI template chooser order (shown templates only):
 
 - **Timer**: Uses `Date.now()` wall clock, no drift when tab inactive
 - **WebSocket**: Ping every 25s, unlimited reconnects, visibility-change reconnect
-- **Audio**: Chunked upload during recording, fallback to full blob
+- **Audio Upload**: Parallel chunks with client isolation, idempotent writes, blob-first fallback
 - **Progress**: Real segment-based transcription progress
 - **Templates**: Only primary templates shown in chooser, ordered for common usage; prompts still editable before export
 - **History UX**: Removed redundant card actions (no card-level Export/Download Audio)
 - **View Pane Actions**: Audio download kept in view modal, added transcript download button, re-summarize remains primary action
 - **Export**: Includes both recorded and exported timestamps
+
+## Handoff Notes (2026-02-11)
+
+- **Audio Upload Redesign**: Prevents multi-device corruption and ensures reliable persistence.
+  - Client isolation via `X-Client-ID` header; chunks at `data/audio/chunks/{session}/{client}/`
+  - Order-independent: chunks can arrive in any order (no 409 for out-of-order)
+  - Idempotent: re-uploading same chunk is a no-op
+  - Parallel uploads with blob-first fallback if chunks fail
+  - Legacy `.part` recovery still works for backward compatibility
 
 ## Handoff Notes (2026-02-10)
 
