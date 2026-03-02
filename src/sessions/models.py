@@ -118,6 +118,31 @@ class Summary(Base):
     meeting: Mapped["Meeting"] = relationship("Meeting", back_populates="summaries")
 
 
+class StructuredItem(Base):
+    """Structured items extracted from meetings (actions, decisions, risks, etc.)."""
+
+    __tablename__ = "structured_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    meeting_id: Mapped[str] = mapped_column(String(36), ForeignKey("meetings.id"), nullable=False)
+    item_id: Mapped[str] = mapped_column(String(10), nullable=False)  # e.g., "A-001"
+    item_type: Mapped[str] = mapped_column(String(20), nullable=False)  # action|decision|risk|question|followup
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    owner: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    due_date: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    blocking: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    source_timestamp: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    impact: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mitigation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    who_decides: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    timeline: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 async def init_db(database_url: str) -> None:
     """Initialize the database and create tables."""
     engine = create_async_engine(database_url, echo=False)

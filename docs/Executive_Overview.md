@@ -27,7 +27,13 @@ When you speak, the app uses **OpenAI's Whisper** — a state-of-the-art speech 
 The system uses your computer's **graphics card (GPU)** to process speech up to 10x faster than using just the CPU.
 
 ### 4. The Writer: Local AI Summarization
-After transcribing your words, a **local AI model called Qwen** reads the transcript and writes structured meeting notes. Again, this runs entirely on your machine — no cloud subscription fees, no data leaving your network.
+After transcribing your words, a **local AI model called Qwen 3.5** processes the transcript through a multi-stage pipeline:
+1. **Extraction**: Identifies action items, decisions, risks, questions, and follow-ups
+2. **Deduplication**: Merges similar items across the meeting
+3. **Structuring**: Assigns trackable IDs (A-001, D-001, etc.)
+4. **Narration**: Writes flowing meeting notes that reference all extracted items
+
+This runs entirely on your machine — no cloud subscription fees, no data leaving your network.
 
 ### 5. The Database: SQLite
 All your recordings, transcripts, and summaries are stored in a simple **single-file database** on your computer. No need for a separate database server to manage.
@@ -60,8 +66,8 @@ More specifically:
 1. **Record** in browser (works on desktop or mobile)
 2. **Audio saves** to your computer
 3. **Whisper AI** converts speech to text
-4. **Qwen AI** reads the text and writes meeting notes based on your chosen template
-5. **Markdown file** lands in your Obsidian vault, ready to review
+4. **Multi-stage pipeline** extracts structured items (actions, decisions, risks, questions) and generates narrative
+5. **Markdown file** lands in your Obsidian vault with both narrative summary and trackable item tables
 
 ---
 

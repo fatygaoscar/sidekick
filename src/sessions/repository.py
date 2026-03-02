@@ -7,7 +7,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
 
-from .models import Base, ImportantMarker, Meeting, Session, Summary, TranscriptSegment
+from .models import Base, ImportantMarker, Meeting, Session, StructuredItem, Summary, TranscriptSegment
 from src.core.datetime_utils import to_utc_iso
 
 
@@ -416,3 +416,107 @@ class Repository:
         column_names = {row[1] for row in result.fetchall()}
         if "has_transcription" not in column_names:
             await conn.execute(text("ALTER TABLE sessions ADD COLUMN has_transcription BOOLEAN DEFAULT 0"))
+
+    # Structured item operations
+    async def add_structured_item(
+        self,
+        meeting_id: str,
+        item_id: str,
+        item_type: str,
+        text: str,
+        owner: str | None = None,
+        due_date: str | None = None,
+        blocking: str | None = None,
+        source_timestamp: str | None = None,
+        confidence: float = 1.0,
+        rationale: str | None = None,
+        impact: str | None = None,
+        mitigation: str | None = None,
+        context: str | None = None,
+        who_decides: str | None = None,
+        timeline: str | None = None,
+        status: str = "open",
+    ) -> StructuredItem:
+        """Add a structured item for a meeting."""
+        async with self._session_factory() as db:
+            item = StructuredItem(
+                meeting_id=meeting_id,
+                item_id=item_id,
+                item_type=item_type,
+                text=text,
+                owner=owner,
+                due_date=due_date,
+                blocking=blocking,
+                source_timestamp=source_timestamp,
+                confidence=confidence,
+                rationale=rationale,
+                impact=impact,
+                mitigation=mitigation,
+                context=context,
+                who_decides=who_decides,
+                timeline=timeline,
+                status=status,
+            )
+            db.add(item)
+            await db.commit()
+            await db.refresh(item)
+            return item
+
+    async def add_structured_items_bulk(
+        self,
+        meeting_id: str,
+        items: list[dict],
+    ) -> list[StructuredItem]:
+        """Add multiple structured items for a meeting in a single transaction."""
+        async with self._session_factory() as db:
+            created = []
+            for item_data in items:
+                item = StructuredItem(
+                    meeting_id=meeting_id,
+                    item_id=item_data.get("item_id", ""),
+                    item_type=item_data.get("item_type", "action"),
+                    text=item_data.get("text", ""),
+                    owner=item_data.get("owner"),
+                    due_date=item_data.get("due_date"),
+                    blocking=item_data.get("blocking"),
+                    source_timestamp=item_data.get("source_timestamp"),
+                    confidence=item_data.get("confidence", 1.0),
+                    rationale=item_data.get("rationale"),
+                    impact=item_data.get("impact"),
+                    mitigation=item_data.get("mitigation"),
+                    context=item_data.get("context"),
+                    who_decides=item_data.get("who_decides"),
+                    timeline=item_data.get("timeline"),
+                    status=item_data.get("status", "open"),
+                )
+                db.add(item)
+                created.append(item)
+            await db.commit()
+            for item in created:
+                await db.refresh(item)
+            return created
+
+    async def get_structured_items(
+        self,
+        meeting_id: str,
+        item_type: str | None = None,
+    ) -> list[StructuredItem]:
+        """Get structured items for a meeting."""
+        async with self._session_factory() as db:
+            query = select(StructuredItem).where(StructuredItem.meeting_id == meeting_id)
+            if item_type:
+                query = query.where(StructuredItem.item_type == item_type)
+            query = query.order_by(StructuredItem.item_id)
+            result = await db.execute(query)
+            return list(result.scalars().all())
+
+    async def delete_structured_items(self, meeting_id: str) -> int:
+        """Delete all structured items for a meeting."""
+        from sqlalchemy import delete
+
+        async with self._session_factory() as db:
+            result = await db.execute(
+                delete(StructuredItem).where(StructuredItem.meeting_id == meeting_id)
+            )
+            await db.commit()
+            return result.rowcount or 0

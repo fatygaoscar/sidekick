@@ -38,13 +38,26 @@ python -m src.main
 
 ### 2) Export Pipeline (authoritative)
 
-`saved audio file -> full transcription -> transcript segments -> summary -> markdown`
+`saved audio file -> full transcription -> multi-stage summarization -> markdown`
 
 - Implemented in `src/api/routes/export.py`
 - Uses saved session audio from `data/audio/`
 - Async job-based with real-time progress tracking
 - Rebuilds transcript segments at export time
 - Deterministic export behavior, independent of live preview timing
+
+### 3) Multi-Stage Summarization Pipeline
+
+`transcript -> chunking -> extraction -> merge/dedupe -> structuring -> narrative`
+
+- Implemented in `src/summarization/pipeline/`
+- Splits transcript into 8-12 minute chunks for processing
+- Extracts structured items: actions, decisions, risks, questions, follow-ups
+- Deduplicates across chunks
+- Validates and assigns IDs (A-001, D-001, R-001, Q-001, F-001)
+- Generates narrative summary referencing all item IDs
+- Coverage checking with patch for missed items
+- Persists items to `structured_items` table
 
 ## Summary Templates
 
@@ -89,14 +102,17 @@ UI template chooser order (shown templates only):
 - `WHISPER_DEVICE=cuda`
 - `WHISPER_COMPUTE_TYPE=float16`
 - `SUMMARIZATION_BACKEND=ollama`
-- `OLLAMA_MODEL=qwen2.5:14b`
+- `OLLAMA_MODEL=qwen3.5:35b-a3b`
 - `OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault`
 
 ## Output Format (Current)
 
 - Filename: `YYYY-MM-DD-HHMM - [Title] [Template].md`
 - Markdown metadata: Template, Recorded date, Exported date, Duration
-- Includes summary and collapsible transcript
+- **Multi-stage pipeline output**:
+  - Narrative summary referencing item IDs
+  - Extracted Items tables (Actions, Decisions, Risks, Questions, Follow-ups)
+  - Collapsible full transcript
 
 ## Data Locations
 
@@ -135,6 +151,27 @@ UI template chooser order (shown templates only):
 - History cards removed redundant Export and Download Audio actions
 - View modal contains audio download, transcript download, and re-summarize
 - Editable template prompts in UI
+
+## Handoff Notes (2026-03-02)
+
+- **Multi-Stage Pipeline Implementation**: Replaced single-pass summarization with structured extraction pipeline.
+  - **New package**: `src/summarization/pipeline/` with modules for chunking, extraction, merging, structuring, and narration.
+  - **Chunking**: Transcripts split into 8-12 minute chunks based on timestamps.
+  - **Extraction**: Per-chunk LLM pass extracts actions, decisions, risks, questions, follow-ups with confidence scores.
+  - **Merging**: Deduplication across chunks using Jaccard similarity on normalized text.
+  - **Structuring**: Assigns IDs (A-001, D-001, etc.), validates schema, filters by confidence.
+  - **Narration**: Generates flowing summary that references all item IDs, with coverage checking and patching.
+  - **Output**: Narrative + markdown tables for each item type + collapsible transcript.
+  - **Database**: New `StructuredItem` model stores extracted items per meeting.
+  - **Progress tracking**: Updated weights (40% transcription, 55% pipeline, 5% write).
+- **Model upgrade**: Changed `OLLAMA_MODEL` from `qwen2.5:14b` to `qwen3.5:35b-a3b` (pull with `ollama pull qwen3.5:35b-a3b`).
+- **Files modified**:
+  - `src/summarization/pipeline/` (new package)
+  - `src/summarization/manager.py` (added `process_with_pipeline()`)
+  - `src/api/routes/export.py` (uses pipeline, persists structured items)
+  - `src/sessions/models.py` (added `StructuredItem`)
+  - `src/sessions/repository.py` (added CRUD for structured items)
+  - `.env` (updated model)
 
 ## Handoff Notes (2026-02-11)
 

@@ -26,7 +26,18 @@ src/
 ├── summarization/
 │   ├── prompts.py        # Template definitions
 │   ├── ollama_backend.py # Local LLM
-│   └── manager.py        # Summarization orchestration
+│   ├── manager.py        # Summarization orchestration
+│   └── pipeline/         # Multi-stage extraction pipeline
+│       ├── types.py      # ExtractedItem, PipelineResult
+│       ├── chunker.py    # Time-based transcript splitting
+│       ├── extraction.py # Per-chunk item extraction
+│       ├── merger.py     # Cross-chunk deduplication
+│       ├── structurer.py # ID assignment, validation
+│       ├── narrator.py   # Narrative generation
+│       └── pipeline.py   # Orchestrator
+├── sessions/
+│   ├── models.py         # SQLAlchemy models (incl. StructuredItem)
+│   └── repository.py     # Database operations
 └── audio/
     └── storage.py        # Audio file management
 
@@ -47,7 +58,7 @@ web/
 WHISPER_MODEL_SIZE=large-v3
 WHISPER_DEVICE=cuda
 SUMMARIZATION_BACKEND=ollama
-OLLAMA_MODEL=qwen2.5:14b
+OLLAMA_MODEL=qwen3.5:35b-a3b
 OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 ```
 
@@ -94,8 +105,9 @@ UI template chooser order (shown templates only):
 1. Frontend calls `POST /export-obsidian-job` → returns `job_id`
 2. Frontend polls `GET /export-jobs/{job_id}` every 900ms
 3. Backend updates job state as transcription segments complete
-4. Transcription progress: real segment-based (0-100%)
-5. Summarization progress: animated/indeterminate (LLM timing unpredictable)
+4. Transcription progress: 0-40% (real segment-based)
+5. Pipeline progress: 40-95% (chunking → extraction → merge → structure → narrative)
+6. Write progress: 95-100%
 
 ## Recent Improvements
 
@@ -107,6 +119,19 @@ UI template chooser order (shown templates only):
 - **History UX**: Removed redundant card actions (no card-level Export/Download Audio)
 - **View Pane Actions**: Audio download kept in view modal, added transcript download button, re-summarize remains primary action
 - **Export**: Includes both recorded and exported timestamps
+
+## Handoff Notes (2026-03-02)
+
+- **Multi-Stage Pipeline**: Replaced single-pass summarization with structured extraction.
+  - Chunks transcript into 8-12 min segments
+  - Extracts actions, decisions, risks, questions, follow-ups per chunk
+  - Deduplicates across chunks (Jaccard similarity)
+  - Assigns IDs: A-001, D-001, R-001, Q-001, F-001
+  - Generates narrative referencing all item IDs
+  - Coverage checking with patch for missed items
+  - Output: narrative + markdown tables + transcript
+- **Model upgrade**: `qwen2.5:14b` → `qwen3.5:35b-a3b` (pull with `ollama pull qwen3.5:35b-a3b`)
+- **Database**: New `StructuredItem` model stores extracted items per meeting
 
 ## Handoff Notes (2026-02-11)
 

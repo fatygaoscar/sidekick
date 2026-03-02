@@ -50,7 +50,7 @@ WHISPER_DEVICE=cuda
 
 # Summarization
 SUMMARIZATION_BACKEND=ollama
-OLLAMA_MODEL=qwen2.5:14b
+OLLAMA_MODEL=qwen3.5:35b-a3b
 
 # Export location
 OBSIDIAN_VAULT_PATH=/path/to/your/vault
@@ -89,6 +89,18 @@ Two transcription pipelines:
 2. **Export Pipeline** (authoritative): Full transcription from saved audio at export time
 
 This ensures consistent, high-quality exports regardless of network conditions during recording.
+
+### Multi-Stage Summarization Pipeline
+
+The export pipeline uses a multi-stage approach for improved accuracy:
+
+1. **Chunking**: Splits transcript into 8-12 minute segments
+2. **Extraction**: Extracts actions, decisions, risks, questions, and follow-ups from each chunk
+3. **Deduplication**: Merges duplicate items across chunks
+4. **Structuring**: Assigns IDs (A-001, D-001, R-001, Q-001, F-001) and validates schema
+5. **Narration**: Generates narrative summary referencing all extracted items
+
+Output includes both structured tables and flowing narrative.
 
 ## Requirements
 

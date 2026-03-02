@@ -19,6 +19,8 @@ from src.core.datetime_utils import localize_datetime, timezone_label, to_utc_is
 from src.sessions.repository import Repository
 from src.summarization.manager import SummarizationManager
 from src.summarization.prompts import TEMPLATE_INFO, get_template_content
+from src.summarization.pipeline.pipeline import build_markdown_output
+from src.summarization.pipeline.types import PipelineResult
 from src.transcription.manager import TranscriptionManager
 
 
@@ -132,18 +134,18 @@ def _utc_now_iso() -> str:
 
 
 def _compute_overall_progress(stage: str, transcription_progress: float, summarization_progress: float) -> float:
-    # 65% transcription, 30% summarization, 5% final write.
+    # 40% transcription, 55% pipeline summarization, 5% final write.
     if stage == "queued":
         return 0.0
     if stage == "transcribing":
-        return min(0.65 * transcription_progress, 0.65)
+        return min(0.40 * transcription_progress, 0.40)
     if stage == "summarizing":
-        return 0.65 + min(0.30 * summarization_progress, 0.30)
+        return 0.40 + min(0.55 * summarization_progress, 0.55)
     if stage == "writing":
         return 0.95
     if stage == "completed":
         return 1.0
-    return min(0.65 * transcription_progress + 0.30 * summarization_progress, 0.95)
+    return min(0.40 * transcription_progress + 0.55 * summarization_progress, 0.95)
 
 
 def _compute_transcription_job_progress(stage: str, transcription_progress: float) -> float:
@@ -413,34 +415,58 @@ async def _run_export_pipeline(
         ),
     )
 
-    # Generate summary using the selected template
-    # If custom_prompt is provided, use it as the full prompt (user edited the template)
+    # Generate summary using the multi-stage pipeline
     template = request_payload.template
-    custom_instructions = request_payload.custom_prompt if request_payload.custom_prompt else None
-    # When user provides edited prompt, treat as custom to use their exact wording
-    effective_template = "custom" if custom_instructions else template
 
-    await _emit_progress(progress_callback, "summarizing", "Generating summary", 1.0, 0.08)
+    # Pipeline progress callback adapter
+    async def pipeline_progress(stage: str, message: str, progress: float) -> None:
+        await _emit_progress(progress_callback, "summarizing", f"{stage}: {message}", 1.0, progress)
+
+    await _emit_progress(progress_callback, "summarizing", "Starting pipeline", 1.0, 0.02)
     try:
-        summary_result = await summarization_manager.summarize(
+        pipeline_result = await summarization_manager.process_with_pipeline(
             transcript=full_transcript,
-            prompt_type=effective_template,
-            custom_instructions=custom_instructions,
+            template=template,
+            progress_callback=pipeline_progress,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
 
-    await _emit_progress(progress_callback, "summarizing", "Summary complete", 1.0, 1.0)
+    await _emit_progress(progress_callback, "summarizing", "Pipeline complete", 1.0, 1.0)
 
     # Persist summary metadata so history/view actions can reflect summarized state.
     await repository.add_summary(
         meeting_id=primary_meeting_id,
-        content=summary_result.content,
-        backend=summary_result.backend,
-        model=summary_result.model,
-        prompt_tokens=summary_result.prompt_tokens,
-        completion_tokens=summary_result.completion_tokens,
+        content=pipeline_result.narrative,
+        backend=pipeline_result.backend,
+        model=pipeline_result.model,
+        prompt_tokens=pipeline_result.prompt_tokens,
+        completion_tokens=pipeline_result.completion_tokens,
     )
+
+    # Persist structured items
+    await repository.delete_structured_items(primary_meeting_id)
+    items_to_persist = []
+    for item in pipeline_result.items.all_items():
+        items_to_persist.append({
+            "item_id": item.id,
+            "item_type": item.type,
+            "text": item.text,
+            "owner": item.owner,
+            "due_date": item.due_date,
+            "blocking": item.blocking,
+            "source_timestamp": item.source_timestamp,
+            "confidence": item.confidence,
+            "rationale": item.rationale,
+            "impact": item.impact,
+            "mitigation": item.mitigation,
+            "context": item.context,
+            "who_decides": item.who_decides,
+            "timeline": item.timeline,
+            "status": item.status,
+        })
+    if items_to_persist:
+        await repository.add_structured_items_bulk(primary_meeting_id, items_to_persist)
 
     # Calculate duration
     duration_seconds = int(audio_duration_seconds)
@@ -467,27 +493,18 @@ async def _run_export_pipeline(
     safe_title = re.sub(r'[<>:"/\\|?*]', '', request_payload.title)  # Remove invalid filename chars
     filename = f"{timestamp} - {safe_title} [{template_label}].md"
 
-    # Build markdown content
+    # Build markdown content using pipeline output
     recorded_at = local_started_at.strftime("%Y-%m-%d %H:%M")
     exported_at = local_exported_at.strftime("%Y-%m-%d %H:%M")
-    markdown_content = f"""**Template**: {template_label}
-**Recorded**: {recorded_at} ({tz_label})
-**Exported**: {exported_at} ({tz_label})
-**Duration**: {duration_str}
-
----
-
-{summary_result.content}
-
----
-
-<details>
-<summary>Full Transcript</summary>
-
-{full_transcript}
-
-</details>
-"""
+    markdown_content = build_markdown_output(
+        result=pipeline_result,
+        template_label=template_label,
+        recorded_at=recorded_at,
+        exported_at=exported_at,
+        tz_label=tz_label,
+        duration_str=duration_str,
+        transcript=full_transcript,
+    )
 
     # Write to Obsidian vault
     await _emit_progress(progress_callback, "writing", "Writing note to vault", 1.0, 1.0)

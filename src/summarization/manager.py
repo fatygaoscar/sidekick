@@ -1,5 +1,7 @@
 """Summarization backend manager."""
 
+from typing import Callable, Awaitable, Optional
+
 from config.settings import Settings, SummarizationBackend as SumBackendEnum, get_settings
 from src.core.events import EventType, get_event_bus
 from src.sessions.manager import SessionManager
@@ -9,6 +11,12 @@ from .base import SummarizationBackend, SummarizationResult
 from .ollama_backend import OllamaBackend
 from .openai_backend import OpenAIBackend
 from .prompts import get_prompt
+from .pipeline.pipeline import run_pipeline, build_markdown_output
+from .pipeline.types import PipelineResult
+
+
+# Type alias for pipeline progress callback
+PipelineProgressCallback = Callable[[str, str, float], Awaitable[None] | None]
 
 
 class SummarizationManager:
@@ -216,3 +224,86 @@ class SummarizationManager:
             return AnthropicBackend()
         else:
             raise ValueError(f"Unknown summarization backend: {backend}")
+
+    async def process_with_pipeline(
+        self,
+        transcript: str,
+        template: str = "meeting",
+        progress_callback: Optional[PipelineProgressCallback] = None,
+    ) -> PipelineResult:
+        """Process transcript using the multi-stage pipeline.
+
+        This method provides structured extraction (actions, decisions, risks,
+        questions, follow-ups) plus a narrative summary that references all
+        extracted items.
+
+        Args:
+            transcript: Full transcript text with timestamps
+            template: Template type for narrative style
+            progress_callback: Optional callback for progress updates (stage, message, progress)
+
+        Returns:
+            PipelineResult with narrative, structured items, and metadata
+        """
+        if not self._initialized or self._active_backend is None:
+            await self.initialize()
+
+        # Create LLM call wrapper for the pipeline
+        async def llm_call(system_prompt: str, user_prompt: str) -> str:
+            result = await self._active_backend.summarize(
+                transcript="",  # Not used when prompts are provided
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+            return result.content
+
+        # Emit start event
+        await self._event_bus.emit(
+            EventType.SUMMARIZATION_STARTED,
+            {
+                "backend": self._active_backend.name,
+                "model": self._active_backend.model,
+                "transcript_length": len(transcript),
+                "pipeline": True,
+            },
+            source="summarization_manager",
+        )
+
+        try:
+            result = await run_pipeline(
+                transcript=transcript,
+                template=template,
+                llm_call=llm_call,
+                backend_name=self._active_backend.name,
+                model_name=self._active_backend.model,
+                progress_callback=progress_callback,
+            )
+
+            # Emit completion event
+            await self._event_bus.emit(
+                EventType.SUMMARIZATION_COMPLETED,
+                {
+                    "backend": result.backend,
+                    "model": result.model,
+                    "narrative_length": len(result.narrative),
+                    "items_extracted": len(result.items.all_items()),
+                    "coverage_score": result.coverage_score,
+                    "pipeline": True,
+                },
+                source="summarization_manager",
+            )
+
+            return result
+
+        except Exception as e:
+            # Emit error event
+            await self._event_bus.emit(
+                EventType.SUMMARIZATION_ERROR,
+                {
+                    "backend": self._active_backend.name if self._active_backend else "unknown",
+                    "error": str(e),
+                    "pipeline": True,
+                },
+                source="summarization_manager",
+            )
+            raise
