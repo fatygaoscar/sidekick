@@ -83,8 +83,18 @@ cmd_benchmark() {
   python3 ./scripts/benchmark_ollama_models.py "$@"
 }
 
+cmd_default() {
+  # Open Ollama GPU monitor in a new PowerShell window
+  local script_win
+  script_win="$(wslpath -w "$PWD/scripts/monitor_ollama.ps1")"
+  cmd.exe /c start powershell.exe -ExecutionPolicy Bypass -File "$script_win" -IntervalSeconds 2 -ShowGpu
+
+  # Run export monitor in this terminal
+  cmd_export
+}
+
 if [[ $# -lt 1 ]]; then
-  usage; exit 1
+  cmd_default; exit 0
 fi
 
 cmd="$1"; shift
