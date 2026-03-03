@@ -26,6 +26,7 @@ class Repository:
             await conn.run_sync(Base.metadata.create_all)
             await self._ensure_session_timezone_columns(conn)
             await self._ensure_session_transcription_column(conn)
+            await self._ensure_transcript_speaker_column(conn)
 
     async def close(self) -> None:
         """Close database connection."""
@@ -199,6 +200,7 @@ class Repository:
         meeting_id: str | None = None,
         is_important: bool = False,
         confidence: float | None = None,
+        speaker: str | None = None,
     ) -> TranscriptSegment:
         """Add a transcript segment."""
         async with self._session_factory() as db:
@@ -210,6 +212,7 @@ class Repository:
                 end_time=end_time,
                 is_important=is_important,
                 confidence=confidence,
+                speaker=speaker,
             )
             db.add(segment)
             await db.commit()
@@ -247,6 +250,19 @@ class Repository:
             )
             await db.commit()
             return result.rowcount or 0
+
+    async def update_segments_speakers(self, updates: dict[str, str | None]) -> None:
+        """Bulk update speaker labels. updates maps segment_id → speaker label."""
+        from sqlalchemy import update
+
+        async with self._session_factory() as db:
+            for segment_id, speaker in updates.items():
+                await db.execute(
+                    update(TranscriptSegment)
+                    .where(TranscriptSegment.id == segment_id)
+                    .values(speaker=speaker)
+                )
+            await db.commit()
 
     async def mark_segments_important(
         self, session_id: str, start_time: float, end_time: float
@@ -416,6 +432,13 @@ class Repository:
         column_names = {row[1] for row in result.fetchall()}
         if "has_transcription" not in column_names:
             await conn.execute(text("ALTER TABLE sessions ADD COLUMN has_transcription BOOLEAN DEFAULT 0"))
+
+    async def _ensure_transcript_speaker_column(self, conn) -> None:
+        """Backfill schema for speaker label on existing SQLite DBs."""
+        result = await conn.execute(text("PRAGMA table_info(transcript_segments)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "speaker" not in column_names:
+            await conn.execute(text("ALTER TABLE transcript_segments ADD COLUMN speaker VARCHAR(64)"))
 
     # Structured item operations
     async def add_structured_item(

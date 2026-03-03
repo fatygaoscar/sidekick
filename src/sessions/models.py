@@ -77,6 +77,7 @@ class TranscriptSegment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     is_important: Mapped[bool] = mapped_column(Boolean, default=False)
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    speaker: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     # Relationships
     session: Mapped["Session"] = relationship("Session", back_populates="segments")

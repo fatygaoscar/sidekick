@@ -84,6 +84,12 @@ class PipelineResult:
     backend: str
     model: str
 
+    # Narrative metadata
+    narrative_context_mode: str = "full_transcript"  # full_transcript|compressed_pack
+    narrative_strategy: str = "template_native"
+    narrative_passes: int = 2
+    style_profile: str = "narrative_first_v1"
+
     # Token usage (aggregate)
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None

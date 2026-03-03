@@ -380,6 +380,8 @@ class SidekickApp {
     // Naming modal
     _showNamingModal() {
         this.elements.recordingTitle.value = '';
+        const attendeesEl = document.getElementById('attendees');
+        if (attendeesEl) attendeesEl.value = '';
         this.state.promptEdited = false;
         this.state.promptVisible = false;
         this.elements.promptContainer.classList.add('hidden');
@@ -477,6 +479,7 @@ class SidekickApp {
                     title,
                     template,
                     custom_prompt: customPrompt,
+                    attendees: document.getElementById('attendees')?.value.trim() || null,
                 }),
             });
 

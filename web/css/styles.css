@@ -374,6 +374,13 @@ body {
     margin-bottom: 8px;
 }
 
+.form-label-optional {
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    text-transform: none;
+    opacity: 0.6;
+}
+
 .form-input {
     width: 100%;
     padding: 12px;

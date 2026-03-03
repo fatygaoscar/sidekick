@@ -328,6 +328,8 @@ class RecordingsPage {
 
         const title = this.currentRecording?.title || this.currentRecording?.meetings?.[0]?.title || 'Untitled Recording';
         this.elements.resummarizeTitle.value = title;
+        const attendeesEl = document.getElementById('resummarize-attendees');
+        if (attendeesEl) attendeesEl.value = '';
         this.promptEdited = false;
         this.promptVisible = false;
         this.elements.promptContainer.classList.add('hidden');
@@ -376,7 +378,12 @@ class RecordingsPage {
         const promptValue = this.elements.resummarizeCustomPrompt.value.trim();
         const customPrompt = (template === 'custom' || this.promptEdited) ? promptValue : null;
 
-        await this._exportRecording(this.currentRecording.id, title, template, customPrompt);
+        await this._exportRecording(
+            this.currentRecording.id,
+            title,
+            template,
+            customPrompt,
+        );
     }
 
     _downloadTranscript() {
@@ -623,6 +630,7 @@ class RecordingsPage {
                     title,
                     template,
                     custom_prompt: customPrompt,
+                    attendees: document.getElementById('resummarize-attendees')?.value.trim() || null,
                 }),
             });
 

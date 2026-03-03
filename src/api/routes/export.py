@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -19,8 +22,6 @@ from src.core.datetime_utils import localize_datetime, timezone_label, to_utc_is
 from src.sessions.repository import Repository
 from src.summarization.manager import SummarizationManager
 from src.summarization.prompts import TEMPLATE_INFO, get_template_content
-from src.summarization.pipeline.pipeline import build_markdown_output
-from src.summarization.pipeline.types import PipelineResult
 from src.transcription.manager import TranscriptionManager
 
 
@@ -46,6 +47,7 @@ class ExportRequest(BaseModel):
     title: str
     template: str = "meeting"
     custom_prompt: Optional[str] = None
+    attendees: Optional[str] = None
 
 
 class ExportResponse(BaseModel):
@@ -103,10 +105,6 @@ _EXPORT_JOBS: dict[str, dict] = {}
 _EXPORT_TASKS: dict[str, asyncio.Task] = {}
 _TRANSCRIPTION_JOBS: dict[str, dict] = {}
 _TRANSCRIPTION_TASKS: dict[str, asyncio.Task] = {}
-
-# Templates that use the multi-stage extraction pipeline (structured items + narrative).
-# Content-heavy templates use single-pass with the full transcript and rich template prompt.
-_PIPELINE_TEMPLATES = {"meeting", "standup", "one_on_one", "strategic_review"}
 
 
 @router.get("/templates")
@@ -255,7 +253,8 @@ def _segments_to_transcript(segments: list) -> tuple[str, float]:
         mins = int(segment.start_time // 60)
         secs = int(segment.start_time % 60)
         marker = " [IMPORTANT]" if segment.is_important else ""
-        lines.append(f"[{mins:02d}:{secs:02d}]{marker} {segment.text}")
+        speaker_prefix = f"{segment.speaker}: " if getattr(segment, "speaker", None) else ""
+        lines.append(f"[{mins:02d}:{secs:02d}]{marker} {speaker_prefix}{segment.text}")
         duration = max(duration, float(segment.end_time))
     return "\n".join(lines).strip(), duration
 
@@ -295,6 +294,17 @@ async def _transcribe_and_persist_session(
     full_text = transcription_result.text.strip()
     if not full_text:
         raise HTTPException(status_code=400, detail="No speech detected in recording audio")
+
+    # Run speaker diarization if enabled (non-blocking on failure)
+    from src.transcription.diarize import assign_speaker, diarize
+    diarization_spans: list[tuple[float, float, str]] = []
+    _settings = get_settings()
+    if _settings.diarization_enabled and _settings.hf_token:
+        try:
+            diarization_spans = await asyncio.to_thread(diarize, str(audio_path), _settings.hf_token)
+            logger.info(f"Diarization: {len(diarization_spans)} speaker spans")
+        except Exception as exc:
+            logger.warning(f"Diarization failed, continuing without speaker labels: {exc}")
 
     await repository.delete_segments_for_session(session_id)
 
@@ -339,6 +349,7 @@ async def _transcribe_and_persist_session(
                         start_time=start,
                         end_time=end,
                         confidence=transcription_result.confidence,
+                        speaker=assign_speaker(start, end, diarization_spans) if diarization_spans else None,
                     )
                 buffer_words = []
 
@@ -352,6 +363,7 @@ async def _transcribe_and_persist_session(
                 start_time=start,
                 end_time=end,
                 confidence=transcription_result.confidence,
+                speaker=assign_speaker(start, end, diarization_spans) if diarization_spans else None,
             )
     else:
         await repository.add_segment(
@@ -361,6 +373,7 @@ async def _transcribe_and_persist_session(
             start_time=0.0,
             end_time=audio_duration_seconds,
             confidence=transcription_result.confidence,
+            speaker=assign_speaker(0.0, audio_duration_seconds, diarization_spans) if diarization_spans else None,
         )
 
     await repository.set_session_has_transcription(session_id, True)
@@ -454,6 +467,31 @@ async def _run_export_pipeline(
     existing_segments = await repository.get_segments(session_id=session_id) if session.has_transcription else []
     if session.has_transcription and existing_segments:
         await _emit_progress(progress_callback, "transcribing", "Reusing existing transcript", 0.2, 0.0)
+
+        # Run diarization on existing segments if enabled and not yet applied.
+        _settings = get_settings()
+        has_speakers = any(getattr(seg, "speaker", None) for seg in existing_segments)
+        if _settings.diarization_enabled and _settings.hf_token and not has_speakers:
+            audio_path = get_session_audio_path(session_id)
+            if not audio_path and session.ended_at:
+                audio_path = ensure_session_audio_path(session_id)
+            if audio_path:
+                await _emit_progress(progress_callback, "transcribing", "Running speaker diarization", 0.5, 0.0)
+                try:
+                    from src.transcription.diarize import assign_speaker, diarize
+                    diarization_spans = await asyncio.to_thread(
+                        diarize, str(audio_path), _settings.hf_token
+                    )
+                    speaker_updates = {
+                        seg.id: assign_speaker(seg.start_time, seg.end_time, diarization_spans)
+                        for seg in existing_segments
+                    }
+                    await repository.update_segments_speakers(speaker_updates)
+                    existing_segments = await repository.get_segments(session_id=session_id)
+                    logger.info(f"Diarization: applied to {len(existing_segments)} existing segments")
+                except Exception as exc:
+                    logger.warning(f"Diarization failed on existing segments, continuing: {exc}")
+
         full_transcript, audio_duration_seconds = _build_transcript_from_segments(existing_segments)
         await _emit_progress(progress_callback, "transcribing", "Transcription complete", 1.0, 0.0)
     else:
@@ -472,80 +510,30 @@ async def _run_export_pipeline(
 
     # Generate summary
     template = request_payload.template
-    use_pipeline = template in _PIPELINE_TEMPLATES
 
-    if use_pipeline:
-        async def pipeline_progress(stage: str, message: str, progress: float) -> None:
-            await _emit_progress(progress_callback, "summarizing", f"{stage}: {message}", 1.0, progress)
-
-        await _emit_progress(progress_callback, "summarizing", "Starting pipeline", 1.0, 0.02)
-        try:
-            pipeline_result = await summarization_manager.process_with_pipeline(
-                transcript=full_transcript,
-                template=template,
-                progress_callback=pipeline_progress,
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
-
-        await _emit_progress(progress_callback, "summarizing", "Pipeline complete", 1.0, 1.0)
-
-        await repository.add_summary(
-            meeting_id=primary_meeting_id,
-            content=pipeline_result.narrative,
-            backend=pipeline_result.backend,
-            model=pipeline_result.model,
-            prompt_tokens=pipeline_result.prompt_tokens,
-            completion_tokens=pipeline_result.completion_tokens,
+    await _emit_progress(progress_callback, "summarizing", "Generating summary", 1.0, 0.02)
+    try:
+        summary_result = await summarization_manager.summarize(
+            transcript=full_transcript,
+            prompt_type=template,
+            custom_instructions=request_payload.custom_prompt,
+            attendees=request_payload.attendees,
         )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
 
-        await repository.delete_structured_items(primary_meeting_id)
-        items_to_persist = []
-        for item in pipeline_result.items.all_items():
-            items_to_persist.append({
-                "item_id": item.id,
-                "item_type": item.type,
-                "text": item.text,
-                "owner": item.owner,
-                "due_date": item.due_date,
-                "blocking": item.blocking,
-                "source_timestamp": item.source_timestamp,
-                "confidence": item.confidence,
-                "rationale": item.rationale,
-                "impact": item.impact,
-                "mitigation": item.mitigation,
-                "context": item.context,
-                "who_decides": item.who_decides,
-                "timeline": item.timeline,
-                "status": item.status,
-            })
-        if items_to_persist:
-            await repository.add_structured_items_bulk(primary_meeting_id, items_to_persist)
+    await _emit_progress(progress_callback, "summarizing", "Summary complete", 1.0, 1.0)
 
-        summary_content = pipeline_result.narrative
-    else:
-        await _emit_progress(progress_callback, "summarizing", "Generating summary", 1.0, 0.02)
-        try:
-            summary_result = await summarization_manager.summarize(
-                transcript=full_transcript,
-                prompt_type=template,
-                custom_instructions=request_payload.custom_prompt,
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
+    await repository.add_summary(
+        meeting_id=primary_meeting_id,
+        content=summary_result.content,
+        backend=summary_result.backend,
+        model=summary_result.model,
+        prompt_tokens=summary_result.prompt_tokens,
+        completion_tokens=summary_result.completion_tokens,
+    )
 
-        await _emit_progress(progress_callback, "summarizing", "Summary complete", 1.0, 1.0)
-
-        await repository.add_summary(
-            meeting_id=primary_meeting_id,
-            content=summary_result.content,
-            backend=summary_result.backend,
-            model=summary_result.model,
-            prompt_tokens=summary_result.prompt_tokens,
-            completion_tokens=summary_result.completion_tokens,
-        )
-
-        summary_content = summary_result.content
+    summary_content = summary_result.content
 
     # Calculate duration
     duration_seconds = int(audio_duration_seconds)
@@ -575,26 +563,15 @@ async def _run_export_pipeline(
     # Build markdown content
     recorded_at = local_started_at.strftime("%Y-%m-%d %H:%M")
     exported_at = local_exported_at.strftime("%Y-%m-%d %H:%M")
-    if use_pipeline:
-        markdown_content = build_markdown_output(
-            result=pipeline_result,
-            template_label=template_label,
-            recorded_at=recorded_at,
-            exported_at=exported_at,
-            tz_label=tz_label,
-            duration_str=duration_str,
-            transcript=full_transcript,
-        )
-    else:
-        markdown_content = _build_singlepass_markdown(
-            content=summary_content,
-            template_label=template_label,
-            recorded_at=recorded_at,
-            exported_at=exported_at,
-            tz_label=tz_label,
-            duration_str=duration_str,
-            transcript=full_transcript,
-        )
+    markdown_content = _build_singlepass_markdown(
+        content=summary_content,
+        template_label=template_label,
+        recorded_at=recorded_at,
+        exported_at=exported_at,
+        tz_label=tz_label,
+        duration_str=duration_str,
+        transcript=full_transcript,
+    )
 
     # Write to Obsidian vault
     await _emit_progress(progress_callback, "writing", "Writing note to vault", 1.0, 1.0)

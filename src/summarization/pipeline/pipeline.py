@@ -28,8 +28,7 @@ PROGRESS_WEIGHTS = {
     "extraction": 0.38,
     "merging": 0.03,
     "structuring": 0.12,
-    "narrative": 0.35,
-    "coverage": 0.05,
+    "narrative": 0.40,
     "finalizing": 0.05,
 }
 
@@ -76,7 +75,11 @@ async def run_pipeline(
     model_name: str,
     progress_callback: Optional[ProgressCallback] = None,
     min_confidence: float = 0.5,
+    perspective: Optional[str] = None,
     min_coverage: float = 0.9,
+    narrative_strategy: str = "template_native",
+    template_prompt: Optional[str] = None,
+    llm_context_length: int = 4096,
 ) -> PipelineResult:
     """Run the full multi-stage pipeline.
 
@@ -88,7 +91,11 @@ async def run_pipeline(
         model_name: Name of the model for metadata
         progress_callback: Optional callback for progress updates
         min_confidence: Minimum confidence threshold for items
-        min_coverage: Minimum coverage score before patching
+        perspective: Optional perspective focus for narrative generation
+        min_coverage: Backward-compatibility parameter (no-op)
+        narrative_strategy: Narrative generation strategy
+        template_prompt: Template instructions to shape final narrative
+        llm_context_length: LLM context length used for context budgeting
 
     Returns:
         PipelineResult with narrative, structured items, and metadata
@@ -209,12 +216,15 @@ async def run_pipeline(
         _calculate_cumulative_progress("narrative", 0.0),
     )
 
-    narrative, coverage = await generate_narrative(
+    narrative, coverage, context_mode, passes_used, style_profile = await generate_narrative(
         items=structured,
         template=template,
         transcript=transcript,
         llm_call=llm_call,
+        perspective=perspective,
         min_coverage=min_coverage,
+        template_prompt=template_prompt,
+        context_length=llm_context_length,
     )
 
     await _emit_progress(
@@ -224,15 +234,7 @@ async def run_pipeline(
         _calculate_cumulative_progress("narrative", 1.0),
     )
 
-    # Stage 6: Coverage check / patch (if needed)
-    await _emit_progress(
-        progress_callback,
-        "coverage",
-        f"Coverage: {coverage:.0%}",
-        _calculate_cumulative_progress("coverage", 1.0),
-    )
-
-    # Stage 7: Finalizing
+    # Stage 6: Finalizing
     await _emit_progress(
         progress_callback,
         "finalizing",
@@ -249,6 +251,10 @@ async def run_pipeline(
         total_items_extracted=total_extracted,
         items_after_dedup=items_after_dedup,
         coverage_score=coverage,
+        narrative_context_mode=context_mode,
+        narrative_strategy=narrative_strategy,
+        narrative_passes=passes_used,
+        style_profile=style_profile,
         backend=backend_name,
         model=model_name,
     )
@@ -271,6 +277,8 @@ def build_markdown_output(
     tz_label: str,
     duration_str: str,
     transcript: str,
+    perspective: Optional[str] = None,
+    include_structured_tables: bool = False,
 ) -> str:
     """Build final markdown output from pipeline result.
 
@@ -286,8 +294,39 @@ def build_markdown_output(
     Returns:
         Complete markdown document
     """
-    # Build the tables section
-    tables_md = items_to_markdown_tables(result.items)
+    if include_structured_tables:
+        table_items = result.items
+        if perspective and perspective.strip():
+            perspective_lc = perspective.strip().lower()
+            sorted_actions = sorted(
+                result.items.actions,
+                key=lambda item: (
+                    0
+                    if item.owner and item.owner.strip().lower() == perspective_lc
+                    else 1
+                ),
+            )
+            table_items = StructuredItems(
+                actions=sorted_actions,
+                decisions=result.items.decisions,
+                risks=result.items.risks,
+                questions=result.items.questions,
+                followups=result.items.followups,
+            )
+        tables_md = items_to_markdown_tables(table_items)
+    else:
+        tables_md = ""
+    extracted_items_section = (
+        f"""
+---
+
+## Extracted Items
+
+{tables_md}
+"""
+        if include_structured_tables
+        else ""
+    )
 
     markdown_content = f"""**Template**: {template_label}
 **Recorded**: {recorded_at} ({tz_label})
@@ -297,12 +336,7 @@ def build_markdown_output(
 ---
 
 {result.narrative}
-
----
-
-## Extracted Items
-
-{tables_md}
+{extracted_items_section}
 
 ---
 

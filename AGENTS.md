@@ -5,218 +5,252 @@ Quick reference for AI agents working on this codebase.
 ## Runtime Commands
 
 ```bash
-./start.sh          # Start server
-./start.sh --ngrok  # Start with public URL
-./start.sh --cloudflare  # Start with Cloudflare quick tunnel URL
-./restart.sh        # Restart server
-./restart.sh --cloudflare  # Restart with Cloudflare tunnel
-./debug.sh          # Unified debug helper (ollama/export/benchmark)
-./status.sh         # Check status
-./stop.sh           # Stop server
+./start.sh                # Start server
+./start.sh --ngrok        # Start with ngrok public URL
+./start.sh --cloudflare   # Start with Cloudflare quick tunnel
+./restart.sh              # Restart server
+./restart.sh --cloudflare # Restart with Cloudflare tunnel
+./stop.sh                 # Stop server
+./status.sh               # Check status + public URL
+./debug.sh                # Unified debug helper (ollama / export / benchmark)
 ```
 
-## Project Structure
+## File Structure
 
 ```
-src/
-├── api/routes/
-│   ├── export.py       # Async export jobs with progress
-│   ├── sessions.py     # Recording CRUD, chunked upload
-│   └── websocket.py    # Live audio streaming
-├── transcription/
-│   ├── whisper_local.py  # faster-whisper with progress callbacks
-│   └── manager.py        # Transcription orchestration
-├── summarization/
-│   ├── prompts.py        # Template definitions
-│   ├── ollama_backend.py # Local LLM
-│   ├── manager.py        # Summarization orchestration
-│   └── pipeline/         # Multi-stage extraction pipeline
-│       ├── types.py      # ExtractedItem, PipelineResult
-│       ├── chunker.py    # Time-based transcript splitting
-│       ├── extraction.py # Per-chunk item extraction
-│       ├── merger.py     # Cross-chunk deduplication
-│       ├── structurer.py # ID assignment, validation
-│       ├── narrator.py   # Narrative generation
-│       └── pipeline.py   # Orchestrator
-├── sessions/
-│   ├── models.py         # SQLAlchemy models (incl. StructuredItem)
-│   └── repository.py     # Database operations
-└── audio/
-    └── storage.py        # Audio file management
+sidekick/
+├── start.sh / restart.sh / stop.sh / status.sh / debug.sh
+├── .env                              # All runtime config
+├── config/
+│   └── settings.py                   # Pydantic settings, LRU-cached via get_settings()
+│
+├── src/
+│   ├── main.py                       # FastAPI app entry point
+│   ├── api/
+│   │   └── routes/
+│   │       ├── export.py             # Async export jobs, diarization, transcription pipeline
+│   │       ├── sessions.py           # Recording CRUD, chunked audio upload
+│   │       └── websocket.py          # Live audio stream + optional live preview
+│   ├── audio/
+│   │   └── storage.py                # Audio file management, chunk recovery
+│   ├── core/
+│   │   └── datetime_utils.py         # Timezone helpers
+│   ├── sessions/
+│   │   ├── models.py                 # SQLAlchemy models (Session, Meeting,
+│   │   │                             #   TranscriptSegment w/ speaker, StructuredItem)
+│   │   └── repository.py             # DB CRUD incl. update_segments_speakers()
+│   ├── summarization/
+│   │   ├── cohesive.py               # Two-pass summary + speaker pre-pass
+│   │   ├── manager.py                # Summarization orchestration, passes attendees
+│   │   ├── ollama_backend.py         # Ollama client, strips <think> blocks
+│   │   ├── prompts.py                # Template strings + TEMPLATE_INFO (UI order)
+│   │   └── pipeline/                 # Kept in codebase but NOT invoked from export
+│   │       ├── types.py
+│   │       ├── chunker.py
+│   │       ├── extraction.py
+│   │       ├── merger.py
+│   │       ├── structurer.py
+│   │       ├── narrator.py
+│   │       └── pipeline.py
+│   └── transcription/
+│       ├── diarize.py                # pyannote.audio 4.x diarization (PyAV audio loading)
+│       ├── manager.py                # Transcription orchestration
+│       └── whisper_local.py          # faster-whisper with progress callbacks
+│
+├── web/
+│   ├── index.html                    # Main recording UI (has Attendees field)
+│   ├── recordings.html               # History / re-summarize UI (has Attendees field)
+│   ├── css/styles.css
+│   └── js/
+│       ├── app.js                    # Recording + export flow
+│       ├── recordings.js             # History + re-summarize flow
+│       ├── audio.js                  # AudioCapture, visualizer
+│       └── websocket.js              # WebSocket client, 25s keepalive ping
+│
+├── data/                             # Runtime data (gitignored)
+│   ├── sidekick.db                   # SQLite database
+│   ├── sidekick.log                  # App logs (cleared on each start)
+│   ├── sidekick.pid                  # Managed process PID
+│   └── audio/
+│       ├── {session_id}.webm         # Finalized recordings
+│       └── chunks/{session_id}/{client_id}/  # Temp upload chunks
+│
+└── scripts/
+    ├── monitor_ollama.ps1            # PowerShell: Ollama + GPU live watcher
+    ├── monitor_export_job.sh         # Bash: poll export job progress
+    └── benchmark_ollama_models.py    # Benchmark models on real transcript chunks
+```
 
-web/
-├── index.html          # Main recording UI
-├── recordings.html     # History/re-export UI
-├── css/styles.css      # All styles
-└── js/
-    ├── app.js          # Main app logic
-    ├── recordings.js   # History page logic
-    ├── audio.js        # AudioCapture, visualizer
-    └── websocket.js    # WebSocket client with keepalive
+## Export Pipeline (Full Flow)
+
+```
+Browser
+  │
+  ├─[during recording]──► WebSocket stream ──► Live preview text (optional, not authoritative)
+  │
+  └─[stop recording]────► Audio saved: data/audio/{session_id}.webm
+                                │
+                     POST /export-obsidian-job
+                     {title, template, attendees, custom_prompt}
+                                │
+                    ┌───────────▼────────────┐
+                    │   HAS TRANSCRIPT?      │
+                    └───────┬────────┬───────┘
+                         YES│        │NO
+                            │        ▼
+                            │   Whisper large-v3 (CUDA)
+                            │   Word-level timestamps → segments → DB
+                            │        │
+                    ┌───────▼────────▼───────┐
+                    │  DIARIZATION ENABLED?  │
+                    │  (DIARIZATION_ENABLED) │
+                    └───────────┬────────────┘
+                             YES│
+                                ▼
+                    pyannote/speaker-diarization-3.1
+                    Audio loaded via PyAV (no system FFmpeg)
+                    → (start, end, SPEAKER_XX) spans
+                    → assign_speaker() aligns to segments
+                    → DB update (update_segments_speakers)
+                                │
+                    ┌───────────▼────────────────────────────────┐
+                    │  Build transcript string                    │
+                    │  [MM:SS] SPEAKER_XX: text (per segment)    │
+                    └───────────┬────────────────────────────────┘
+                                │
+                    ┌───────────▼────────────────────────────────┐
+                    │  SUMMARIZATION  (cohesive.py)              │
+                    │                                            │
+                    │  Pre-pass (if attendees provided):         │
+                    │    LLM maps SPEAKER_XX → real names        │
+                    │    Apply string replace across transcript  │
+                    │                                            │
+                    │  Pass 1: Draft                             │
+                    │    system: template style contract         │
+                    │           + attendees note                 │
+                    │    user:  transcript (or compressed pack   │
+                    │           if transcript > context budget)  │
+                    │                                            │
+                    │  Pass 2: Editorial polish                  │
+                    │    Preserves all ## headers from draft     │
+                    │                                            │
+                    │  Retry (if artifacts / repetition):        │
+                    │    One additional cleanup pass             │
+                    └───────────┬────────────────────────────────┘
+                                │
+                    Build Obsidian markdown:
+                    YYYY-MM-DD-HHMM - [Title] [Template].md
+                    Metadata block + summary + collapsible transcript
+                                │
+                    Write to OBSIDIAN_VAULT_PATH
+                                │
+                    Return job result + obsidian:// URI
 ```
 
 ## Key Config (.env)
 
 ```
+# Transcription
+TRANSCRIPTION_BACKEND=local
 WHISPER_MODEL_SIZE=large-v3
 WHISPER_DEVICE=cuda
+WHISPER_COMPUTE_TYPE=float16
+
+# Summarization
 SUMMARIZATION_BACKEND=ollama
-OLLAMA_MODEL=qwen2.5:14b
 OLLAMA_HOST=http://127.0.0.1:11434
-OLLAMA_CONTEXT_LENGTH=4096
+OLLAMA_MODEL=qwen3.5:9b
 OLLAMA_THINK=false
-SUMMARIZATION_TIMEOUT_SECONDS=120
+OLLAMA_CONTEXT_LENGTH=40960
+SUMMARIZATION_TIMEOUT_SECONDS=300
+
+# Diarization
+HF_TOKEN=<huggingface_read_token>
+DIARIZATION_ENABLED=true
+
+# Export
 OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 ```
 
-## Templates (src/summarization/prompts.py)
+## Templates
 
-- `one_on_one` - 1-on-1 meetings
-- `standup` - Daily standups
-- `strategic_review` - Leadership meetings
-- `working_session` - Technical work sessions
-- `meeting` - General meetings (default)
-- `brainstorm`, `interview`, `lecture`, `custom`
+Active (shown in UI, in chooser order):
 
-UI template chooser order (shown templates only):
-1. `meeting` (General Meeting)
-2. `strategic_review`
-3. `working_session`
-4. `standup`
-5. `one_on_one`
-6. `brainstorm`
-7. `custom`
+| Key | Name | Description |
+|-----|------|-------------|
+| `meeting` | General Meeting | Summary, Key Decisions, Action Items table, Discussion Notes |
+| `one_on_one` | 1-on-1 | Summary, Highlights, Feedback, Goals, Action Items table |
+| `standup` | Standup | Per-person Done/Doing/Blocked, Team Blockers, Action Items |
+| `working_session` | Working Session | High-detail technical log — decisions, SQL notes, open questions |
+| `custom` | Custom | User-provided prompt |
+
+Legacy (constants kept for backward compat, not shown in UI):
+`strategic_review`, `brainstorm`, `interview`, `lecture`
+
+Default template: `meeting`
 
 ## UX Conventions
 
-- Prefer one clear action per step; remove duplicated actions across list cards and modals.
-- Recording history cards should stay minimal: `View` and `Delete` only.
-- Export/re-summarize actions should happen from the view pane context, not from list cards.
-- Download actions should live in the view pane (`Download Audio`, `Download Transcript`), not cards.
-- Keep template chooser focused to the primary 7 templates in the defined order above.
-- Default template should remain `meeting` unless product direction changes.
+- One primary action per step; no duplicate entry points.
+- Recording list cards: `View` and `Delete` only.
+- Export / re-summarize initiated from the view modal, not from cards.
+- Download affordances (`Download Audio`, `Download Transcript`) live in the view modal.
+- Template chooser shows 5 templates in the order above.
+- `General Meeting` is default unless explicitly changed.
 
 ## API Endpoints
 
 | Endpoint | Description |
 |----------|-------------|
+| `GET /` | Main recording UI |
+| `GET /recordings` | History UI |
 | `GET /api/templates` | List templates with prompts |
+| `GET /api/recordings` | List recordings |
+| `GET /api/recordings/{id}` | Recording detail |
 | `POST /api/recordings/{id}/export-obsidian-job` | Start async export |
-| `GET /api/export-jobs/{job_id}` | Poll export progress |
-| `PUT /api/recordings/{id}/audio` | Upload full audio blob (authoritative fallback) |
-| `PUT /api/recordings/{id}/audio/chunks/{n}` | Upload chunk (requires `X-Client-ID` header) |
-| `POST /api/recordings/{id}/audio/finalize` | Finalize chunks (requires `X-Client-ID` header) |
+| `GET /api/export-jobs/{job_id}` | Poll export job |
+| `POST /api/recordings/{id}/transcription-job` | Transcription only (no summary) |
+| `GET /api/transcription-jobs/{job_id}` | Poll transcription job |
+| `PUT /api/recordings/{id}/audio` | Upload full audio blob (fallback) |
+| `PUT /api/recordings/{id}/audio/chunks/{n}` | Upload chunk (needs `X-Client-ID`) |
+| `POST /api/recordings/{id}/audio/finalize` | Finalize chunks (needs `X-Client-ID`) |
+| `WS /ws/audio` | Live audio stream |
 
-## Export Progress Flow
+## Export Job Progress Weights
 
-1. Frontend calls `POST /export-obsidian-job` → returns `job_id`
-2. Frontend polls `GET /export-jobs/{job_id}` every 900ms
-3. Backend updates job state as transcription segments complete
-4. Transcription progress: 0-40% (real segment-based)
-5. Pipeline progress: 40-95% (chunking → extraction → merge → structure → narrative)
-6. Write progress: 95-100%
+| Stage | Overall % |
+|-------|-----------|
+| Transcription (incl. diarization) | 0–40% |
+| Summarization (speaker pre-pass + 2 passes) | 40–95% |
+| Write to vault | 95–100% |
 
-## Recent Improvements
+## Speaker Diarization
 
-- **Timer**: Uses `Date.now()` wall clock, no drift when tab inactive
-- **WebSocket**: Ping every 25s, unlimited reconnects, visibility-change reconnect
-- **Audio Upload**: Parallel chunks with client isolation, idempotent writes, blob-first fallback
-- **Progress**: Real segment-based transcription progress
-- **Templates**: Only primary templates shown in chooser, ordered for common usage; prompts still editable before export
-- **History UX**: Removed redundant card actions (no card-level Export/Download Audio)
-- **View Pane Actions**: Audio download kept in view modal, added transcript download button, re-summarize remains primary action
-- **Export**: Includes both recorded and exported timestamps
+**Status**: Live and enabled.
 
-## Handoff Notes (2026-03-02)
+**Dependencies** (accepted HuggingFace gated licenses required):
+- `pyannote/speaker-diarization-3.1`
+- `pyannote/segmentation-3.0`
+- `pyannote/speaker-diarization-community-1`
 
-- **Multi-Stage Pipeline**: Replaced single-pass summarization with structured extraction.
-  - Chunks transcript into 8-12 min segments
-  - Extracts actions, decisions, risks, questions, follow-ups per chunk
-  - Deduplicates across chunks (Jaccard similarity)
-  - Assigns IDs: A-001, D-001, R-001, Q-001, F-001
-  - Generates narrative referencing all item IDs
-  - Coverage checking with patch for missed items
-  - Output: narrative + markdown tables + transcript
-- **Model upgrade**: `qwen2.5:14b` → `qwen3.5:35b-a3b` (pull with `ollama pull qwen3.5:35b-a3b`)
-- **Database**: New `StructuredItem` model stores extracted items per meeting
+**Key implementation notes**:
+- Audio loaded via **PyAV** (bundled FFmpeg) — no system `ffmpeg` install needed
+- pyannote 4.x returns `DiarizeOutput`; use `.exclusive_speaker_diarization.itertracks(yield_label=True)`
+- Diarization runs once per recording; subsequent re-summarizes skip it (`has_speakers` guard)
+- Non-blocking on failure: falls back to no-speaker transcript
 
-- **Template-Aware Routing** (`src/api/routes/export.py`):
-  - `_PIPELINE_TEMPLATES = {"meeting", "standup", "one_on_one", "strategic_review"}` → multi-stage pipeline
-  - All other templates (`working_session`, `brainstorm`, `interview`, `lecture`, `custom`) → single-pass with full transcript
-  - Single-pass uses `SummarizationManager.summarize()` with the template's rich prompt and produces same header format (Template, Recorded, Exported, Duration) + LLM content + collapsible transcript
-  - Reason: pipeline narrator only sees ~30 lines of context; content-heavy templates need the full transcript to produce quality output
+**Speaker name resolution**:
+- If `attendees` is provided in the export request, a dedicated pre-pass LLM call resolves `SPEAKER_XX` → real names
+- The mapping is applied via string replace on the full transcript before any summarization pass
+- Pre-pass uses first ~3000 chars for efficient identification
 
-## Handoff Notes (2026-03-02, later)
+## Gotchas
 
-- **Export stability fixes (re-summarize + pipeline)**:
-  - Re-summarize now reuses existing transcript when both conditions are true:
-    - `session.has_transcription == true`
-    - transcript segments exist for session
-  - Export preview bug fixed (`summary_result` typo -> `pipeline_result.narrative`).
-  - Pipeline extraction failures now log per-chunk exceptions with chunk index/timestamps.
-  - Export fails explicitly when all extraction chunks fail:
-    - `All extraction chunks failed (timeout/backend).`
-  - Extraction errors are no longer silently swallowed in `extraction.py`.
-  - Frontend 20-minute hard timeout removed for export polling in both:
-    - `web/js/recordings.js`
-    - `web/js/app.js`
-
-- **Summarization timeout hardening**:
-  - Timeout is enforced centrally in `SummarizationManager` for all backends, not Ollama-only.
-  - New config:
-    - `SUMMARIZATION_TIMEOUT_SECONDS` (default 600)
-  - Timeout exception message:
-    - `Summarization model call timed out after <N> seconds`
-
-- **Ollama request tuning**:
-  - Added `OLLAMA_CONTEXT_LENGTH` config and pass-through to Ollama chat option `num_ctx`.
-  - Current tested value for reliability on this hardware: `3072`.
-
-- **Host Ollama migration notes**:
-  - Confirmed working architecture: Sidekick in WSL + Ollama on Windows host.
-  - Mirrored-networking secure path is preferred:
-    - Keep host Ollama on localhost (`127.0.0.1`)
-    - WSL calls `http://127.0.0.1:11434`
-  - If not using mirrored mode, host binding/firewall scoping is required.
-  - `qwen3.5:35b-a3b` showed repeated timeout/hang behavior on 16GB VRAM under extraction load.
-  - `qwen3.5:27b` was introduced as next recommended quality/perf test.
-
-- **Debug and benchmarking tooling added**:
-  - New scripts:
-    - `debug.sh` (unified wrapper)
-    - `scripts/monitor_ollama.ps1`
-    - `scripts/monitor_export_job.sh`
-    - `scripts/benchmark_ollama_models.py`
-  - Key commands:
-    - `./debug.sh ollama --gpu --interval 1`
-    - `./debug.sh export-latest`
-    - `./debug.sh benchmark --runs 2`
-  - `monitor_export_job.sh` and `debug.sh` were patched to avoid `rg` hard dependency (grep fallback).
-
-- **Ops doc handling**:
-  - Detailed host-ollama setup/troubleshooting doc:
-    - `docs/HOST_OLLAMA_SETUP.md`
-  - Added to `.gitignore` for local-only ops usage.
-
-## Handoff Notes (2026-02-11)
-
-- **Audio Upload Redesign**: Prevents multi-device corruption and ensures reliable persistence.
-  - Client isolation via `X-Client-ID` header; chunks at `data/audio/chunks/{session}/{client}/`
-  - Order-independent: chunks can arrive in any order (no 409 for out-of-order)
-  - Idempotent: re-uploading same chunk is a no-op
-  - Parallel uploads with blob-first fallback if chunks fail
-  - Legacy `.part` recovery still works for backward compatibility
-
-## Handoff Notes (2026-02-10)
-
-- **Audio Recovery Fix**: If user stops recording and closes naming modal without processing, audio is now still recoverable for later history re-summarize/export.
-  - Frontend `web/js/app.js` now does best-effort background audio persistence before modal close resets state.
-  - Backend `src/audio/storage.py` adds `ensure_session_audio_path()` to promote chunk partial (`.part`) into finalized session audio when possible.
-  - Recovery is used in `src/api/routes/sessions.py` (recording list/detail/audio endpoints + finalize flow) and `src/api/routes/export.py` (authoritative transcription path).
-- **Obsidian Open Reliability**:
-  - Export URI now opens exact `.md` filename (`obsidian://open?...&file=<name>.md`) instead of extensionless file path.
-  - Recording view now prefers direct `obsidian://open` to resolved exported note; falls back to `obsidian://search` only when no filename match is found.
-- **Cloudflare Tunnel Behavior**:
-  - `--cloudflare` uses quick tunnel (`*.trycloudflare.com`) and URL is ephemeral.
-  - URL generally changes after restart; keep process running for temporary stability.
-  - Stable URL requires named tunnel + owned domain (not available with quick tunnel only).
+- `get_settings()` is LRU-cached — restart required to pick up `.env` changes
+- `qwen3.5` models output `<think>...</think>` blocks; `ollama_backend.py` strips them and passes `think: false`
+- `OLLAMA_THINK=false` is critical — think mode on summaries wastes tokens and time with no benefit
+- Pipeline package (`src/summarization/pipeline/`) is in codebase but **not called from export**
+- Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist
+- `start.sh` port check uses `connect()` (not `bind()`) to avoid false positives in WSL mirrored mode
+- Ollama runs on **Windows host**, Sidekick runs in **WSL** — mirrored networking makes `127.0.0.1:11434` work
+- Context budget: `OLLAMA_CONTEXT_LENGTH=40960` suits `qwen3.5:9b` (6.6GB model, ~9.4GB headroom for KV cache on 16GB VRAM). Larger models need reduced context or will split CPU/GPU.

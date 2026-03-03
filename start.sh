@@ -71,21 +71,14 @@ is_sidekick_pid() {
 
 port_is_available() {
     python3 - "$PORT" <<'PY'
-import socket
-import sys
-
+import socket, sys
 port = int(sys.argv[1])
-try:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-except PermissionError:
-    sys.exit(2)
-try:
-    s.bind(("0.0.0.0", port))
-except OSError:
-    sys.exit(1)
-finally:
-    s.close()
-sys.exit(0)
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.5)
+result = s.connect_ex(('127.0.0.1', port))
+s.close()
+# connect succeeded = something is listening = port NOT available
+sys.exit(1 if result == 0 else 0)
 PY
 }
 

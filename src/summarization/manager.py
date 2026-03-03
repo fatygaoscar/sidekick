@@ -11,7 +11,8 @@ from .anthropic_backend import AnthropicBackend
 from .base import SummarizationBackend, SummarizationResult
 from .ollama_backend import OllamaBackend
 from .openai_backend import OpenAIBackend
-from .prompts import get_prompt
+from .prompts import get_template_content
+from .cohesive import generate_cohesive_summary
 from .pipeline.pipeline import run_pipeline, build_markdown_output
 from .pipeline.types import PipelineResult
 
@@ -143,6 +144,9 @@ class SummarizationManager:
         transcript: str,
         prompt_type: str = "default",
         custom_instructions: str | None = None,
+        perspective: str | None = None,
+        attendees: str | None = None,
+        include_structured_tables: bool = False,
         system_prompt: str | None = None,
         user_prompt: str | None = None,
     ) -> SummarizationResult:
@@ -153,6 +157,7 @@ class SummarizationManager:
             transcript: The transcript text to summarize
             prompt_type: Type of summary (if not providing custom prompts)
             custom_instructions: Optional custom instructions
+            perspective: Optional person/role focus for narrative prioritization
             system_prompt: Optional system prompt override
             user_prompt: Optional user prompt override
 
@@ -161,16 +166,6 @@ class SummarizationManager:
         """
         if not self._initialized or self._active_backend is None:
             await self.initialize()
-
-        # Get prompts
-        if system_prompt is None or user_prompt is None:
-            sys_prompt, usr_prompt = get_prompt(
-                prompt_type=prompt_type,
-                transcript=transcript,
-                custom_instructions=custom_instructions,
-            )
-            system_prompt = system_prompt or sys_prompt
-            user_prompt = user_prompt or usr_prompt
 
         # Emit start event
         await self._event_bus.emit(
@@ -184,11 +179,46 @@ class SummarizationManager:
         )
 
         try:
-            result = await self._summarize_with_timeout(
-                transcript=transcript,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-            )
+            if system_prompt is not None or user_prompt is not None:
+                # Explicit prompt overrides use the legacy one-pass path.
+                result = await self._summarize_with_timeout(
+                    transcript=transcript,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                )
+            else:
+                async def llm_call(sys_prompt: str, usr_prompt: str) -> str:
+                    llm_result = await self._summarize_with_timeout(
+                        transcript="",
+                        system_prompt=sys_prompt,
+                        user_prompt=usr_prompt,
+                    )
+                    return llm_result.content
+
+                template_contract = (
+                    custom_instructions.strip()
+                    if prompt_type == "custom" and custom_instructions
+                    else get_template_content(prompt_type)
+                )
+
+                cohesive_text, _, _, _ = await generate_cohesive_summary(
+                    llm_call=llm_call,
+                    transcript=transcript,
+                    template=prompt_type,
+                    template_contract=template_contract,
+                    perspective=perspective,
+                    attendees=attendees,
+                    context_length=int(self._settings.ollama_context_length),
+                    custom_instructions=(
+                        custom_instructions if prompt_type != "custom" else None
+                    ),
+                    include_structured_tables=include_structured_tables,
+                )
+                result = SummarizationResult(
+                    content=cohesive_text,
+                    backend=self._active_backend.name,
+                    model=self._active_backend.model,
+                )
 
             # Emit completion event
             await self._event_bus.emit(
@@ -231,6 +261,8 @@ class SummarizationManager:
         transcript: str,
         template: str = "meeting",
         progress_callback: Optional[PipelineProgressCallback] = None,
+        perspective: Optional[str] = None,
+        template_prompt_override: Optional[str] = None,
     ) -> PipelineResult:
         """Process transcript using the multi-stage pipeline.
 
@@ -242,6 +274,8 @@ class SummarizationManager:
             transcript: Full transcript text with timestamps
             template: Template type for narrative style
             progress_callback: Optional callback for progress updates (stage, message, progress)
+            perspective: Optional person/role to prioritize in narrative focus
+            template_prompt_override: Optional per-export template prompt override
 
         Returns:
             PipelineResult with narrative, structured items, and metadata
@@ -278,6 +312,10 @@ class SummarizationManager:
                 backend_name=self._active_backend.name,
                 model_name=self._active_backend.model,
                 progress_callback=progress_callback,
+                perspective=perspective,
+                narrative_strategy="template_native",
+                template_prompt=template_prompt_override or get_template_content(template),
+                llm_context_length=int(self._settings.ollama_context_length),
             )
 
             # Emit completion event

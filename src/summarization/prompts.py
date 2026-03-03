@@ -50,66 +50,48 @@ TRANSCRIPT:
 
 # New structured templates for Obsidian export
 
-ONE_ON_ONE_TEMPLATE = """Create a 1-on-1 meeting summary following this structure:
+ONE_ON_ONE_TEMPLATE = """Create 1-on-1 meeting notes with these sections:
 
-## Overview
-Brief context: who met and the general purpose.
+## Summary
+2-3 sentences: who met, main themes.
 
-## Discussion Topics
-Summarize each topic discussed with key points.
+## Highlights & Recognition
+Positive feedback, achievements, and wins mentioned.
 
-## Feedback Given
-- Feedback provided (positive or constructive)
-- Specific examples or situations referenced
-
-## Feedback Received
-- Feedback received about your work, team, or processes
-- Concerns or suggestions raised
+## Feedback & Challenges
+Constructive feedback, concerns, or growth areas discussed.
 
 ## Goals & Development
-- Career goals discussed
-- Skills to develop
-- Growth opportunities mentioned
+Career goals, development plans, or growth opportunities discussed.
 
 ## Action Items
-| Item | Owner | Timeline |
-|------|-------|----------|
-| ... | ... | ... |
+| Owner | Action | Due |
+|-------|--------|-----|
+Every concrete next step or commitment made.
 
-## Follow-up For Next 1-on-1
-Topics or items to revisit in the next meeting.
+If a section has nothing to note, write "None discussed."
 
-IGNORE: Small talk, scheduling logistics, weather chat.
+Guidelines: Use actual names. Be specific about commitments made. Note who raised what when attributable."""
 
----
-TRANSCRIPT:
-{transcript}"""
+STANDUP_TEMPLATE = """Create a standup summary. Keep it brief and scannable.
 
-STANDUP_TEMPLATE = """Create a brief standup/status meeting summary. Keep it concise.
-
-## Attendees
-List who participated (if identifiable).
-
-## Updates By Person
-For each person who gave an update:
+## Updates
+For each person who spoke:
 
 ### [Name]
-- **Completed:** What they finished
-- **Working On:** Current focus
-- **Blockers:** Any impediments (if none, omit)
+- **Done:** What they completed
+- **Doing:** What they're working on now
+- **Blocked:** Any impediments (omit if none)
 
 ## Team Blockers
-List any blockers that need escalation or cross-team coordination.
+Issues needing cross-team coordination or escalation. "None" if none.
 
-## Announcements
-Any team-wide announcements or reminders shared.
+## Action Items
+| Owner | Action |
+|-------|--------|
+Follow-ups, decisions needed, or escalations from this standup. "None" if none.
 
-IGNORE: Jokes, off-topic banter, detailed technical discussions (those belong in working sessions).
-KEEP IT BRIEF: This should be scannable in 30 seconds.
-
----
-TRANSCRIPT:
-{transcript}"""
+Keep it brief — this should be scannable in 30 seconds."""
 
 STRATEGIC_REVIEW_TEMPLATE = """Create an adaptive summary for this leadership/strategic meeting. First, analyze what was actually discussed, then include ONLY the relevant sections below. Do not include empty sections.
 
@@ -242,37 +224,23 @@ CAPTURE THE "WHY": The reasoning behind decisions is as important as the decisio
 TRANSCRIPT:
 {transcript}"""
 
-MEETING_TEMPLATE = """Create a comprehensive meeting summary following this structure:
+MEETING_TEMPLATE = """Create structured meeting notes with these sections:
 
-## Meeting Overview
-Brief 2-3 sentence summary of the meeting's purpose and outcome.
-
-## Attendees
-List participants if mentioned, otherwise note "Not specified"
-
-## Agenda/Topics Discussed
-- Topic 1
-- Topic 2
-...
+## Summary
+2-3 sentences: purpose of the meeting and key outcome.
 
 ## Key Decisions
-- Decision 1: [description] - Rationale: [if mentioned]
-- Decision 2: ...
+Bullet list. For each: what was decided and by whom (if stated). If none, write "None."
 
 ## Action Items
-| Task | Owner | Due Date |
-|------|-------|----------|
-| ... | ... | ... |
+| Owner | Action | Due |
+|-------|--------|-----|
+Every concrete next step. Use actual names. If owner not named, use "TBD". If no due date, leave blank. If none, write "None."
 
-## Follow-up Items
-Items requiring future discussion or pending resolution.
+## Discussion Notes
+Group by topic. For each topic: **[Topic]**: 2-4 sentences capturing key points, positions, and outcomes.
 
-## Additional Notes
-Any other relevant information.
-
----
-TRANSCRIPT:
-{transcript}"""
+Guidelines: Use actual names (not "a participant"). Quote specific commitments. Skip pleasantries and off-topic tangents. Include numbers, dates, and concrete details."""
 
 BRAINSTORM_TEMPLATE = """Create a brainstorming session summary following this structure:
 
@@ -456,6 +424,10 @@ def get_prompt(
 
 # Template metadata for frontend display
 TEMPLATE_INFO = {
+    "meeting": {
+        "name": "General Meeting",
+        "description": "Standard meeting notes with decisions and action items",
+    },
     "one_on_one": {
         "name": "1-on-1",
         "description": "Personal meetings - feedback, goals, development",
@@ -464,29 +436,9 @@ TEMPLATE_INFO = {
         "name": "Standup",
         "description": "Brief status updates - done, doing, blocked",
     },
-    "strategic_review": {
-        "name": "Strategic Review",
-        "description": "Leadership meetings - reports, feedback, decisions, timelines",
-    },
     "working_session": {
         "name": "Working Session",
         "description": "Technical work - high detail, decisions, open questions",
-    },
-    "meeting": {
-        "name": "General Meeting",
-        "description": "Standard meeting notes with decisions and action items",
-    },
-    "brainstorm": {
-        "name": "Brainstorm",
-        "description": "Capture ideas, themes, and promising directions",
-    },
-    "interview": {
-        "name": "Interview",
-        "description": "Q&A format with assessment and key quotes",
-    },
-    "lecture": {
-        "name": "Lecture",
-        "description": "Study notes with key concepts and terms",
     },
     "custom": {
         "name": "Custom",
@@ -498,20 +450,20 @@ TEMPLATE_INFO = {
 def get_template_content(template_key: str) -> str:
     """Get the raw template content for display/editing in the UI."""
     templates = {
+        "meeting": MEETING_TEMPLATE,
         "one_on_one": ONE_ON_ONE_TEMPLATE,
         "standup": STANDUP_TEMPLATE,
-        "strategic_review": STRATEGIC_REVIEW_TEMPLATE,
         "working_session": WORKING_SESSION_TEMPLATE,
-        "meeting": MEETING_TEMPLATE,
+        "custom": CUSTOM_DEFAULT_PROMPT,
+        # Legacy templates kept for backward compatibility with existing recordings
+        "strategic_review": STRATEGIC_REVIEW_TEMPLATE,
         "brainstorm": BRAINSTORM_TEMPLATE,
         "interview": INTERVIEW_TEMPLATE,
         "lecture": LECTURE_TEMPLATE,
-        "custom": CUSTOM_DEFAULT_PROMPT,
     }
     content = templates.get(template_key, "")
-    # Remove the transcript placeholder section for display
+    # Remove the transcript placeholder section for display (legacy templates only)
     if content:
-        # Remove everything from "---\nTRANSCRIPT:" onwards
         parts = content.split("---\nTRANSCRIPT:")
         if len(parts) > 1:
             content = parts[0].strip()

@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     # Ollama settings
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.2"
-    ollama_context_length: int = 4096
+    ollama_context_length: int = 8192
     ollama_think: bool = False  # Set true to enable thinking mode for qwen3 models (slower, better for complex tasks)
 
     # OpenAI summarization
@@ -73,6 +73,10 @@ class Settings(BaseSettings):
 
     # Important marker duration (seconds)
     important_marker_duration: int = 60
+
+    # Speaker diarization
+    hf_token: str = ""
+    diarization_enabled: bool = False
 
     # Obsidian integration
     obsidian_vault_path: str = "/mnt/c/Users/ozzfa/Documents/Obsidian Vault"

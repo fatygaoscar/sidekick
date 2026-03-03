@@ -84,13 +84,16 @@ cmd_benchmark() {
 }
 
 cmd_default() {
-  # Open Ollama GPU monitor in a new PowerShell window
-  local script_win
+  local script_win log_win
   script_win="$(wslpath -w "$PWD/scripts/monitor_ollama.ps1")"
-  cmd.exe /c start powershell.exe -ExecutionPolicy Bypass -File "$script_win" -IntervalSeconds 2 -ShowGpu
-
-  # Run export monitor in this terminal
-  cmd_export
+  log_win="$(wslpath -w "$PWD/data/sidekick.log")"
+  powershell.exe -Command "Start-Process powershell -ArgumentList \
+    '-ExecutionPolicy','Bypass',\
+    '-File','$script_win',\
+    '-IntervalSeconds','2',\
+    '-ShowGpu',\
+    '-SidekickLogPath','$log_win',\
+    '-SidekickBaseUrl','http://127.0.0.1:8000'"
 }
 
 if [[ $# -lt 1 ]]; then

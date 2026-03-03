@@ -12,7 +12,9 @@ from .base import SummarizationBackend, SummarizationResult
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 
-_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_ORPHAN_THINK_CLOSE_RE = re.compile(r"^.*?</think>", re.DOTALL)
+_SPECIAL_TOKEN_TAIL_RE = re.compile(r"<\|[^|]+\|>.*", re.DOTALL)
 
 
 class OllamaBackend(SummarizationBackend):
@@ -92,9 +94,11 @@ class OllamaBackend(SummarizationBackend):
         )
 
         content = response["message"]["content"]
-        # Strip thinking blocks (qwen3/qwen3.5 models may emit <think>...</think> even when
-        # think=False is set, depending on Ollama version)
-        content = _THINK_TAG_RE.sub("", content).strip()
+        # Strip complete think blocks and tokenizer artifacts that can leak into output.
+        content = _THINK_BLOCK_RE.sub("", content)
+        content = _ORPHAN_THINK_CLOSE_RE.sub("", content)
+        content = _SPECIAL_TOKEN_TAIL_RE.sub("", content)
+        content = content.strip()
 
         try:
             eval_count = response["eval_count"]
