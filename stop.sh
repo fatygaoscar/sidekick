@@ -90,3 +90,9 @@ if [ -f "$CLOUDFLARE_PID_FILE" ]; then
     fi
     rm -f "$CLOUDFLARE_PID_FILE" "$CLOUDFLARE_URL_FILE"
 fi
+
+# Final safety pass: if a Sidekick process still owns the port, stop it.
+LISTENER_PID="$(get_listener_pid)"
+if [ -n "$LISTENER_PID" ] && is_sidekick_pid "$LISTENER_PID"; then
+    stop_pid_graceful "$LISTENER_PID" "Sidekick (port listener)"
+fi

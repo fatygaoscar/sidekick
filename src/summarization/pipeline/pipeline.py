@@ -5,6 +5,7 @@ generation with progress tracking.
 """
 
 import asyncio
+import logging
 from typing import Callable, Awaitable, Optional
 
 from .types import PipelineResult, StructuredItems, TranscriptChunk
@@ -18,6 +19,7 @@ from .narrator import generate_narrative
 # Type aliases
 LLMCallFunc = Callable[[str, str], Awaitable[str]]
 ProgressCallback = Callable[[str, str, float], Awaitable[None] | None]
+logger = logging.getLogger(__name__)
 
 
 # Progress weights by stage (must sum to 1.0)
@@ -132,16 +134,31 @@ async def run_pipeline(
         try:
             chunk_items = await extract_items_from_chunk(chunk, llm_call)
             all_items.extend(chunk_items)
-        except Exception:
+        except Exception as exc:
             extraction_errors += 1
+            logger.exception(
+                "Extraction failed for chunk %s/%s (%s-%s): %s",
+                i + 1,
+                chunk_count,
+                chunk.start_timestamp,
+                chunk.end_timestamp,
+                exc,
+            )
             # Continue with other chunks
 
     total_extracted = len(all_items)
 
+    if chunk_count > 0 and extraction_errors == chunk_count:
+        raise RuntimeError("All extraction chunks failed (timeout/backend).")
+
     await _emit_progress(
         progress_callback,
         "extraction",
-        f"Extracted {total_extracted} items",
+        (
+            f"Extracted {total_extracted} items ({extraction_errors} chunk failures)"
+            if extraction_errors
+            else f"Extracted {total_extracted} items"
+        ),
         _calculate_cumulative_progress("extraction", 1.0),
     )
 

@@ -183,11 +183,12 @@ def get_patch_user_prompt(
             detail += f" [Owner: {item.owner}]"
         missing_text_lines.append(f"- {detail}")
 
+    missing_text = "\n".join(missing_text_lines)
     return f"""**END OF CURRENT SUMMARY:**
 ...{context}
 
 **MISSING ITEMS TO ADD:**
-{chr(10).join(missing_text_lines)}
+{missing_text}
 
 Write 1-2 paragraphs to naturally incorporate these missing items.
 Reference each ID in parentheses."""

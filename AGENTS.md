@@ -8,6 +8,9 @@ Quick reference for AI agents working on this codebase.
 ./start.sh          # Start server
 ./start.sh --ngrok  # Start with public URL
 ./start.sh --cloudflare  # Start with Cloudflare quick tunnel URL
+./restart.sh        # Restart server
+./restart.sh --cloudflare  # Restart with Cloudflare tunnel
+./debug.sh          # Unified debug helper (ollama/export/benchmark)
 ./status.sh         # Check status
 ./stop.sh           # Stop server
 ```
@@ -58,7 +61,11 @@ web/
 WHISPER_MODEL_SIZE=large-v3
 WHISPER_DEVICE=cuda
 SUMMARIZATION_BACKEND=ollama
-OLLAMA_MODEL=qwen3.5:35b-a3b
+OLLAMA_MODEL=qwen2.5:14b
+OLLAMA_HOST=http://127.0.0.1:11434
+OLLAMA_CONTEXT_LENGTH=4096
+OLLAMA_THINK=false
+SUMMARIZATION_TIMEOUT_SECONDS=120
 OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 ```
 
@@ -132,6 +139,64 @@ UI template chooser order (shown templates only):
   - Output: narrative + markdown tables + transcript
 - **Model upgrade**: `qwen2.5:14b` → `qwen3.5:35b-a3b` (pull with `ollama pull qwen3.5:35b-a3b`)
 - **Database**: New `StructuredItem` model stores extracted items per meeting
+
+- **Template-Aware Routing** (`src/api/routes/export.py`):
+  - `_PIPELINE_TEMPLATES = {"meeting", "standup", "one_on_one", "strategic_review"}` → multi-stage pipeline
+  - All other templates (`working_session`, `brainstorm`, `interview`, `lecture`, `custom`) → single-pass with full transcript
+  - Single-pass uses `SummarizationManager.summarize()` with the template's rich prompt and produces same header format (Template, Recorded, Exported, Duration) + LLM content + collapsible transcript
+  - Reason: pipeline narrator only sees ~30 lines of context; content-heavy templates need the full transcript to produce quality output
+
+## Handoff Notes (2026-03-02, later)
+
+- **Export stability fixes (re-summarize + pipeline)**:
+  - Re-summarize now reuses existing transcript when both conditions are true:
+    - `session.has_transcription == true`
+    - transcript segments exist for session
+  - Export preview bug fixed (`summary_result` typo -> `pipeline_result.narrative`).
+  - Pipeline extraction failures now log per-chunk exceptions with chunk index/timestamps.
+  - Export fails explicitly when all extraction chunks fail:
+    - `All extraction chunks failed (timeout/backend).`
+  - Extraction errors are no longer silently swallowed in `extraction.py`.
+  - Frontend 20-minute hard timeout removed for export polling in both:
+    - `web/js/recordings.js`
+    - `web/js/app.js`
+
+- **Summarization timeout hardening**:
+  - Timeout is enforced centrally in `SummarizationManager` for all backends, not Ollama-only.
+  - New config:
+    - `SUMMARIZATION_TIMEOUT_SECONDS` (default 600)
+  - Timeout exception message:
+    - `Summarization model call timed out after <N> seconds`
+
+- **Ollama request tuning**:
+  - Added `OLLAMA_CONTEXT_LENGTH` config and pass-through to Ollama chat option `num_ctx`.
+  - Current tested value for reliability on this hardware: `3072`.
+
+- **Host Ollama migration notes**:
+  - Confirmed working architecture: Sidekick in WSL + Ollama on Windows host.
+  - Mirrored-networking secure path is preferred:
+    - Keep host Ollama on localhost (`127.0.0.1`)
+    - WSL calls `http://127.0.0.1:11434`
+  - If not using mirrored mode, host binding/firewall scoping is required.
+  - `qwen3.5:35b-a3b` showed repeated timeout/hang behavior on 16GB VRAM under extraction load.
+  - `qwen3.5:27b` was introduced as next recommended quality/perf test.
+
+- **Debug and benchmarking tooling added**:
+  - New scripts:
+    - `debug.sh` (unified wrapper)
+    - `scripts/monitor_ollama.ps1`
+    - `scripts/monitor_export_job.sh`
+    - `scripts/benchmark_ollama_models.py`
+  - Key commands:
+    - `./debug.sh ollama --gpu --interval 1`
+    - `./debug.sh export-latest`
+    - `./debug.sh benchmark --runs 2`
+  - `monitor_export_job.sh` and `debug.sh` were patched to avoid `rg` hard dependency (grep fallback).
+
+- **Ops doc handling**:
+  - Detailed host-ollama setup/troubleshooting doc:
+    - `docs/HOST_OLLAMA_SETUP.md`
+  - Added to `.gitignore` for local-only ops usage.
 
 ## Handoff Notes (2026-02-11)
 

@@ -237,20 +237,15 @@ async def extract_items_from_chunk(
     system_prompt = get_extraction_system_prompt()
     user_prompt = get_extraction_user_prompt(chunk)
 
-    try:
-        response = await llm_call(system_prompt, user_prompt)
-        items = _parse_extraction_response(response, chunk.index)
+    response = await llm_call(system_prompt, user_prompt)
+    items = _parse_extraction_response(response, chunk.index)
 
-        # Add source timestamp info if not already present
-        for item in items:
-            if not item.source_timestamp:
-                item.source_timestamp = chunk.start_timestamp
+    # Add source timestamp info if not already present
+    for item in items:
+        if not item.source_timestamp:
+            item.source_timestamp = chunk.start_timestamp
 
-        return items
-
-    except Exception:
-        # On error, return empty list - will be retried or logged
-        return []
+    return items
 
 
 def extract_participants(transcript: str) -> list[str]:

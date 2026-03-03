@@ -1,5 +1,6 @@
 """Summarization backend manager."""
 
+import asyncio
 from typing import Callable, Awaitable, Optional
 
 from config.settings import Settings, SummarizationBackend as SumBackendEnum, get_settings
@@ -183,7 +184,7 @@ class SummarizationManager:
         )
 
         try:
-            result = await self._active_backend.summarize(
+            result = await self._summarize_with_timeout(
                 transcript=transcript,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
@@ -250,7 +251,7 @@ class SummarizationManager:
 
         # Create LLM call wrapper for the pipeline
         async def llm_call(system_prompt: str, user_prompt: str) -> str:
-            result = await self._active_backend.summarize(
+            result = await self._summarize_with_timeout(
                 transcript="",  # Not used when prompts are provided
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
@@ -307,3 +308,34 @@ class SummarizationManager:
                 source="summarization_manager",
             )
             raise
+
+    async def _summarize_with_timeout(
+        self,
+        transcript: str,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> SummarizationResult:
+        if not self._active_backend:
+            raise RuntimeError("No active summarization backend")
+
+        timeout_seconds = int(self._settings.summarization_timeout_seconds)
+        if timeout_seconds <= 0:
+            return await self._active_backend.summarize(
+                transcript=transcript,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+            )
+
+        try:
+            return await asyncio.wait_for(
+                self._active_backend.summarize(
+                    transcript=transcript,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                ),
+                timeout=float(timeout_seconds),
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"Summarization model call timed out after {timeout_seconds} seconds"
+            ) from exc

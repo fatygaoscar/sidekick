@@ -643,10 +643,7 @@ class RecordingsPage {
     }
 
     async _waitForExportJob(jobId) {
-        const maxPollMs = 20 * 60 * 1000;
-        const startedAt = Date.now();
-
-        while (Date.now() - startedAt < maxPollMs) {
+        while (true) {
             const response = await fetch(`/api/export-jobs/${jobId}`);
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
@@ -673,8 +670,6 @@ class RecordingsPage {
 
             await new Promise(resolve => setTimeout(resolve, 900));
         }
-
-        throw new Error('Export timed out');
     }
 
     _setProcessingState({ stage, message, transcriptionProgress, summarizationProgress, overallProgress }) {

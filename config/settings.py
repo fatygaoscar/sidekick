@@ -51,10 +51,13 @@ class Settings(BaseSettings):
 
     # Summarization
     summarization_backend: SummarizationBackend = SummarizationBackend.OLLAMA
+    summarization_timeout_seconds: int = 600
 
     # Ollama settings
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.2"
+    ollama_context_length: int = 4096
+    ollama_think: bool = False  # Set true to enable thinking mode for qwen3 models (slower, better for complex tasks)
 
     # OpenAI summarization
     openai_summarization_model: str = "gpt-4o-mini"

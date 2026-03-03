@@ -7,8 +7,10 @@
 ./start.sh
 ./start.sh --ngrok
 ./start.sh --cloudflare
+./restart.sh
 ./status.sh
 ./stop.sh
+./debug.sh
 ```
 
 Manual run is still supported:
@@ -172,6 +174,40 @@ UI template chooser order (shown templates only):
   - `src/sessions/models.py` (added `StructuredItem`)
   - `src/sessions/repository.py` (added CRUD for structured items)
   - `.env` (updated model)
+
+## Handoff Notes (2026-03-02, later)
+
+- **Export/re-summarize reliability updates**:
+  - Re-summarize now skips re-transcription when authoritative transcript already exists and segments are present.
+  - Fixed export preview response bug (`summary_result` reference).
+  - Removed silent extraction error swallowing; added chunk-level exception logging.
+  - Pipeline now fails clearly when all extraction chunks fail (timeout/backend).
+  - Removed frontend hard 20-minute export timeout in both main and recordings flows.
+
+- **Timeout and tuning changes**:
+  - Added backend-agnostic summarization timeout in manager (`SUMMARIZATION_TIMEOUT_SECONDS`).
+  - Added Ollama context control (`OLLAMA_CONTEXT_LENGTH`) and mapped to `num_ctx`.
+  - Operationally tested context reduction from 4096 to 3072 for better stability.
+
+- **Host Ollama + WSL findings**:
+  - Working path: Sidekick in WSL, Ollama on Windows host.
+  - Security-preferred networking: mirrored mode + localhost-only Ollama.
+  - Non-mirrored fallback requires host bind/firewall scoping.
+  - 35b model on 16GB VRAM often runs mixed CPU/GPU and may stall under extraction load.
+  - 27b is the recommended next model to validate for quality/performance balance.
+
+- **Debug/ops tooling added**:
+  - `debug.sh` unified entrypoint:
+    - `./debug.sh ollama`
+    - `./debug.sh export-latest`
+    - `./debug.sh benchmark --runs 2`
+  - `scripts/monitor_ollama.ps1` live Ollama/GPU watcher.
+  - `scripts/monitor_export_job.sh` job poller.
+  - `scripts/benchmark_ollama_models.py` model benchmark against real recording transcript chunks.
+
+- **Local-only ops documentation**:
+  - `docs/HOST_OLLAMA_SETUP.md` documents host setup, security options, stuck-state recovery, and monitoring.
+  - This file is intentionally ignored in git via `.gitignore`.
 
 ## Handoff Notes (2026-02-11)
 

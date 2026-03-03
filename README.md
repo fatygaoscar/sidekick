@@ -26,6 +26,9 @@ A Python-based web application for recording, transcribing, and summarizing meet
 # Start managed background server
 ./start.sh
 
+# Restart cleanly (recommended after config/model changes)
+./restart.sh
+
 # Start with ngrok public URL for phone access
 ./start.sh --ngrok
 
@@ -51,10 +54,35 @@ WHISPER_DEVICE=cuda
 # Summarization
 SUMMARIZATION_BACKEND=ollama
 OLLAMA_MODEL=qwen3.5:35b-a3b
+SUMMARIZATION_TIMEOUT_SECONDS=600
+OLLAMA_CONTEXT_LENGTH=4096
 
 # Export location
 OBSIDIAN_VAULT_PATH=/path/to/your/vault
 ```
+
+### Performance Setup: WSL App + Host Ollama
+
+If Sidekick runs in WSL but summarization stalls on extraction, run Ollama on Windows host and keep the app in WSL.
+
+1. Run/pull model on Windows host:
+   - `ollama pull qwen3.5:35b-a3b`
+   - Host Ollama tuning (Windows environment variables):
+     - `OLLAMA_NUM_PARALLEL=1`
+     - `OLLAMA_CONTEXT_LENGTH=4096`
+2. From WSL, test host reachability:
+   - `curl http://host.docker.internal:11434/api/tags`
+   - If needed, test Windows host IP from `/etc/resolv.conf`.
+3. Set `.env` in Sidekick:
+   - `OLLAMA_HOST=http://host.docker.internal:11434`
+   - `OLLAMA_CONTEXT_LENGTH=4096`
+   - `SUMMARIZATION_TIMEOUT_SECONDS=600`
+4. Restart app:
+   - `./restart.sh` (or `./restart.sh --cloudflare`)
+
+Notes:
+- `qwen3.5:35b-a3b` is high quality but memory-heavy. Host Ollama avoids WSL RAM cap pressure.
+- For 16GB VRAM systems, keep one summarization job at a time and avoid raising context aggressively.
 
 ## Usage
 
@@ -106,7 +134,7 @@ Output includes both structured tables and flowing narrative.
 
 - Python 3.10+
 - CUDA-capable GPU (for local transcription)
-- Ollama running locally (for local summarization)
+- Ollama running locally or on Windows host reachable from WSL (for local summarization)
 - ngrok account (optional, for phone access)
 
 ## Data Storage
@@ -114,3 +142,62 @@ Output includes both structured tables and flowing narrative.
 - Database: `data/sidekick.db`
 - Audio files: `data/audio/`
 - Logs: `data/sidekick.log`
+
+## Debugging
+
+### Unified debug command (recommended)
+
+```bash
+# Monitor host Ollama from WSL (uses PowerShell under the hood)
+./debug.sh ollama
+
+# Ollama + GPU stats
+./debug.sh ollama --gpu --interval 1
+
+# Monitor a specific export job
+./debug.sh export <job_id>
+
+# Monitor latest seen export job from logs
+./debug.sh export-latest
+
+# Benchmark model latency on a real recording transcript chunk
+./debug.sh benchmark --runs 2
+```
+
+### Monitor export job progress (WSL)
+
+```bash
+# Usage: ./scripts/monitor_export_job.sh <job_id> [interval_seconds] [base_url]
+./scripts/monitor_export_job.sh <job_id> 1 http://127.0.0.1:8000
+```
+
+### Monitor Ollama activity (PowerShell)
+
+You can run the PowerShell watcher from the same repo stored in WSL:
+
+```powershell
+cd \\wsl$\Ubuntu\home\ozzfa\sidekick
+powershell -ExecutionPolicy Bypass -File .\scripts\monitor_ollama.ps1
+```
+
+With GPU stats:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\monitor_ollama.ps1 -ShowGpu
+```
+
+### Benchmark model performance (WSL)
+
+```bash
+# Defaults to latest recording and models:
+# qwen3.5:35b-a3b,qwen3.5:27b,qwen2.5:14b
+./scripts/benchmark_ollama_models.py --runs 2
+
+# Pin recording + models
+./scripts/benchmark_ollama_models.py \
+  --recording-id <session_id> \
+  --models qwen3.5:27b,qwen2.5:14b \
+  --chunk-seconds 600 \
+  --context-length 3072 \
+  --runs 2
+```

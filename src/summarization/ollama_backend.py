@@ -1,11 +1,18 @@
 """Summarization backend using Ollama."""
 
+import logging
+import re
 from typing import Any
 
 from config.settings import get_settings
 
+logger = logging.getLogger(__name__)
+
 from .base import SummarizationBackend, SummarizationResult
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+
+
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 class OllamaBackend(SummarizationBackend):
@@ -26,6 +33,8 @@ class OllamaBackend(SummarizationBackend):
         settings = get_settings()
         self._host = host or settings.ollama_host
         self._model_name = model or settings.ollama_model
+        self._context_length = settings.ollama_context_length
+        self._think = settings.ollama_think
         self._client: Any = None
         self._initialized = False
 
@@ -69,17 +78,32 @@ class OllamaBackend(SummarizationBackend):
         system = system_prompt or SYSTEM_PROMPT
         user = user_prompt or USER_PROMPT_TEMPLATE.format(transcript=transcript)
 
+        options: dict[str, Any] = {"num_ctx": self._context_length}
+        if not self._think:
+            options["think"] = False
+
         response = await self._client.chat(
             model=self._model_name,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            options=options,
         )
 
         content = response["message"]["content"]
+        # Strip thinking blocks (qwen3/qwen3.5 models may emit <think>...</think> even when
+        # think=False is set, depending on Ollama version)
+        content = _THINK_TAG_RE.sub("", content).strip()
 
-        # Ollama doesn't provide token counts in the same way
+        try:
+            eval_count = response["eval_count"]
+            eval_duration_s = response["eval_duration"] / 1e9
+            tok_s = eval_count / eval_duration_s if eval_duration_s > 0 else 0
+            logger.info("ollama: %d tok out, %.0f tok/s", eval_count, tok_s)
+        except (KeyError, TypeError, ZeroDivisionError):
+            pass
+
         return SummarizationResult(
             content=content,
             backend=self.name,

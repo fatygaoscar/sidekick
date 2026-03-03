@@ -53,3 +53,6 @@ htmlcov/
 
 # mypy
 .mypy_cache/
+
+# Local ops docs
+docs/HOST_OLLAMA_SETUP.md
