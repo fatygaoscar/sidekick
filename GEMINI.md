@@ -21,7 +21,8 @@ This document contains foundational mandates for the Gemini CLI agent working on
 
 - **Git Safety:** Always check `.gitignore` before `git add .`. Never commit `data/` or `.env`.
 - **Port Checking:** Use the `connect()` method for checking port availability to avoid WSL false positives.
-- **Ollama Think:** Always pass `think: false` to Ollama for summarization to save tokens and speed up processing.
+- **Ollama Optimization:** Maintain `OLLAMA_CONTEXT_LENGTH=32768` for `qwen3.5:9b`. Use dynamic `num_ctx` calculation based on input size to speed up Ollama initialization for short meetings.
+- **Ollama Think:** Always pass `think: false` to Ollama for summarization.
 - **Database Migrations:** Use the `init_db` pattern in `src/sessions/repository.py` to automatically backfill schema changes for existing users.
 
 ## Project Context

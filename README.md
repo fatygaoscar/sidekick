@@ -4,12 +4,15 @@ Browser-based meeting recorder that transcribes audio, identifies speakers, and 
 
 ## Features
 
-- **Browser recording** with real-time audio visualization
+- **High-fidelity audio** — captures and plays back at 48kHz (DVD quality) while downsampling to 16kHz for AI
 - **Local transcription** via faster-whisper large-v3 (CUDA)
-- **Speaker diarization** via pyannote.audio 3.1 — labels `SPEAKER_00`, `SPEAKER_01`, etc.
+- **Speaker diarization** via pyannote.audio 3.1 — speech-aware optimization skips silent ends
 - **Speaker name resolution** — provide attendee names and the LLM maps labels to real people before summarizing
-- **History Summary View** — view processed summaries directly in the recordings history without re-processing
-- **Obsidian-Optimized Formatting** — summaries use nested bullet points and clean spacing for maximum scannability in Obsidian
+- **History Summary View** — view and refine processed summaries directly in the recordings history
+- **Unified Review/View** — functionally identical modals for new and past recordings (Refine, Edit, Undo)
+- **Obsidian-Optimized Formatting** — summaries use nested bullet points and clean spacing for maximum scannability
+- **Smart Versioning** — Obsidian exports append `(v2)`, `(v3)`, etc., to prevent overwriting existing notes
+- **Performance Optimizations** — dynamic context sizing and single-pass early exit for ultra-fast short meeting processing
 - **Structured templates** — meeting notes, 1-on-1, standup, working session, custom
 - **Editable prompts** — customize any template before export
 - **Real-time progress** — live percent tracking through transcription and summarization
@@ -205,7 +208,7 @@ OLLAMA_HOST=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3.5:9b
 OLLAMA_THINK=false
 SUMMARIZATION_TIMEOUT_SECONDS=300
-OLLAMA_CONTEXT_LENGTH=40960
+OLLAMA_CONTEXT_LENGTH=32768
 
 # Export
 OBSIDIAN_VAULT_PATH=/path/to/your/vault
@@ -216,10 +219,10 @@ OBSIDIAN_VAULT_PATH=/path/to/your/vault
 | Model | VRAM | Quality | Notes |
 |-------|------|---------|-------|
 | `qwen3.5:4b` | ~2.5 GB | Good | 100% GPU, fits 64K context on 16GB VRAM |
-| `qwen3.5:9b` | ~6.6 GB | Better | 100% GPU at 40K context, ~9.4GB headroom for KV cache |
-| `qwen2.5:14b` | ~10.3 GB | Best local | Only ~5.7GB left for KV cache — spills to RAM at 40K context |
+| `qwen3.5:9b` | ~6.6 GB | Better | **Recommended** — 100% GPU at 32K context |
+| `qwen2.5:14b` | ~10.3 GB | Best local | Spills to RAM at 32K context (requires 24GB VRAM for full GPU) |
 
-`qwen3.5:9b` is the recommended default for 16GB VRAM systems.
+`qwen3.5:9b` with `OLLAMA_CONTEXT_LENGTH=32768` is the recommended default for 16GB VRAM systems.
 
 **Important**: `OLLAMA_THINK=false` is critical — qwen3.5 models output `<think>...</think>` chain-of-thought blocks by default. This wastes tokens and degrades quality.
 
@@ -325,4 +328,4 @@ All templates are editable before export (click "Show" to view and modify the pr
 - Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist; diarization also skips if speakers already saved
 - `start.sh` port check uses `connect()` (not `bind()`) to avoid false positives in WSL mirrored mode
 - Ollama runs on **Windows host**, Sidekick runs in **WSL** — mirrored networking makes `127.0.0.1:11434` work
-- Context budget: `OLLAMA_CONTEXT_LENGTH=40960` suits `qwen3.5:9b` (6.6 GB model, ~9.4 GB headroom for KV cache on 16 GB VRAM). Larger models need reduced context or will split CPU/GPU.
+- Context budget: `OLLAMA_CONTEXT_LENGTH=32768` suits `qwen3.5:9b` (6.6 GB model, ~7.5 GB KV cache). Fits 100% in 16 GB VRAM. Supports ~2.5+ hours of speech. Larger context causes CPU spillover.

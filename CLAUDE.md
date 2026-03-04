@@ -105,7 +105,7 @@ SUMMARIZATION_BACKEND=ollama
 OLLAMA_HOST=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3.5:9b
 OLLAMA_THINK=false
-OLLAMA_CONTEXT_LENGTH=40960
+OLLAMA_CONTEXT_LENGTH=32768
 SUMMARIZATION_TIMEOUT_SECONDS=300
 
 HF_TOKEN=<huggingface_read_token>
@@ -115,9 +115,11 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 ```
 
 **Model notes**:
-- `qwen3.5:9b` = 6.6GB, 100% VRAM on RTX 5070 Ti (16GB), 40K context fits comfortably
+- `qwen3.5:9b` = 6.6GB, 100% VRAM on RTX 5070 Ti (16GB)
+- `OLLAMA_CONTEXT_LENGTH=32768` fits model + KV cache 100% in 16GB VRAM.
+- Supports ~2.5+ hours of continuous speech.
 - `OLLAMA_THINK=false` is critical — think mode adds thousands of tokens per call for no benefit in summarization
-- Larger models (14b+) need reduced `OLLAMA_CONTEXT_LENGTH` to avoid CPU/GPU split (RAM spill = 40%+ CPU usage)
+- Larger models (14b+) or larger context (40k+) cause CPU spillover (RAM spill = 40%+ CPU usage)
 - Ollama runs on **Windows host**; Sidekick in **WSL** with mirrored networking → `127.0.0.1:11434` works directly
 
 ## Output Format (Current)
@@ -157,6 +159,11 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 
 ## Handoff Notes (2026-03-03, latest)
 
+### Pipeline Optimizations (New)
+- **Speech-Aware Diarization:** Diarization scan now stops at the last Whisper transcript timestamp + 5s. Prevents 30+ min "waits" on forgotten recordings.
+- **Dynamic Context:** `SummarizationManager` now calculates required `num_ctx` based on input length (min 4096). Dramatically speeds up short meeting processing by reducing VRAM reservation time.
+- **Single-Pass Early Exit:** Short transcripts (< 3000 chars) skip the editorial polish pass if the first draft is high quality.
+
 ### Unified View & Refinement
 - **Parity:** The History "View" modal now matches the post-recording "Review" modal.
 - **Refinement:** Added "Ask AI to Revise", "Edit Manually", and "Undo" support to history.
@@ -172,6 +179,7 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - **Core Logic:** `src/core/markdown_utils.py` centralizes Obsidian note construction.
 - **Stats:** `Summary` model now includes `processing_duration_seconds`.
 - **Migration:** `src/sessions/repository.py` includes auto-backfill for new columns on startup.
+- **Audio Quality:** Captures at 48kHz for high-fidelity playback; downsampled to 16kHz for AI.
 
 ## Handoff Notes (2026-03-03, earlier)
 

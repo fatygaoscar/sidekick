@@ -72,6 +72,7 @@ class OllamaBackend(SummarizationBackend):
         transcript: str,
         system_prompt: str | None = None,
         user_prompt: str | None = None,
+        num_ctx: int | None = None,
     ) -> SummarizationResult:
         """Generate summary using Ollama."""
         if not self._initialized:
@@ -80,7 +81,8 @@ class OllamaBackend(SummarizationBackend):
         system = system_prompt or SYSTEM_PROMPT
         user = user_prompt or USER_PROMPT_TEMPLATE.format(transcript=transcript)
 
-        options: dict[str, Any] = {"num_ctx": self._context_length}
+        ctx_len = num_ctx or self._context_length
+        options: dict[str, Any] = {"num_ctx": ctx_len}
         if not self._think:
             options["think"] = False
 

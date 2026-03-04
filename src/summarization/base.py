@@ -52,6 +52,7 @@ class SummarizationBackend(ABC):
         transcript: str,
         system_prompt: str | None = None,
         user_prompt: str | None = None,
+        num_ctx: int | None = None,
     ) -> SummarizationResult:
         """
         Generate a summary from transcript.
@@ -60,6 +61,7 @@ class SummarizationBackend(ABC):
             transcript: The transcript text to summarize
             system_prompt: Optional system prompt override
             user_prompt: Optional user prompt template (use {transcript} placeholder)
+            num_ctx: Optional context length override
 
         Returns:
             SummarizationResult with summary and metadata

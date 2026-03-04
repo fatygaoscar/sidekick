@@ -503,23 +503,34 @@ async def _run_export_pipeline(
             if audio_path:
                 await _emit_progress(progress_callback, "transcribing", "Running speaker diarization", 0.5, 0.0)
                 try:
+                    # Calculate speech end time to limit diarization processing
+                    speech_end_time = max((seg.end_time for seg in existing_segments), default=None)
+                    diarization_limit = speech_end_time + 5.0 if speech_end_time else None
+                    
+                    if diarization_limit:
+                        logger.info(f"Diarization: limiting scan to {diarization_limit:.1f}s based on transcript")
+
                     from src.transcription.diarize import assign_speaker, diarize
+                    diar_start = datetime.now(timezone.utc)
                     diarization_spans = await asyncio.to_thread(
-                        diarize, str(audio_path), _settings.hf_token
+                        diarize, str(audio_path), _settings.hf_token, duration_limit=diarization_limit
                     )
+                    diar_duration = (datetime.now(timezone.utc) - diar_start).total_seconds()
+                    logger.info(f"Diarization: took {diar_duration:.1f}s for {len(diarization_spans)} speaker spans")
+
                     speaker_updates = {
                         seg.id: assign_speaker(seg.start_time, seg.end_time, diarization_spans)
                         for seg in existing_segments
                     }
                     await repository.update_segments_speakers(speaker_updates)
                     existing_segments = await repository.get_segments(session_id=session_id)
-                    logger.info(f"Diarization: applied to {len(existing_segments)} existing segments")
                 except Exception as exc:
                     logger.warning(f"Diarization failed on existing segments, continuing: {exc}")
 
         full_transcript, audio_duration_seconds = _build_transcript_from_segments(existing_segments)
         await _emit_progress(progress_callback, "transcribing", "Transcription complete", 1.0, 0.0)
     else:
+        tx_start = datetime.now(timezone.utc)
         full_transcript, audio_duration_seconds = await _transcribe_and_persist_session(
             session_id=session_id,
             session=session,
@@ -532,12 +543,15 @@ async def _run_export_pipeline(
                 )
             ),
         )
+        tx_duration = (datetime.now(timezone.utc) - tx_start).total_seconds()
+        logger.info(f"Transcription (authoritative): took {tx_duration:.1f}s")
 
     # Generate summary
     template = request_payload.template
 
     await _emit_progress(progress_callback, "summarizing", "Generating summary", 1.0, 0.02)
     summarization_start = datetime.now(timezone.utc)
+    logger.info(f"Summarization: starting pass(es) for {len(full_transcript)} chars...")
     try:
         summary_result = await summarization_manager.summarize(
             transcript=full_transcript,
@@ -549,6 +563,7 @@ async def _run_export_pipeline(
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
 
     summarization_duration = (datetime.now(timezone.utc) - summarization_start).total_seconds()
+    logger.info(f"Summarization: complete in {summarization_duration:.1f}s")
     await _emit_progress(progress_callback, "summarizing", "Summary complete", 1.0, 1.0)
 
     await repository.add_summary(

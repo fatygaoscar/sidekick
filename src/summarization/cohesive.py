@@ -345,6 +345,11 @@ async def generate_cohesive_summary(
     )
     draft = await llm_call(pass1_system, pass1_user)
 
+    # Skip Pass 2 (editorial polish) for very short transcripts to significantly speed up processing.
+    # The first pass is usually high quality for short inputs.
+    if len(transcript) < 3000 and not _needs_retry(draft, structured_items):
+        return draft.strip(), context_mode, 1, "narrative_first_v1"
+
     pass2_system = (
         f"{pass1_system}\n\nYou are now in editorial rewrite mode. Output polished final content."
     )

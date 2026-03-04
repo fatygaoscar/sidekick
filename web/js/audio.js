@@ -4,7 +4,8 @@
 
 class AudioCapture {
     constructor(options = {}) {
-        this.sampleRate = options.sampleRate || 16000;
+        this.sampleRate = options.sampleRate || 16000; // Target rate for streaming
+        this.captureSampleRate = options.captureSampleRate || 48000; // Rate for recording/playback
         this.onAudioData = options.onAudioData || (() => {});
         this.onLevelUpdate = options.onLevelUpdate || (() => {});
         this.onEncodedAudio = options.onEncodedAudio || (() => {});
@@ -20,27 +21,33 @@ class AudioCapture {
         this.recordedMimeType = null;
         this.chunkIndex = 0;
         this.isCapturing = false;
+
+        // Resampling state
+        this.resampleBuffer = [];
     }
 
     async start() {
         if (this.isCapturing) return;
 
         try {
-            // Get microphone access
+            // Get microphone access - request high quality
             this.mediaStream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     channelCount: 1,
-                    sampleRate: this.sampleRate,
+                    sampleRate: this.captureSampleRate,
                     echoCancellation: true,
                     noiseSuppression: true,
                     autoGainControl: true,
                 },
             });
 
-            // Create audio context
+            // Create audio context at hardware rate or requested capture rate
             this.audioContext = new AudioContext({
-                sampleRate: this.sampleRate,
+                sampleRate: this.captureSampleRate,
             });
+            this.actualCaptureRate = this.audioContext.sampleRate;
+            
+            console.log(`[AudioCapture] Capturing at ${this.actualCaptureRate}Hz, target streaming at ${this.sampleRate}Hz`);
 
             // Create source from microphone
             const source = this.audioContext.createMediaStreamSource(this.mediaStream);
@@ -52,7 +59,7 @@ class AudioCapture {
             this.analyser.fftSize = 256;
             source.connect(this.analyser);
 
-            // Try to use AudioWorklet, fall back to ScriptProcessor
+            // Setup audio processing for streaming
             try {
                 await this._setupWorklet(source);
             } catch (e) {
@@ -131,10 +138,30 @@ class AudioCapture {
     }
 
     _processAudio(samples) {
+        // Downsample from actualCaptureRate to this.sampleRate (16000)
+        const ratio = this.actualCaptureRate / this.sampleRate;
+        
+        // Simple linear interpolation / decimation for efficiency
+        const targetLength = Math.round(samples.length / ratio);
+        const downsampled = new Float32Array(targetLength);
+        
+        for (let i = 0; i < targetLength; i++) {
+            const pos = i * ratio;
+            const index = Math.floor(pos);
+            const fraction = pos - index;
+            
+            if (index + 1 < samples.length) {
+                // Linear interpolation
+                downsampled[i] = samples[index] * (1 - fraction) + samples[index + 1] * fraction;
+            } else {
+                downsampled[i] = samples[index];
+            }
+        }
+
         // Convert Float32 to Int16 PCM
-        const pcm = new Int16Array(samples.length);
-        for (let i = 0; i < samples.length; i++) {
-            const s = Math.max(-1, Math.min(1, samples[i]));
+        const pcm = new Int16Array(downsampled.length);
+        for (let i = 0; i < downsampled.length; i++) {
+            const s = Math.max(-1, Math.min(1, downsampled[i]));
             pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
         }
 

@@ -158,7 +158,7 @@ SUMMARIZATION_BACKEND=ollama
 OLLAMA_HOST=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3.5:9b
 OLLAMA_THINK=false
-OLLAMA_CONTEXT_LENGTH=40960
+OLLAMA_CONTEXT_LENGTH=32768
 SUMMARIZATION_TIMEOUT_SECONDS=300
 
 # Diarization
@@ -216,6 +216,11 @@ Default template: `meeting`
 **Status**: Live and enabled.
 
 **Handoff Notes (2026-03-03, latest)**:
+- **Pipeline Optimizations**:
+  - **Speech-Aware Diarization**: Diarization scan now stops at the last Whisper transcript timestamp + 5s. Prevents long waits on forgotten recordings.
+  - **Dynamic Context**: `SummarizationManager` calculates `num_ctx` based on input size. Dramatically speeds up short meeting processing.
+  - **Single-Pass Early Exit**: Short transcripts (< 3000 chars) skip the editorial polish pass if the first draft is high quality.
+- **Audio Quality**: Captures and saves at 48kHz (High-Fidelity playback); downsampled to 16kHz via manual resampler in `audio.js` for streaming.
 - **Unified View & Refinement:** functionally identical review/view modals.
 - **Obsidian Versioning:** exports append `(v2)`, `(v3)`, etc.
 - **Markdown Logic:** Consolidated into `src/core/markdown_utils.py`.
@@ -231,4 +236,4 @@ Default template: `meeting`
 - `get_settings()` is LRU-cached — restart required to pick up `.env` changes.
 - `OLLAMA_THINK=false` is critical — suppresses token waste.
 - Mobile: removed `max-height` from internal containers to fix double scrolling.
-- Context budget: `OLLAMA_CONTEXT_LENGTH=40960` suits `qwen3.5:9b`.
+- Context budget: `OLLAMA_CONTEXT_LENGTH=32768` suits `qwen3.5:9b` (6.6GB model, ~7.5GB KV cache). Fits 100% in 16GB VRAM. Supports ~2.5+ hours of speech. Larger context causes CPU spillover.

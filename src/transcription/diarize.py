@@ -23,7 +23,7 @@ def _load_pipeline(hf_token: str):
     return _pipeline
 
 
-def _load_waveform(audio_path: str) -> dict:
+def _load_waveform(audio_path: str, duration_limit: float | None = None) -> dict:
     """Load audio via PyAV (bundled FFmpeg) into a pyannote-compatible waveform dict.
 
     Avoids the system-FFmpeg dependency that torchcodec requires.
@@ -36,12 +36,21 @@ def _load_waveform(audio_path: str) -> dict:
         format="fltp", layout="mono", rate=_TARGET_SR
     )
     chunks = []
+    total_samples = 0
+    
     with av.open(audio_path) as container:
         for frame in container.decode(audio=0):
+            # If duration limit is reached, stop decoding
+            if duration_limit is not None and frame.time > duration_limit:
+                break
+                
             for out in resampler.resample(frame):
                 chunks.append(out.to_ndarray())
-        for out in resampler.resample(None):  # flush
-            chunks.append(out.to_ndarray())
+        
+        # Flush resampler unless we hit the limit
+        if duration_limit is None or frame.time <= duration_limit:
+            for out in resampler.resample(None):
+                chunks.append(out.to_ndarray())
 
     if not chunks:
         raise RuntimeError(f"No audio decoded from {audio_path}")
@@ -50,10 +59,16 @@ def _load_waveform(audio_path: str) -> dict:
     return {"waveform": waveform, "sample_rate": _TARGET_SR}
 
 
-def diarize(audio_path: str, hf_token: str) -> list[tuple[float, float, str]]:
-    """Return (start_sec, end_sec, speaker_label) for every speaker turn."""
+def diarize(audio_path: str, hf_token: str, duration_limit: float | None = None) -> list[tuple[float, float, str]]:
+    """Return (start_sec, end_sec, speaker_label) for every speaker turn.
+    
+    Args:
+        audio_path: Path to audio file
+        hf_token: HuggingFace token
+        duration_limit: Optional limit in seconds to stop processing (saves time on long silences)
+    """
     pipeline = _load_pipeline(hf_token)
-    audio = _load_waveform(audio_path)
+    audio = _load_waveform(audio_path, duration_limit=duration_limit)
     result = pipeline(audio)
     return [(seg.start, seg.end, spk) for seg, _, spk in result.exclusive_speaker_diarization.itertracks(yield_label=True)]
 

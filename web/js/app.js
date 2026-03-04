@@ -126,7 +126,8 @@ class SidekickApp {
 
     _initAudioCapture() {
         this.audioCapture = new AudioCapture({
-            sampleRate: 16000,
+            sampleRate: 16000, // Target streaming rate
+            captureSampleRate: 48000, // Target recording/playback rate
             onAudioData: (buffer) => {
                 if (this.state.isRecording) {
                     this.ws.sendAudio(buffer);

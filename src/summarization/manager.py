@@ -167,6 +167,13 @@ class SummarizationManager:
         if not self._initialized or self._active_backend is None:
             await self.initialize()
 
+        # Calculate appropriate context length for this request
+        input_len = len(transcript or "") + len(system_prompt or "") + len(user_prompt or "")
+        estimated_tokens = int(input_len / 3) + 2000
+        
+        # Clamp between 4096 and the configured max
+        dynamic_ctx = max(4096, min(estimated_tokens, int(self._settings.ollama_context_length)))
+
         # Emit start event
         await self._event_bus.emit(
             EventType.SUMMARIZATION_STARTED,
@@ -174,6 +181,7 @@ class SummarizationManager:
                 "backend": self._active_backend.name,
                 "model": self._active_backend.model,
                 "transcript_length": len(transcript),
+                "dynamic_ctx": dynamic_ctx,
             },
             source="summarization_manager",
         )
@@ -185,13 +193,20 @@ class SummarizationManager:
                     transcript=transcript,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
+                    num_ctx=dynamic_ctx,
                 )
             else:
                 async def llm_call(sys_prompt: str, usr_prompt: str) -> str:
+                    # Recalculate dynamic_ctx for individual pass calls
+                    call_input_len = len(sys_prompt or "") + len(usr_prompt or "")
+                    call_estimated_tokens = int(call_input_len / 3) + 2000
+                    call_dynamic_ctx = max(4096, min(call_estimated_tokens, dynamic_ctx))
+
                     llm_result = await self._summarize_with_timeout(
                         transcript="",
                         system_prompt=sys_prompt,
                         user_prompt=usr_prompt,
+                        num_ctx=call_dynamic_ctx,
                     )
                     return llm_result.content
 
@@ -208,7 +223,7 @@ class SummarizationManager:
                     template_contract=template_contract,
                     perspective=perspective,
                     attendees=attendees,
-                    context_length=int(self._settings.ollama_context_length),
+                    context_length=dynamic_ctx,
                     custom_instructions=(
                         custom_instructions if prompt_type != "custom" else None
                     ),
@@ -374,6 +389,7 @@ class SummarizationManager:
         transcript: str,
         system_prompt: str,
         user_prompt: str,
+        num_ctx: int | None = None,
     ) -> SummarizationResult:
         if not self._active_backend:
             raise RuntimeError("No active summarization backend")
@@ -384,6 +400,7 @@ class SummarizationManager:
                 transcript=transcript,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                num_ctx=num_ctx,
             )
 
         try:
@@ -392,6 +409,7 @@ class SummarizationManager:
                     transcript=transcript,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
+                    num_ctx=num_ctx,
                 ),
                 timeout=float(timeout_seconds),
             )
