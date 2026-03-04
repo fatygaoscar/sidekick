@@ -7,7 +7,7 @@ import logging
 import re
 import urllib.parse
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
@@ -56,6 +56,7 @@ class ExportResponse(BaseModel):
     filepath: str
     obsidian_uri: Optional[str] = None
     summary_preview: str
+    summary_content: Optional[str] = None
 
 
 class ExportJobCreateResponse(BaseModel):
@@ -77,6 +78,16 @@ class ExportJobStatus(BaseModel):
     error: Optional[str] = None
     created_at: str
     updated_at: str
+
+
+class SaveRequest(BaseModel):
+    edited_summary: Optional[str] = None
+    revision_instruction: Optional[str] = None
+
+
+class RefineRequest(BaseModel):
+    instruction: str
+    current_summary: str
 
 
 class TranscriptionJobCreateResponse(BaseModel):
@@ -145,7 +156,7 @@ def _compute_overall_progress(stage: str, transcription_progress: float, summari
         return 0.40 + min(0.55 * summarization_progress, 0.55)
     if stage == "writing":
         return 0.95
-    if stage == "completed":
+    if stage in ("completed", "ready"):
         return 1.0
     return min(0.40 * transcription_progress + 0.55 * summarization_progress, 0.95)
 
@@ -399,34 +410,109 @@ def _build_transcript_from_segments(segments: list) -> tuple[str, float]:
     return transcript, duration
 
 
+def _week_folder(dt: datetime) -> str:
+    """Return e.g. '2026 Week 12' for the ISO week containing dt. Zero-pads for correct sort."""
+    iso_year, week_num, _ = dt.isocalendar()
+    return f"{iso_year} Week {week_num:02d}"
+
+
+def _format_duration_human(seconds: int) -> str:
+    """Return e.g. '45 min' or '1 hour 45 min'."""
+    minutes = seconds // 60
+    if minutes < 1:
+        return "< 1 min"
+    if minutes < 60:
+        return f"{minutes} min"
+    hours = minutes // 60
+    remaining = minutes % 60
+    hour_word = "hour" if hours == 1 else "hours"
+    if remaining == 0:
+        return f"{hours} {hour_word}"
+    return f"{hours} {hour_word} {remaining} min"
+
+
+def _format_processing_time(seconds: float) -> str:
+    """Return e.g. '4m 05s' or '45s'."""
+    total = int(seconds)
+    m, s = divmod(total, 60)
+    if m == 0:
+        return f"{s}s"
+    return f"{m}m {s:02d}s"
+
+
+def _format_datetime_human(dt: datetime, tz_label: str) -> str:
+    """Return e.g. 'March 16, 2026 at 2:30pm (CST)'."""
+    month = dt.strftime("%B")
+    day = dt.day
+    year = dt.year
+    hour_12 = dt.strftime("%I").lstrip("0") or "12"
+    minute = dt.strftime("%M")
+    ampm = dt.strftime("%p").lower()
+    time_str = f"{hour_12}:{minute}{ampm}" if minute != "00" else f"{hour_12}{ampm}"
+    return f"{month} {day}, {year} at {time_str} ({tz_label})"
+
+
 def _build_singlepass_markdown(
     content: str,
     template_label: str,
     recorded_at: str,
     exported_at: str,
-    tz_label: str,
     duration_str: str,
+    processing_time_str: str,
     transcript: str,
+    revision_instruction: Optional[str] = None,
 ) -> str:
-    """Build markdown output for single-pass summarization (no structured items tables)."""
-    return f"""**Template**: {template_label}
-**Recorded**: {recorded_at} ({tz_label})
-**Exported**: {exported_at} ({tz_label})
-**Duration**: {duration_str}
+    """Assemble the final Obsidian markdown note."""
+    revision_line = ""
+    if revision_instruction and revision_instruction.strip():
+        revision_line = f'**Revised**: "{revision_instruction.strip()}"\n'
+    return (
+        f"**Template**: {template_label}\n"
+        f"{revision_line}"
+        f"**Recorded**: {recorded_at}\n"
+        f"**Exported**: {exported_at}\n"
+        f"**Meeting Length**: {duration_str}\n"
+        f"**Processing Time**: {processing_time_str}\n"
+        f"\n---\n\n"
+        f"{content}\n"
+        f"\n---\n\n"
+        f"<details>\n<summary>Full Transcript</summary>\n\n"
+        f"{transcript}\n\n"
+        f"</details>\n"
+    )
 
----
 
-{content}
+async def _write_obsidian_file(
+    markdown_content: str,
+    relative_path: str,
+    obsidian_vault_path: str,
+) -> tuple[str, str]:
+    """Write markdown to vault at relative_path (e.g. 'Meetings/2026 Week 12/16 Mon 0930 - Title.md').
 
----
+    Creates subdirectories as needed. Returns (absolute_filepath, obsidian_uri).
+    """
+    vault_path = Path(obsidian_vault_path)
+    if not vault_path.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Obsidian vault path does not exist: {obsidian_vault_path}",
+        )
+    filepath = vault_path / Path(relative_path)
+    try:
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        filepath.write_text(markdown_content, encoding="utf-8")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write file: {str(e)}")
 
-<details>
-<summary>Full Transcript</summary>
-
-{transcript}
-
-</details>
-"""
+    vault_name = vault_path.name
+    # Obsidian URIs use forward slashes regardless of OS
+    uri_path = relative_path.replace("\\", "/")
+    obsidian_uri = (
+        f"obsidian://open?"
+        f"vault={urllib.parse.quote(vault_name)}&"
+        f"file={urllib.parse.quote(uri_path)}"
+    )
+    return str(filepath), obsidian_uri
 
 
 async def _run_export_pipeline(
@@ -436,13 +522,17 @@ async def _run_export_pipeline(
     repository: Repository,
     transcription_manager: TranscriptionManager,
     progress_callback: Optional[ProgressCallback] = None,
-) -> ExportResponse:
-    """Export a recording to Obsidian vault.
+) -> tuple[ExportResponse, dict]:
+    """Build summary for a recording. Does NOT write to vault.
+
+    Returns (ExportResponse, build_params). Vault write is deferred to the /save endpoint.
+    build_params contains everything needed to assemble the final markdown at save time.
 
     Authoritative export pipeline:
-      audio file -> transcription -> transcript segments -> summary -> markdown
+      audio file -> transcription -> transcript segments -> summary -> markdown components
     """
     settings = get_settings()
+    pipeline_start = datetime.now(timezone.utc)
 
     await _emit_progress(progress_callback, "transcribing", "Preparing recording", 0.03, 0.0)
 
@@ -534,78 +624,55 @@ async def _run_export_pipeline(
     )
 
     summary_content = summary_result.content
+    processing_time_str = _format_processing_time(
+        (datetime.now(timezone.utc) - pipeline_start).total_seconds()
+    )
 
-    # Calculate duration
-    duration_seconds = int(audio_duration_seconds)
-    hours = duration_seconds // 3600
-    minutes = (duration_seconds % 3600) // 60
-    seconds = duration_seconds % 60
-    duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-    # Build filename: YYYY-MM-DD-HHMM - [title] [Template].md
+    # Build filename and folder
     local_started_at = localize_datetime(
         session.started_at,
         session.timezone_name,
         session.timezone_offset_minutes,
     )
-    local_exported_at = localize_datetime(
-        datetime.now(timezone.utc),
-        session.timezone_name,
-        session.timezone_offset_minutes,
-    )
     tz_label = timezone_label(session.timezone_name, session.timezone_offset_minutes)
 
-    timestamp = local_started_at.strftime("%Y-%m-%d-%H%M")
     template_label = TEMPLATE_INFO.get(template, {}).get("name", template.title())
-    safe_title = re.sub(r'[<>:"/\\|?*]', '', request_payload.title)  # Remove invalid filename chars
-    filename = f"{timestamp} - {safe_title} [{template_label}].md"
+    safe_title = re.sub(r'[<>:"/\\|?*]', '', request_payload.title.strip())
+    dow = local_started_at.strftime("%a")   # Mon, Tue, …
+    time_hhmm = local_started_at.strftime("%H%M")  # 0930
+    filename = f"{local_started_at.day:02d} {dow} {time_hhmm} - {safe_title}.md"
+    week_folder = _week_folder(local_started_at)
+    relative_path = f"Meetings/{week_folder}/{filename}"
 
-    # Build markdown content
-    recorded_at = local_started_at.strftime("%Y-%m-%d %H:%M")
-    exported_at = local_exported_at.strftime("%Y-%m-%d %H:%M")
-    markdown_content = _build_singlepass_markdown(
-        content=summary_content,
-        template_label=template_label,
-        recorded_at=recorded_at,
-        exported_at=exported_at,
-        tz_label=tz_label,
-        duration_str=duration_str,
-        transcript=full_transcript,
-    )
+    recorded_at = _format_datetime_human(local_started_at, tz_label)
+    duration_str = _format_duration_human(int(audio_duration_seconds))
 
-    # Write to Obsidian vault
-    await _emit_progress(progress_callback, "writing", "Writing note to vault", 1.0, 1.0)
-    vault_path = Path(settings.obsidian_vault_path)
-    if not vault_path.exists():
-        raise HTTPException(
-            status_code=500,
-            detail=f"Obsidian vault path does not exist: {settings.obsidian_vault_path}",
-        )
+    await _emit_progress(progress_callback, "writing", "Summary ready", 1.0, 1.0)
 
-    filepath = vault_path / filename
-    try:
-        filepath.write_text(markdown_content, encoding="utf-8")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write file: {str(e)}")
+    build_params = {
+        "summary_content": summary_content,
+        "transcript": full_transcript,
+        "template_label": template_label,
+        "recorded_at": recorded_at,
+        "tz_label": tz_label,
+        "session_timezone_name": session.timezone_name,
+        "session_timezone_offset_minutes": session.timezone_offset_minutes,
+        "duration_str": duration_str,
+        "processing_time_str": processing_time_str,
+        "filename": filename,
+        "relative_path": relative_path,
+    }
 
-    # Build Obsidian URI
-    vault_name = vault_path.name
-    obsidian_uri = (
-        f"obsidian://open?"
-        f"vault={urllib.parse.quote(vault_name)}&"
-        f"file={urllib.parse.quote(filename)}"
-    )
-
-    # Summary preview (first 200 chars)
     preview = summary_content[:200] + "..." if len(summary_content) > 200 else summary_content
-
-    return ExportResponse(
+    response = ExportResponse(
         success=True,
         filename=filename,
-        filepath=str(filepath),
-        obsidian_uri=obsidian_uri,
+        filepath="",        # filled in at save time
+        obsidian_uri=None,  # filled in at save time
         summary_preview=preview,
+        summary_content=summary_content,
     )
+    return response, build_params
 
 
 async def _run_export_job(
@@ -634,7 +701,7 @@ async def _run_export_job(
         _update_export_job(job_id, **updates)
 
     try:
-        result = await _run_export_pipeline(
+        result, build_params = await _run_export_pipeline(
             session_id=session_id,
             request_payload=request_payload,
             summarization_manager=summarization_manager,
@@ -642,11 +709,13 @@ async def _run_export_job(
             transcription_manager=transcription_manager,
             progress_callback=update_progress,
         )
+        job = _EXPORT_JOBS.get(job_id, {})
+        job["build_params"] = build_params
         _update_export_job(
             job_id,
-            status="completed",
-            stage="completed",
-            message="Export complete",
+            status="ready",
+            stage="ready",
+            message="Summary ready for review",
             transcription_progress=1.0,
             summarization_progress=1.0,
             result=result.model_dump(),
@@ -741,14 +810,36 @@ async def export_to_obsidian(
     repository: Repository = Depends(get_repository),
     transcription_manager: TranscriptionManager = Depends(get_transcription_manager),
 ):
-    """Synchronous export endpoint (legacy + recordings page)."""
-    return await _run_export_pipeline(
+    """Synchronous export endpoint (legacy). Builds and immediately writes to vault."""
+    settings = get_settings()
+    result, bp = await _run_export_pipeline(
         session_id=session_id,
         request_payload=request,
         summarization_manager=summarization_manager,
         repository=repository,
         transcription_manager=transcription_manager,
     )
+    local_exported_at = localize_datetime(
+        datetime.now(timezone.utc),
+        bp.get("session_timezone_name"),
+        bp.get("session_timezone_offset_minutes"),
+    )
+    exported_at = _format_datetime_human(local_exported_at, bp["tz_label"])
+    markdown_content = _build_singlepass_markdown(
+        content=bp["summary_content"],
+        template_label=bp["template_label"],
+        recorded_at=bp["recorded_at"],
+        exported_at=exported_at,
+        duration_str=bp["duration_str"],
+        processing_time_str=bp["processing_time_str"],
+        transcript=bp["transcript"],
+    )
+    filepath, obsidian_uri = await _write_obsidian_file(
+        markdown_content, bp["relative_path"], settings.obsidian_vault_path
+    )
+    result.filepath = filepath
+    result.obsidian_uri = obsidian_uri
+    return result
 
 
 @router.post("/recordings/{session_id}/transcription-job", response_model=TranscriptionJobCreateResponse)
@@ -828,6 +919,81 @@ async def get_export_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Export job not found")
     return ExportJobStatus(**job)
+
+
+@router.post("/export-jobs/{job_id}/save")
+async def save_export_job(job_id: str, request: SaveRequest):
+    """Assemble final markdown and write to Obsidian vault."""
+    job = _EXPORT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    if job.get("status") not in ("ready", "completed"):
+        raise HTTPException(status_code=400, detail="Job is not ready to save")
+
+    bp = job.get("build_params")
+    result_data = job.get("result")
+    if not bp or not result_data:
+        raise HTTPException(status_code=400, detail="Job is missing build data")
+
+    # Compute exported_at at the moment the user actually saves
+    local_exported_at = localize_datetime(
+        datetime.now(timezone.utc),
+        bp.get("session_timezone_name"),
+        bp.get("session_timezone_offset_minutes"),
+    )
+    exported_at = _format_datetime_human(local_exported_at, bp["tz_label"])
+
+    summary = request.edited_summary.strip() if request.edited_summary and request.edited_summary.strip() else bp["summary_content"]
+
+    markdown_content = _build_singlepass_markdown(
+        content=summary,
+        template_label=bp["template_label"],
+        recorded_at=bp["recorded_at"],
+        exported_at=exported_at,
+        duration_str=bp["duration_str"],
+        processing_time_str=bp["processing_time_str"],
+        transcript=bp["transcript"],
+        revision_instruction=request.revision_instruction,
+    )
+
+    settings = get_settings()
+    filepath, obsidian_uri = await _write_obsidian_file(
+        markdown_content, bp["relative_path"], settings.obsidian_vault_path
+    )
+
+    _update_export_job(job_id, status="completed", stage="completed", message="Saved to Obsidian")
+
+    return {
+        "success": True,
+        "filename": bp["filename"],
+        "filepath": filepath,
+        "obsidian_uri": obsidian_uri,
+        "summary_preview": result_data.get("summary_preview", ""),
+    }
+
+
+@router.post("/export-jobs/{job_id}/refine")
+async def refine_export_job(
+    job_id: str,
+    request: RefineRequest,
+    summarization_manager: SummarizationManager = Depends(get_summarization_manager),
+):
+    """Apply a single AI revision pass to the current summary."""
+    job = _EXPORT_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Export job not found")
+    if job.get("status") not in ("ready", "completed"):
+        raise HTTPException(status_code=400, detail="Job is not ready to refine")
+
+    try:
+        revised = await summarization_manager.refine_summary(
+            instruction=request.instruction,
+            current_summary=request.current_summary,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Refinement failed: {str(e)}")
+
+    return {"revised_summary": revised}
 
 
 @router.get("/transcription-jobs/{job_id}", response_model=TranscriptionJobStatus)

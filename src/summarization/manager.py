@@ -347,6 +347,28 @@ class SummarizationManager:
             )
             raise
 
+    async def refine_summary(self, instruction: str, current_summary: str) -> str:
+        """Apply a single AI revision pass to an existing summary.
+
+        Context is just the summary + instruction — fast, ~10-20s vs 60-120s full pipeline.
+        """
+        if not self._initialized or self._active_backend is None:
+            await self.initialize()
+
+        system_prompt = (
+            "You are editing a meeting summary. Make only the requested change. "
+            "Preserve all section headers (##), factual content, names, dates, and details "
+            "you were not asked to change. Return only the revised summary in full."
+        )
+        user_prompt = f"Instruction: {instruction.strip()}\n\nCurrent summary:\n{current_summary.strip()}"
+
+        result = await self._summarize_with_timeout(
+            transcript="",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        return result.content
+
     async def _summarize_with_timeout(
         self,
         transcript: str,

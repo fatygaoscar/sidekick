@@ -40,6 +40,10 @@
                     <label class="form-label">Audio</label>
                     <audio id="view-audio-player" controls style="width: 100%;"></audio>
                 </div>
+                <div class="form-group hidden" id="view-summary-group">
+                    <label class="form-label">Summary</label>
+                    <div class="summary-view" id="view-summary"></div>
+                </div>
                 <div class="form-group">
                     <label class="form-label">Downloads</label>
                     <div class="download-actions">
@@ -154,6 +158,39 @@
         </div>
     </div>
 
+    <!-- Summary Review Modal -->
+    <div id="review-modal" class="modal hidden summary-review-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">Summary Review</h2>
+                <button class="modal-close" id="review-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="summary-meta" id="review-meta"></div>
+                <div id="review-summary-display" class="summary-body"></div>
+                <textarea id="review-summary-edit" class="summary-edit-textarea hidden" spellcheck="true"></textarea>
+                <div id="review-refine-section" class="hidden">
+                    <div class="refine-input-row">
+                        <input type="text" id="review-refine-input" class="refine-input" placeholder="e.g. Be more concise, add more detail on the cost discussion...">
+                        <button class="btn" id="review-refine-cancel">Cancel</button>
+                        <button class="btn btn-primary" id="review-refine-submit">Revise</button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="review-footer-left">
+                    <button class="btn" id="review-edit-btn">Edit</button>
+                    <button class="btn" id="review-revise-btn">Ask AI to Revise</button>
+                    <button class="btn hidden" id="review-undo-btn">Undo</button>
+                </div>
+                <div class="review-footer-right">
+                    <button class="btn btn-primary" id="review-save-btn">Save to Obsidian</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="/static/js/recordings.js?v=20260210h"></script>
 </body>
 </html>

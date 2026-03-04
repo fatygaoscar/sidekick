@@ -122,6 +122,7 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - Filename: `YYYY-MM-DD-HHMM - [Title] [Template].md`
 - Metadata block: Template, Recorded date, Exported date, Duration
 - Summary body follows template section structure
+- **Markdown Standard:** Strict bullet-point-first structure with nested indentation (2 spaces) and blank lines between sections for Obsidian scannability.
 - Collapsible full transcript (with `SPEAKER_XX:` or resolved real names)
 
 ## Data Locations
@@ -137,7 +138,7 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - `GET /recordings` history UI
 - `GET /api/templates` list templates with prompts
 - `GET /api/recordings` list recordings
-- `GET /api/recordings/{id}` recording details
+- `GET /api/recordings/{id}` recording details (includes latest `summary`)
 - `PUT /api/recordings/{id}/audio` upload full audio blob
 - `PUT /api/recordings/{id}/audio/chunks/{index}` chunked upload (requires `X-Client-ID`)
 - `POST /api/recordings/{id}/audio/finalize` finalize chunks (requires `X-Client-ID`)
@@ -147,6 +148,20 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - `GET /api/export-jobs/{job_id}` poll export job status
 - `GET /api/transcription-jobs/{job_id}` poll transcription job status
 - `WS /ws/audio` live stream + optional live preview
+
+## Handoff Notes (2026-03-03, latest)
+
+### History Summary View
+- `GET /api/recordings/{session_id}` now returns the latest processed `summary` content.
+- `web/recordings.html` and `web/js/recordings.js` updated to show the summary prominently in the view modal.
+- If a summary exists, the transcript is hidden by default to prioritize the summary.
+- Summary is rendered using `marked.js` to support full markdown formatting in the web UI.
+
+### Obsidian Markdown Refinement
+- `src/summarization/prompts.py` updated with a new `SYSTEM_PROMPT` and template specific instructions to prioritize bullet points over paragraphs.
+- **Indentation:** Mandated 2-space nested indentation for sub-details.
+- **Spacing:** Enforced blank lines between headers and content for better Obsidian preview.
+- `src/summarization/cohesive.py` Pass 2 (editorial) updated to enforce these scannability standards.
 
 ## Handoff Notes (2026-03-03)
 

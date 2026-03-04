@@ -166,7 +166,9 @@ def _build_system_prompt(
         "Write clear, cohesive output like a strong human executive assistant.\n"
         "Avoid formulaic language and repetitive phrasing.\n"
         "Do not include internal IDs (A-001, D-001, etc.).\n"
-        "Keep facts grounded in the provided context."
+        "Extract only information explicitly stated in the transcript. "
+        "Do not infer, speculate, or add context beyond what was said. "
+        "If a speaker or detail is unclear, note it as unclear rather than guessing."
     )
 
 
@@ -208,20 +210,23 @@ Omit filler, pleasantries, and off-topic chatter.{extra_tables_block}
 
 
 def _build_pass2_prompt(template: str, draft: str) -> str:
-    return f"""You are editing a meeting summary draft for clarity and cohesion.
+    return f"""You are editing a meeting summary draft for clarity, scannability, and Obsidian compatibility.
 
 Template: {template}
 
 Requirements:
-- Preserve the section structure from the draft (keep all ## headers)
-- Preserve factual accuracy and all specific details (names, dates, numbers)
-- Remove repetition, filler, and vague wording
-- Ensure Action Items is a clean markdown table
+- **Preserve Structure**: Keep all ## headers and section flow.
+- **Scannability**: Maximize use of bullet points (`-`). Break up any prose paragraphs into logical bullets.
+- **Hierarchy**: Use nested bullets (2-space indent) for supporting details.
+- **Spacing**: Ensure blank lines between headers and content, and between different topics.
+- **Accuracy**: Preserve all specific details (names, dates, numbers).
+- **Conciseness**: Remove repetition and filler.
+- **Tables**: Ensure Action Items is a clean markdown table.
 
 Draft:
 {draft}
 
-Return only the final edited output with the same sections."""
+Return ONLY the final edited Obsidian-compatible output."""
 
 
 _SPEAKER_LABEL_RE = re.compile(r"\bSPEAKER_\d+\b")

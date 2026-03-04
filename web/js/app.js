@@ -78,7 +78,28 @@ class SidekickApp {
             processingSummarizationText: document.getElementById('processing-summarization-text'),
             processingTranscriptionFill: document.getElementById('processing-transcription-fill'),
             processingSummarizationFill: document.getElementById('processing-summarization-fill'),
+
+            // Summary review modal
+            reviewModal: document.getElementById('review-modal'),
+            reviewClose: document.getElementById('review-close'),
+            reviewMeta: document.getElementById('review-meta'),
+            reviewSummaryDisplay: document.getElementById('review-summary-display'),
+            reviewSummaryEdit: document.getElementById('review-summary-edit'),
+            reviewRefineSection: document.getElementById('review-refine-section'),
+            reviewRefineInput: document.getElementById('review-refine-input'),
+            reviewRefineCancel: document.getElementById('review-refine-cancel'),
+            reviewRefineSubmit: document.getElementById('review-refine-submit'),
+            reviewEditBtn: document.getElementById('review-edit-btn'),
+            reviewReviseBtn: document.getElementById('review-revise-btn'),
+            reviewUndoBtn: document.getElementById('review-undo-btn'),
+            reviewSaveBtn: document.getElementById('review-save-btn'),
         };
+
+        // Summary review state
+        this._reviewJobId = null;
+        this._summaryHistory = [];  // revision stack for undo
+        this._revisionInstruction = null;  // last AI revision instruction used
+        this._editMode = false;
 
         this._init();
     }
@@ -169,6 +190,21 @@ class SidekickApp {
         this.elements.recordingTitle.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') this._processRecording();
         });
+
+        // Summary review modal
+        this.elements.reviewClose.addEventListener('click', () => this._closeReviewModal());
+        this.elements.reviewModal.addEventListener('click', (e) => {
+            if (e.target === this.elements.reviewModal) this._closeReviewModal();
+        });
+        this.elements.reviewEditBtn.addEventListener('click', () => this._toggleEditMode());
+        this.elements.reviewReviseBtn.addEventListener('click', () => this._showRefineInput());
+        this.elements.reviewRefineCancel.addEventListener('click', () => this._hideRefineInput());
+        this.elements.reviewRefineSubmit.addEventListener('click', () => this._submitRefine());
+        this.elements.reviewRefineInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') this._submitRefine();
+        });
+        this.elements.reviewUndoBtn.addEventListener('click', () => this._undoRevision());
+        this.elements.reviewSaveBtn.addEventListener('click', () => this._saveToObsidian());
 
         // Reconnect WebSocket when tab becomes visible (browser may have killed connection)
         document.addEventListener('visibilitychange', () => {
@@ -471,6 +507,7 @@ class SidekickApp {
 
         try {
             await this._ensureRecordingAudioPersisted(exportSessionId);
+            this._triggerEagerTranscription(exportSessionId);
 
             const createResponse = await fetch(`/api/recordings/${exportSessionId}/export-obsidian-job`, {
                 method: 'POST',
@@ -489,8 +526,8 @@ class SidekickApp {
             }
 
             const job = await createResponse.json();
-            const result = await this._waitForExportJob(job.job_id);
-            this._showConfirmation(result);
+            await this._waitForExportJob(job.job_id);
+            // Flow continues in _showReviewModal → _saveToObsidian → _showConfirmation
 
         } catch (error) {
             console.error('Export failed:', error);
@@ -765,6 +802,15 @@ class SidekickApp {
                 overallProgress: Number(job.overall_progress || 0),
             });
 
+            if (job.status === 'ready') {
+                if (job.result) {
+                    this.elements.processingOverlay.classList.add('hidden');
+                    this._showReviewModal(job.result, jobId);
+                    return;
+                }
+                throw new Error('Export ready but no result payload');
+            }
+
             if (job.status === 'completed') {
                 if (job.result) return job.result;
                 throw new Error('Export completed without a result payload');
@@ -831,10 +877,183 @@ class SidekickApp {
             transcribing: 'Transcribing Audio',
             summarizing: 'Generating Summary',
             writing: 'Writing Note',
+            ready: 'Ready for Review',
             completed: 'Completed',
             failed: 'Failed',
         };
         return map[stage] || 'Processing';
+    }
+
+    // Eager transcription: fire-and-forget after audio is persisted.
+    // Export pipeline skips Whisper if transcript already exists.
+    _triggerEagerTranscription(sessionId) {
+        fetch(`/api/recordings/${sessionId}/transcription-job`, { method: 'POST' })
+            .then(r => r.json())
+            .then(job => console.debug(`Eager transcription started: ${job.job_id}`))
+            .catch(e => console.debug('Eager transcription not started (non-critical):', e));
+    }
+
+    // Summary review modal
+    _showReviewModal(result, jobId) {
+        this._reviewJobId = jobId;
+        this._summaryHistory = [result.summary_content || ''];
+        this._revisionInstruction = null;
+        this._editMode = false;
+
+        const summary = result.summary_content || '';
+        this._renderSummaryDisplay(summary);
+        this.elements.reviewSummaryEdit.value = summary;
+        this.elements.reviewSummaryEdit.classList.add('hidden');
+        this.elements.reviewSummaryDisplay.classList.remove('hidden');
+        this.elements.reviewRefineSection.classList.add('hidden');
+        this.elements.reviewEditBtn.textContent = 'Edit';
+        this.elements.reviewUndoBtn.classList.add('hidden');
+
+        this.elements.reviewMeta.textContent = result.filename || '';
+        this.elements.reviewModal.classList.remove('hidden');
+    }
+
+    _renderSummaryDisplay(markdown) {
+        if (typeof marked !== 'undefined') {
+            this.elements.reviewSummaryDisplay.innerHTML = marked.parse(markdown);
+        } else {
+            // Fallback: plain text
+            this.elements.reviewSummaryDisplay.textContent = markdown;
+        }
+    }
+
+    _closeReviewModal() {
+        this.elements.reviewModal.classList.add('hidden');
+        this._reviewJobId = null;
+        this._summaryHistory = [];
+        this._editMode = false;
+        this._resetTimer();
+    }
+
+    _toggleEditMode() {
+        this._editMode = !this._editMode;
+        if (this._editMode) {
+            // Switch to textarea
+            const current = this._summaryHistory[this._summaryHistory.length - 1] || '';
+            this.elements.reviewSummaryEdit.value = current;
+            this.elements.reviewSummaryEdit.classList.remove('hidden');
+            this.elements.reviewSummaryDisplay.classList.add('hidden');
+            this.elements.reviewEditBtn.textContent = 'Done Editing';
+        } else {
+            // Apply edits and switch back to rendered view
+            const edited = this.elements.reviewSummaryEdit.value;
+            if (edited !== this._summaryHistory[this._summaryHistory.length - 1]) {
+                this._summaryHistory.push(edited);
+                this.elements.reviewUndoBtn.classList.remove('hidden');
+            }
+            this._renderSummaryDisplay(edited);
+            this.elements.reviewSummaryEdit.classList.add('hidden');
+            this.elements.reviewSummaryDisplay.classList.remove('hidden');
+            this.elements.reviewEditBtn.textContent = 'Edit';
+        }
+    }
+
+    _showRefineInput() {
+        this.elements.reviewRefineSection.classList.remove('hidden');
+        this.elements.reviewRefineInput.value = '';
+        this.elements.reviewRefineInput.focus();
+    }
+
+    _hideRefineInput() {
+        this.elements.reviewRefineSection.classList.add('hidden');
+    }
+
+    async _submitRefine() {
+        const instruction = this.elements.reviewRefineInput.value.trim();
+        if (!instruction) {
+            this.elements.reviewRefineInput.focus();
+            return;
+        }
+
+        if (!this._reviewJobId) return;
+
+        const currentSummary = this._summaryHistory[this._summaryHistory.length - 1] || '';
+
+        this.elements.reviewRefineSubmit.disabled = true;
+        this.elements.reviewRefineSubmit.textContent = 'Revising...';
+
+        try {
+            const response = await fetch(`/api/export-jobs/${this._reviewJobId}/refine`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ instruction, current_summary: currentSummary }),
+            });
+
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(err.detail || 'Refinement failed');
+            }
+
+            const data = await response.json();
+            const revised = data.revised_summary || '';
+
+            this._revisionInstruction = instruction;
+            this._summaryHistory.push(revised);
+            this._renderSummaryDisplay(revised);
+            this.elements.reviewSummaryEdit.value = revised;
+            this.elements.reviewUndoBtn.classList.remove('hidden');
+            this._hideRefineInput();
+
+        } catch (error) {
+            alert(`Revision failed: ${error.message}`);
+        } finally {
+            this.elements.reviewRefineSubmit.disabled = false;
+            this.elements.reviewRefineSubmit.textContent = 'Revise';
+        }
+    }
+
+    _undoRevision() {
+        if (this._summaryHistory.length <= 1) return;
+        this._summaryHistory.pop();
+        const previous = this._summaryHistory[this._summaryHistory.length - 1] || '';
+        this._renderSummaryDisplay(previous);
+        this.elements.reviewSummaryEdit.value = previous;
+        if (this._summaryHistory.length <= 1) {
+            this.elements.reviewUndoBtn.classList.add('hidden');
+            this._revisionInstruction = null;
+        }
+    }
+
+    async _saveToObsidian() {
+        if (!this._reviewJobId) return;
+
+        const current = this._summaryHistory[this._summaryHistory.length - 1] || '';
+        const original = this._summaryHistory[0] || '';
+        const editedSummary = current !== original ? current : null;
+
+        this.elements.reviewSaveBtn.disabled = true;
+        this.elements.reviewSaveBtn.textContent = 'Saving...';
+
+        try {
+            const response = await fetch(`/api/export-jobs/${this._reviewJobId}/save`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    edited_summary: editedSummary,
+                    revision_instruction: this._revisionInstruction,
+                }),
+            });
+
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(err.detail || 'Save failed');
+            }
+
+            const result = await response.json();
+            this.elements.reviewModal.classList.add('hidden');
+            this._showConfirmation(result);
+
+        } catch (error) {
+            alert(`Save failed: ${error.message}`);
+        } finally {
+            this.elements.reviewSaveBtn.disabled = false;
+            this.elements.reviewSaveBtn.textContent = 'Save to Obsidian';
+        }
     }
 }
 

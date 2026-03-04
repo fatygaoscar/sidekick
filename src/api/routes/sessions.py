@@ -591,11 +591,15 @@ async def get_recording(
         audio_path = ensure_session_audio_path(session.id)
 
     has_summary = False
+    latest_summary = None
     for meeting in meetings:
         summaries = await repository.get_summaries(meeting.id)
         if summaries:
             has_summary = True
-            break
+            # Get the most recent summary for this meeting
+            current_latest = sorted(summaries, key=lambda s: s.created_at, reverse=True)[0]
+            if not latest_summary or current_latest.created_at > latest_summary.created_at:
+                latest_summary = current_latest
 
     settings = get_settings()
     if not has_summary:
@@ -665,6 +669,7 @@ async def get_recording(
         "segment_count": len(segments),
         "has_transcription": bool(session.has_transcription),
         "has_summary": has_summary,
+        "summary": latest_summary.content if latest_summary else None,
         "open_in_obsidian_uri": open_in_obsidian_uri,
         "has_audio": audio_path is not None,
         "audio_url": f"/api/recordings/{session.id}/audio" if audio_path else None,

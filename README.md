@@ -8,6 +8,8 @@ Browser-based meeting recorder that transcribes audio, identifies speakers, and 
 - **Local transcription** via faster-whisper large-v3 (CUDA)
 - **Speaker diarization** via pyannote.audio 3.1 — labels `SPEAKER_00`, `SPEAKER_01`, etc.
 - **Speaker name resolution** — provide attendee names and the LLM maps labels to real people before summarizing
+- **History Summary View** — view processed summaries directly in the recordings history without re-processing
+- **Obsidian-Optimized Formatting** — summaries use nested bullet points and clean spacing for maximum scannability in Obsidian
 - **Structured templates** — meeting notes, 1-on-1, standup, working session, custom
 - **Editable prompts** — customize any template before export
 - **Real-time progress** — live percent tracking through transcription and summarization

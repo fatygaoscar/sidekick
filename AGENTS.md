@@ -194,6 +194,7 @@ Default template: `meeting`
 - One primary action per step; no duplicate entry points.
 - Recording list cards: `View` and `Delete` only.
 - Export / re-summarize initiated from the view modal, not from cards.
+- **History View Modal:** Displays the most recent AI summary prominently, hiding the transcript by default if a summary exists.
 - Download affordances (`Download Audio`, `Download Transcript`) live in the view modal.
 - Template chooser shows 5 templates in the order above.
 - `General Meeting` is default unless explicitly changed.
@@ -206,14 +207,14 @@ Default template: `meeting`
 | `GET /recordings` | History UI |
 | `GET /api/templates` | List templates with prompts |
 | `GET /api/recordings` | List recordings |
-| `GET /api/recordings/{id}` | Recording detail |
+| `GET /api/recordings/{id}` | Recording detail (includes latest `summary`) |
 | `POST /api/recordings/{id}/export-obsidian-job` | Start async export |
 | `GET /api/export-jobs/{job_id}` | Poll export job |
 | `POST /api/recordings/{id}/transcription-job` | Transcription only (no summary) |
 | `GET /api/transcription-jobs/{job_id}` | Poll transcription job |
 | `PUT /api/recordings/{id}/audio` | Upload full audio blob (fallback) |
 | `PUT /api/recordings/{id}/audio/chunks/{n}` | Upload chunk (needs `X-Client-ID`) |
-| `POST /api/recordings/{id}/audio/finalize` | Finalize chunks (needs `X-Client-ID`) |
+| `POST /api/recordings/{id}/audio/finalize` | Finalize chunks (requires `X-Client-ID`) |
 | `WS /ws/audio` | Live audio stream |
 
 ## Export Job Progress Weights
@@ -227,6 +228,10 @@ Default template: `meeting`
 ## Speaker Diarization
 
 **Status**: Live and enabled.
+
+**Handoff Notes (2026-03-03, latest)**:
+- **History Summary View:** `GET /api/recordings/{session_id}` returns the latest summary. `web/recordings.js` renders it using `marked.js` in the history view modal.
+- **Obsidian Refinement:** Updated `prompts.py` and `cohesive.py` to ensure summaries use bullet points, nested indentation (2 spaces), and proper spacing for Obsidian.
 
 **Dependencies** (accepted HuggingFace gated licenses required):
 - `pyannote/speaker-diarization-3.1`
