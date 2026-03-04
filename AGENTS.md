@@ -29,16 +29,16 @@ sidekick/
 │   ├── api/
 │   │   └── routes/
 │   │       ├── export.py             # Async export jobs, diarization, transcription pipeline
-│   │       ├── sessions.py           # Recording CRUD, chunked audio upload
+│   │       ├── sessions.py           # Recording CRUD, chunked audio upload, refined saves
 │   │       └── websocket.py          # Live audio stream + optional live preview
 │   ├── audio/
 │   │   └── storage.py                # Audio file management, chunk recovery
 │   ├── core/
-│   │   └── datetime_utils.py         # Timezone helpers
+│   │   ├── datetime_utils.py         # Timezone helpers
+│   │   └── markdown_utils.py         # SHARED Obsidian note construction logic
 │   ├── sessions/
-│   │   ├── models.py                 # SQLAlchemy models (Session, Meeting,
-│   │   │                             #   TranscriptSegment w/ speaker, StructuredItem)
-│   │   └── repository.py             # DB CRUD incl. update_segments_speakers()
+│   │   ├── models.py                 # SQLAlchemy models (Summary has processing_duration_seconds)
+│   │   └── repository.py             # DB CRUD incl. update_segments_speakers() + migrations
 │   ├── summarization/
 │   │   ├── cohesive.py               # Two-pass summary + speaker pre-pass
 │   │   ├── manager.py                # Summarization orchestration, passes attendees
@@ -59,11 +59,11 @@ sidekick/
 │
 ├── web/
 │   ├── index.html                    # Main recording UI (has Attendees field)
-│   ├── recordings.html               # History / re-summarize UI (has Attendees field)
-│   ├── css/styles.css
+│   ├── recordings.html               # History / re-summarize UI (unified View modal)
+│   ├── css/styles.css                # Mobile-optimized (13px text, no double scroll)
 │   └── js/
-│       ├── app.js                    # Recording + export flow
-│       ├── recordings.js             # History + re-summarize flow
+│       ├── app.js                    # Recording + export flow (Review modal has Undo)
+│       ├── recordings.js             # History + re-summarize flow (View modal has Refine)
 │       ├── audio.js                  # AudioCapture, visualizer
 │       └── websocket.js              # WebSocket client, 25s keepalive ping
 │
@@ -125,21 +125,18 @@ Browser
                     │    LLM maps SPEAKER_XX → real names        │
                     │    Apply string replace across transcript  │
                     │                                            │
-                    │  Pass 1: Draft                             │
+                    │  Pass 1: Draft (Indented bullets)          │
                     │    system: template style contract         │
                     │           + attendees note                 │
-                    │    user:  transcript (or compressed pack   │
-                    │           if transcript > context budget)  │
+                    │    user:  transcript                       │
                     │                                            │
-                    │  Pass 2: Editorial polish                  │
+                    │  Pass 2: Editorial polish (No paragraphs)  │
                     │    Preserves all ## headers from draft     │
                     │                                            │
-                    │  Retry (if artifacts / repetition):        │
-                    │    One additional cleanup pass             │
                     └───────────┬────────────────────────────────┘
                                 │
-                    Build Obsidian markdown:
-                    YYYY-MM-DD-HHMM - [Title] [Template].md
+                    Build Obsidian markdown (markdown_utils.py):
+                    YYYY-MM-DD-HHMM - [Title] [Template] (vN).md
                     Metadata block + summary + collapsible transcript
                                 │
                     Write to OBSIDIAN_VAULT_PATH
@@ -184,9 +181,6 @@ Active (shown in UI, in chooser order):
 | `working_session` | Working Session | High-detail technical log — decisions, SQL notes, open questions |
 | `custom` | Custom | User-provided prompt |
 
-Legacy (constants kept for backward compat, not shown in UI):
-`strategic_review`, `brainstorm`, `interview`, `lecture`
-
 Default template: `meeting`
 
 ## UX Conventions
@@ -194,8 +188,9 @@ Default template: `meeting`
 - One primary action per step; no duplicate entry points.
 - Recording list cards: `View` and `Delete` only.
 - Export / re-summarize initiated from the view modal, not from cards.
-- **History View Modal:** Displays the most recent AI summary prominently, hiding the transcript by default if a summary exists.
-- Download affordances (`Download Audio`, `Download Transcript`) live in the view modal.
+- **Unified Modals:** History "View" matches post-recording "Review". Both support AI Refine, Manual Edit, and Undo.
+- **Mobile optimization:** `13px` text, `1.7` line height, single-unit scroll (no double scrollbars).
+- Metadata (`Exported At`, `Processing Time`) prominently displayed.
 - Template chooser shows 5 templates in the order above.
 - `General Meeting` is default unless explicitly changed.
 
@@ -207,55 +202,33 @@ Default template: `meeting`
 | `GET /recordings` | History UI |
 | `GET /api/templates` | List templates with prompts |
 | `GET /api/recordings` | List recordings |
-| `GET /api/recordings/{id}` | Recording detail (includes latest `summary`) |
+| `GET /api/recordings/{id}` | Recording detail (includes latest `summary` + metadata) |
+| `POST /api/recordings/{id}/summaries` | Save refined/manual summary to DB and vault |
+| `POST /api/summaries/refine` | General AI refinement endpoint |
 | `POST /api/recordings/{id}/export-obsidian-job` | Start async export |
 | `GET /api/export-jobs/{job_id}` | Poll export job |
-| `POST /api/recordings/{id}/transcription-job` | Transcription only (no summary) |
-| `GET /api/transcription-jobs/{job_id}` | Poll transcription job |
-| `PUT /api/recordings/{id}/audio` | Upload full audio blob (fallback) |
-| `PUT /api/recordings/{id}/audio/chunks/{n}` | Upload chunk (needs `X-Client-ID`) |
-| `POST /api/recordings/{id}/audio/finalize` | Finalize chunks (requires `X-Client-ID`) |
+| `POST /api/recordings/{id}/transcription-job` | Transcription only |
+| `PUT /api/recordings/{id}/audio` | Upload audio |
 | `WS /ws/audio` | Live audio stream |
-
-## Export Job Progress Weights
-
-| Stage | Overall % |
-|-------|-----------|
-| Transcription (incl. diarization) | 0–40% |
-| Summarization (speaker pre-pass + 2 passes) | 40–95% |
-| Write to vault | 95–100% |
 
 ## Speaker Diarization
 
 **Status**: Live and enabled.
 
 **Handoff Notes (2026-03-03, latest)**:
-- **History Summary View:** `GET /api/recordings/{session_id}` returns the latest summary. `web/recordings.js` renders it using `marked.js` in the history view modal.
-- **Obsidian Refinement:** Updated `prompts.py` and `cohesive.py` to ensure summaries use bullet points, nested indentation (2 spaces), and proper spacing for Obsidian.
-
-**Dependencies** (accepted HuggingFace gated licenses required):
-- `pyannote/speaker-diarization-3.1`
-- `pyannote/segmentation-3.0`
-- `pyannote/speaker-diarization-community-1`
+- **Unified View & Refinement:** functionally identical review/view modals.
+- **Obsidian Versioning:** exports append `(v2)`, `(v3)`, etc.
+- **Markdown Logic:** Consolidated into `src/core/markdown_utils.py`.
+- **Database:** Auto-migrations in `repository.py` for `processing_duration_seconds`.
 
 **Key implementation notes**:
-- Audio loaded via **PyAV** (bundled FFmpeg) — no system `ffmpeg` install needed
-- pyannote 4.x returns `DiarizeOutput`; use `.exclusive_speaker_diarization.itertracks(yield_label=True)`
-- Diarization runs once per recording; subsequent re-summarizes skip it (`has_speakers` guard)
-- Non-blocking on failure: falls back to no-speaker transcript
-
-**Speaker name resolution**:
-- If `attendees` is provided in the export request, a dedicated pre-pass LLM call resolves `SPEAKER_XX` → real names
-- The mapping is applied via string replace on the full transcript before any summarization pass
-- Pre-pass uses first ~3000 chars for efficient identification
+- Audio loaded via **PyAV** — no system `ffmpeg` needed.
+- pyannote 4.x returns `DiarizeOutput`.
+- Speaker name resolution pre-pass LLM call if `attendees` provided.
 
 ## Gotchas
 
-- `get_settings()` is LRU-cached — restart required to pick up `.env` changes
-- `qwen3.5` models output `<think>...</think>` blocks; `ollama_backend.py` strips them and passes `think: false`
-- `OLLAMA_THINK=false` is critical — think mode on summaries wastes tokens and time with no benefit
-- Pipeline package (`src/summarization/pipeline/`) is in codebase but **not called from export**
-- Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist
-- `start.sh` port check uses `connect()` (not `bind()`) to avoid false positives in WSL mirrored mode
-- Ollama runs on **Windows host**, Sidekick runs in **WSL** — mirrored networking makes `127.0.0.1:11434` work
-- Context budget: `OLLAMA_CONTEXT_LENGTH=40960` suits `qwen3.5:9b` (6.6GB model, ~9.4GB headroom for KV cache on 16GB VRAM). Larger models need reduced context or will split CPU/GPU.
+- `get_settings()` is LRU-cached — restart required to pick up `.env` changes.
+- `OLLAMA_THINK=false` is critical — suppresses token waste.
+- Mobile: removed `max-height` from internal containers to fix double scrolling.
+- Context budget: `OLLAMA_CONTEXT_LENGTH=40960` suits `qwen3.5:9b`.
