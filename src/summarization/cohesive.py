@@ -4,6 +4,8 @@ import logging
 import re
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
+from src.core.log_utils import pipeline_step
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -328,25 +330,34 @@ async def generate_cohesive_summary(
     # Resolve SPEAKER_XX labels to real names before any summarization pass.
     speaker_map: dict[str, str] = {}
     if attendees and attendees.strip() and _SPEAKER_LABEL_RE.search(transcript):
-        speaker_map = await _resolve_speaker_map(llm_call, transcript, attendees)
-        logger.info("cohesive: speaker_map resolved: %s", speaker_map)
+        attendee_count = len([a for a in attendees.split(",") if a.strip()])
+        with pipeline_step(logger, "speaker_prepass", attendees=attendee_count) as step:
+            speaker_map = await _resolve_speaker_map(llm_call, transcript, attendees)
+            step["resolved"] = len(speaker_map)
+        logger.info("cohesive: speaker_map=%s", speaker_map)
         if speaker_map:
             transcript = _apply_speaker_map(transcript, speaker_map)
 
+    approx_char_budget = max(2200, int(context_length * 3.2 * 0.75))
     context_text, context_mode = _build_context(
         transcript=transcript,
         items=structured_items,
         context_length=context_length,
     )
-    logger.info("cohesive: transcript=%d chars, context_mode=%s", len(transcript), context_mode)
+    logger.info(
+        "cohesive: transcript=%d chars, budget=%d chars, context_mode=%s",
+        len(transcript), approx_char_budget, context_mode,
+    )
 
     if context_mode == "compressed_pack":
         chunks = _split_into_chunks(transcript, chunk_chars=8000, overlap_chars=400)
         if len(chunks) > 1:
             extractions = []
-            for i, chunk in enumerate(chunks):
-                prose = await _extract_chunk_prose(llm_call, chunk, i, len(chunks), perspective=perspective)
-                extractions.append(f"[Segment {i + 1}/{len(chunks)}]\n{prose.strip()}")
+            with pipeline_step(logger, "chunk_extraction", n_chunks=len(chunks)):
+                for i, chunk in enumerate(chunks):
+                    logger.info("[step] chunk_extraction | chunk %d/%d", i + 1, len(chunks))
+                    prose = await _extract_chunk_prose(llm_call, chunk, i, len(chunks), perspective=perspective)
+                    extractions.append(f"[Segment {i + 1}/{len(chunks)}]\n{prose.strip()}")
             context_text = "\n\n".join(extractions)
             context_mode = "chunked_extraction"
 
@@ -359,7 +370,8 @@ async def generate_cohesive_summary(
         custom_instructions=custom_instructions,
         include_structured_tables=include_structured_tables,
     )
-    draft = await llm_call(pass1_system, pass1_user)
+    with pipeline_step(logger, "summarize_pass1", mode=context_mode, chars=len(transcript)):
+        draft = await llm_call(pass1_system, pass1_user)
 
     # Skip Pass 2 (editorial polish) for very short transcripts to significantly speed up processing.
     # The first pass is usually high quality for short inputs.
@@ -370,7 +382,8 @@ async def generate_cohesive_summary(
         f"{pass1_system}\n\nYou are now in editorial rewrite mode. Output polished final content."
     )
     pass2_user = _build_pass2_prompt(template, draft)
-    final = await llm_call(pass2_system, pass2_user)
+    with pipeline_step(logger, "summarize_pass2"):
+        final = await llm_call(pass2_system, pass2_user)
     passes_used = 2
 
     if _needs_retry(final, structured_items):
@@ -380,7 +393,8 @@ async def generate_cohesive_summary(
             "- Ensure section headers exist exactly once\n"
             "- Tighten wording and avoid repeated points"
         )
-        final = await llm_call(pass2_system, retry_user)
+        with pipeline_step(logger, "summarize_retry"):
+            final = await llm_call(pass2_system, retry_user)
         passes_used = 3
 
     return final.strip(), context_mode, passes_used, "narrative_first_v1", speaker_map

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import urllib.parse
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 from config.settings import get_settings
 from src.audio.storage import ensure_session_audio_path, get_session_audio_path
 from src.core.datetime_utils import localize_datetime, timezone_label, to_utc_iso
+from src.core.log_utils import pipeline_step
 from src.core.markdown_utils import (
     build_obsidian_markdown,
     format_datetime_human,
@@ -319,82 +321,89 @@ async def _transcribe_and_persist_session(
     _settings = get_settings()
     if _settings.diarization_enabled and _settings.hf_token:
         try:
-            diarization_spans = await asyncio.to_thread(diarize, str(audio_path), _settings.hf_token)
-            logger.info(f"Diarization: {len(diarization_spans)} speaker spans")
+            with pipeline_step(logger, "diarization") as step:
+                diarization_spans = await asyncio.to_thread(diarize, str(audio_path), _settings.hf_token)
+                step["spans"] = len(diarization_spans)
         except Exception as exc:
             logger.warning(f"Diarization failed, continuing without speaker labels: {exc}")
 
-    await repository.delete_segments_for_session(session_id)
+    segment_count = 0
+    with pipeline_step(logger, "segment_building", words=len(transcription_result.words or [])) as step:
+        await repository.delete_segments_for_session(session_id)
 
-    if transcription_result.words:
-        buffer_words: list[dict] = []
-        max_words_per_segment = 24
-        max_segment_duration = 14.0
+        if transcription_result.words:
+            buffer_words: list[dict] = []
+            max_words_per_segment = 24
+            max_segment_duration = 14.0
 
-        def flush_words(words: list[dict]) -> tuple[str, float, float] | None:
-            if not words:
-                return None
-            text = " ".join(str(w.get("word", "")).strip() for w in words).strip()
-            if not text:
-                return None
-            start = float(words[0].get("start", 0.0))
-            end = float(words[-1].get("end", start))
-            return text, start, end
+            def flush_words(words: list[dict]) -> tuple[str, float, float] | None:
+                if not words:
+                    return None
+                text = " ".join(str(w.get("word", "")).strip() for w in words).strip()
+                if not text:
+                    return None
+                start = float(words[0].get("start", 0.0))
+                end = float(words[-1].get("end", start))
+                return text, start, end
 
-        for word in transcription_result.words:
-            token = str(word.get("word", "")).strip()
-            if not token:
-                continue
+            for word in transcription_result.words:
+                token = str(word.get("word", "")).strip()
+                if not token:
+                    continue
 
-            if not buffer_words:
+                if not buffer_words:
+                    buffer_words.append(word)
+                    continue
+
+                first_start = float(buffer_words[0].get("start", 0.0))
+                segment_elapsed = float(word.get("end", first_start)) - first_start
+                hit_limit = len(buffer_words) >= max_words_per_segment or segment_elapsed >= max_segment_duration
+                sentence_end = token.endswith((".", "!", "?"))
+
                 buffer_words.append(word)
-                continue
+                if hit_limit or sentence_end:
+                    parsed = flush_words(buffer_words)
+                    if parsed:
+                        text, start, end = parsed
+                        await repository.add_segment(
+                            session_id=session_id,
+                            meeting_id=primary_meeting_id,
+                            text=text,
+                            start_time=start,
+                            end_time=end,
+                            confidence=transcription_result.confidence,
+                            speaker=assign_speaker(start, end, diarization_spans) if diarization_spans else None,
+                        )
+                        segment_count += 1
+                    buffer_words = []
 
-            first_start = float(buffer_words[0].get("start", 0.0))
-            segment_elapsed = float(word.get("end", first_start)) - first_start
-            hit_limit = len(buffer_words) >= max_words_per_segment or segment_elapsed >= max_segment_duration
-            sentence_end = token.endswith((".", "!", "?"))
-
-            buffer_words.append(word)
-            if hit_limit or sentence_end:
-                parsed = flush_words(buffer_words)
-                if parsed:
-                    text, start, end = parsed
-                    await repository.add_segment(
-                        session_id=session_id,
-                        meeting_id=primary_meeting_id,
-                        text=text,
-                        start_time=start,
-                        end_time=end,
-                        confidence=transcription_result.confidence,
-                        speaker=assign_speaker(start, end, diarization_spans) if diarization_spans else None,
-                    )
-                buffer_words = []
-
-        parsed = flush_words(buffer_words)
-        if parsed:
-            text, start, end = parsed
+            parsed = flush_words(buffer_words)
+            if parsed:
+                text, start, end = parsed
+                await repository.add_segment(
+                    session_id=session_id,
+                    meeting_id=primary_meeting_id,
+                    text=text,
+                    start_time=start,
+                    end_time=end,
+                    confidence=transcription_result.confidence,
+                    speaker=assign_speaker(start, end, diarization_spans) if diarization_spans else None,
+                )
+                segment_count += 1
+        else:
             await repository.add_segment(
                 session_id=session_id,
                 meeting_id=primary_meeting_id,
-                text=text,
-                start_time=start,
-                end_time=end,
+                text=full_text,
+                start_time=0.0,
+                end_time=audio_duration_seconds,
                 confidence=transcription_result.confidence,
-                speaker=assign_speaker(start, end, diarization_spans) if diarization_spans else None,
+                speaker=assign_speaker(0.0, audio_duration_seconds, diarization_spans) if diarization_spans else None,
             )
-    else:
-        await repository.add_segment(
-            session_id=session_id,
-            meeting_id=primary_meeting_id,
-            text=full_text,
-            start_time=0.0,
-            end_time=audio_duration_seconds,
-            confidence=transcription_result.confidence,
-            speaker=assign_speaker(0.0, audio_duration_seconds, diarization_spans) if diarization_spans else None,
-        )
+            segment_count = 1
 
-    await repository.set_session_has_transcription(session_id, True)
+        await repository.set_session_has_transcription(session_id, True)
+        step["segments"] = segment_count
 
     segments = await repository.get_segments(session_id=session_id)
     if not segments:
@@ -491,6 +500,8 @@ async def _run_export_pipeline(
     existing_segments = await repository.get_segments(session_id=session_id) if session.has_transcription else []
     if session.has_transcription and existing_segments:
         await _emit_progress(progress_callback, "transcribing", "Reusing existing transcript", 0.2, 0.0)
+        logger.info("[step] transcription | start | reuse=True | segments=%d", len(existing_segments))
+        _tx_t0 = time.monotonic()
 
         # Run diarization on existing segments if enabled and not yet applied.
         _settings = get_settings()
@@ -505,17 +516,14 @@ async def _run_export_pipeline(
                     # Calculate speech end time to limit diarization processing
                     speech_end_time = max((seg.end_time for seg in existing_segments), default=None)
                     diarization_limit = speech_end_time + 5.0 if speech_end_time else None
-                    
-                    if diarization_limit:
-                        logger.info(f"Diarization: limiting scan to {diarization_limit:.1f}s based on transcript")
 
                     from src.transcription.diarize import assign_speaker, diarize
-                    diar_start = datetime.now(timezone.utc)
-                    diarization_spans = await asyncio.to_thread(
-                        diarize, str(audio_path), _settings.hf_token, duration_limit=diarization_limit
-                    )
-                    diar_duration = (datetime.now(timezone.utc) - diar_start).total_seconds()
-                    logger.info(f"Diarization: took {diar_duration:.1f}s for {len(diarization_spans)} speaker spans")
+                    limit_str = f"{diarization_limit:.1f}s" if diarization_limit else "none"
+                    with pipeline_step(logger, "diarization", limit=limit_str) as step:
+                        diarization_spans = await asyncio.to_thread(
+                            diarize, str(audio_path), _settings.hf_token, duration_limit=diarization_limit
+                        )
+                        step["spans"] = len(diarization_spans)
 
                     speaker_updates = {
                         seg.id: assign_speaker(seg.start_time, seg.end_time, diarization_spans)
@@ -527,30 +535,30 @@ async def _run_export_pipeline(
                     logger.warning(f"Diarization failed on existing segments, continuing: {exc}")
 
         full_transcript, audio_duration_seconds = _build_transcript_from_segments(existing_segments)
+        logger.info("[step] transcription | done | elapsed=%.1fs | chars=%d", time.monotonic() - _tx_t0, len(full_transcript))
         await _emit_progress(progress_callback, "transcribing", "Transcription complete", 1.0, 0.0)
     else:
-        tx_start = datetime.now(timezone.utc)
-        full_transcript, audio_duration_seconds = await _transcribe_and_persist_session(
-            session_id=session_id,
-            session=session,
-            repository=repository,
-            transcription_manager=transcription_manager,
-            primary_meeting_id=primary_meeting_id,
-            progress_callback=(
-                lambda stage, message, progress: (
-                    progress_callback(stage, message, progress, 0.0) if progress_callback else None
-                )
-            ),
-        )
-        tx_duration = (datetime.now(timezone.utc) - tx_start).total_seconds()
-        logger.info(f"Transcription (authoritative): took {tx_duration:.1f}s")
+        with pipeline_step(logger, "transcription") as step:
+            full_transcript, audio_duration_seconds = await _transcribe_and_persist_session(
+                session_id=session_id,
+                session=session,
+                repository=repository,
+                transcription_manager=transcription_manager,
+                primary_meeting_id=primary_meeting_id,
+                progress_callback=(
+                    lambda stage, message, progress: (
+                        progress_callback(stage, message, progress, 0.0) if progress_callback else None
+                    )
+                ),
+            )
+            step["chars"] = len(full_transcript)
 
     # Generate summary
     template = request_payload.template
 
     await _emit_progress(progress_callback, "summarizing", "Generating summary", 1.0, 0.02)
-    summarization_start = datetime.now(timezone.utc)
-    logger.info(f"Summarization: starting pass(es) for {len(full_transcript)} chars...")
+    _sum_t0 = time.monotonic()
+    logger.info("[step] summarization | start | chars=%d | template=%s", len(full_transcript), template)
     try:
         summary_result = await summarization_manager.summarize(
             transcript=full_transcript,
@@ -559,10 +567,11 @@ async def _run_export_pipeline(
             attendees=request_payload.attendees,
         )
     except Exception as e:
+        logger.warning("[step] summarization | error | elapsed=%.1fs", time.monotonic() - _sum_t0)
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
 
-    summarization_duration = (datetime.now(timezone.utc) - summarization_start).total_seconds()
-    logger.info(f"Summarization: complete in {summarization_duration:.1f}s")
+    summarization_duration = time.monotonic() - _sum_t0
+    logger.info("[step] summarization | done | elapsed=%.1fs", summarization_duration)
     await _emit_progress(progress_callback, "summarizing", "Summary complete", 1.0, 1.0)
 
     # Persist resolved speaker names back to DB so the transcript UI shows real names
@@ -670,6 +679,11 @@ async def _run_export_job(
             updates["summarization_progress"] = max(0.0, min(1.0, summarization_progress))
         _update_export_job(job_id, **updates)
 
+    _job_t0 = time.monotonic()
+    logger.info(
+        "[step] export_job | start | session=%s | template=%s | job=%s",
+        session_id, request_payload.template, job_id,
+    )
     try:
         result, build_params = await _run_export_pipeline(
             session_id=session_id,
@@ -691,7 +705,12 @@ async def _run_export_job(
             result=result.model_dump(),
             error=None,
         )
+        logger.info("[step] export_job | done | elapsed=%.1fs | job=%s", time.monotonic() - _job_t0, job_id)
     except HTTPException as exc:
+        logger.warning(
+            "[step] export_job | error | elapsed=%.1fs | status=%d | job=%s",
+            time.monotonic() - _job_t0, exc.status_code, job_id,
+        )
         _update_export_job(
             job_id,
             status="failed",
@@ -700,6 +719,10 @@ async def _run_export_job(
             error=str(exc.detail),
         )
     except Exception as exc:
+        logger.warning(
+            "[step] export_job | error | elapsed=%.1fs | job=%s",
+            time.monotonic() - _job_t0, job_id,
+        )
         _update_export_job(
             job_id,
             status="failed",
@@ -927,9 +950,10 @@ async def save_export_job(job_id: str, request: SaveRequest):
     )
 
     settings = get_settings()
-    filepath, obsidian_uri = await _write_obsidian_file(
-        markdown_content, bp["relative_path"], settings.obsidian_vault_path
-    )
+    with pipeline_step(logger, "vault_write", path=bp["relative_path"]):
+        filepath, obsidian_uri = await _write_obsidian_file(
+            markdown_content, bp["relative_path"], settings.obsidian_vault_path
+        )
 
     _update_export_job(job_id, status="completed", stage="completed", message="Saved to Obsidian")
 

@@ -1,11 +1,15 @@
 """Summarization backend manager."""
 
 import asyncio
+import logging
+import time
 from typing import Callable, Awaitable, Optional
 
 from config.settings import Settings, SummarizationBackend as SumBackendEnum, get_settings
 from src.core.events import EventType, get_event_bus
 from src.sessions.manager import SessionManager
+
+logger = logging.getLogger(__name__)
 
 from .anthropic_backend import AnthropicBackend
 from .base import SummarizationBackend, SummarizationResult
@@ -360,18 +364,24 @@ class SummarizationManager:
         if not self._initialized or self._active_backend is None:
             await self.initialize()
 
+        instr = instruction.strip()
+        instr_preview = instr[:80] + ("..." if len(instr) > 80 else "")
+        logger.info("[step] refine | start | instruction=%r", instr_preview)
+        _t0 = time.monotonic()
+
         system_prompt = (
             "You are editing a meeting summary. Make only the requested change. "
             "Preserve all section headers (##), factual content, names, dates, and details "
             "you were not asked to change. Return only the revised summary in full."
         )
-        user_prompt = f"Instruction: {instruction.strip()}\n\nCurrent summary:\n{current_summary.strip()}"
+        user_prompt = f"Instruction: {instr}\n\nCurrent summary:\n{current_summary.strip()}"
 
         result = await self._summarize_with_timeout(
             transcript="",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
         )
+        logger.info("[step] refine | done | elapsed=%.1fs", time.monotonic() - _t0)
         return result.content
 
     async def _summarize_with_timeout(

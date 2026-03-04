@@ -9,6 +9,7 @@ Usage:
   ./debug.sh export [job_id] [interval_seconds] [base_url]
   ./debug.sh ollama [--gpu] [--interval N]
   ./debug.sh logs [filter_pattern]
+  ./debug.sh pipeline [filter_pattern]
   ./debug.sh benchmark [benchmark_args...]
   ./debug.sh benchmark-summary [benchmark_args...]
 
@@ -18,6 +19,8 @@ Examples:
   ./debug.sh ollama --gpu --interval 1
   ./debug.sh logs                               # tail all logs
   ./debug.sh logs "pipeline\|extraction"       # tail with grep filter
+  ./debug.sh pipeline                           # tail [step] timing lines only
+  ./debug.sh pipeline "summarize"              # filter pipeline steps by name
   ./debug.sh benchmark --runs 2                 # Ollama microbenchmark
   ./debug.sh benchmark-summary                  # full pipeline, latest recording
   ./debug.sh benchmark-summary --models qwen3.5:4b,qwen3.5:9b --contexts 16384,32768
@@ -83,6 +86,53 @@ cmd_logs() {
   fi
 }
 
+cmd_pipeline() {
+  local filter="${1:-}"
+  if [[ ! -f "data/sidekick.log" ]]; then
+    echo "No log file at data/sidekick.log"; exit 1
+  fi
+
+  printf "\033[2mWaiting for pipeline steps... (Ctrl+C to stop)\033[0m\n\n"
+
+  # Strip log prefix, parse [step] lines, and pretty-print with colors + alignment
+  local awk_prog='
+    {
+      line = $0
+      sub(/^[A-Z]+:[^:]+:/, "", line)
+      if (line !~ /^\[step\]/) next
+      sub(/^\[step\] /, "", line)
+
+      # Replace " | " with ctrl char to safely split (awk treats | as regex alternation)
+      gsub(/ [|] /, "\x01", line)
+      n = split(line, f, "\x01")
+      name   = f[1]
+      status = f[2]
+      meta = ""
+      for (i = 3; i <= n; i++) meta = meta (meta ? "  " : "") f[i]
+
+      ts = strftime("%H:%M:%S")
+
+      GRN = "\033[32m"; CYN = "\033[36m"
+      RED = "\033[31m"; YEL = "\033[33m"; RST = "\033[0m"
+
+      if (status == "done")              { clr = GRN; sym = "✓" }
+      else if (status == "error")        { clr = RED; sym = "✗" }
+      else if (status ~ /^chunk [0-9]/)  { clr = YEL; sym = "·"; sub(/^chunk /, "", status); meta = status; status = "chunk" }
+      else                               { clr = CYN; sym = "→" }
+
+      printf "%s%s  %-24s %s %-7s  %s%s\n", clr, ts, name, sym, status, meta, RST
+    }
+  '
+
+  if [[ -n "$filter" ]]; then
+    tail -f "data/sidekick.log" \
+      | grep --line-buffered -iE "\\[step\\].*${filter}" \
+      | awk "$awk_prog"
+  else
+    tail -f "data/sidekick.log" | awk "$awk_prog"
+  fi
+}
+
 _venv_python() {
   if [[ -x "./venv/bin/python3" ]]; then
     echo "./venv/bin/python3"
@@ -122,6 +172,7 @@ case "$cmd" in
   export)             cmd_export "$@" ;;
   ollama)             cmd_ollama "$@" ;;
   logs)               cmd_logs "$@" ;;
+  pipeline)           cmd_pipeline "$@" ;;
   benchmark)          cmd_benchmark "$@" ;;
   benchmark-summary)  cmd_benchmark_summary "$@" ;;
   *) echo "Unknown command: $cmd"; usage; exit 1 ;;
