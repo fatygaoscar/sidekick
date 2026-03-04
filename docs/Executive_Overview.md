@@ -27,11 +27,10 @@ When you speak, the app uses **OpenAI's Whisper** — a state-of-the-art speech 
 The system uses your computer's **graphics card (GPU)** to process speech up to 10x faster than using just the CPU.
 
 ### 4. The Writer: Local AI Summarization
-After transcribing your words, a **local AI model called Qwen 3.5** processes the transcript through a multi-stage pipeline:
-1. **Extraction**: Identifies action items, decisions, risks, questions, and follow-ups
-2. **Deduplication**: Merges similar items across the meeting
-3. **Structuring**: Assigns trackable IDs (A-001, D-001, etc.)
-4. **Narration**: Writes flowing meeting notes that reference all extracted items
+After transcribing your words, a **local AI model called Qwen 3** processes the transcript through a two-pass pipeline:
+1. **Speaker identification** *(if attendees listed)*: Maps speaker labels (SPEAKER_00, SPEAKER_01) to real names
+2. **Draft pass**: Produces structured meeting notes following the selected template (summary, decisions, action items)
+3. **Editorial pass**: Polishes the draft for scannability — bullet points, clean spacing, no repetition
 
 This runs entirely on your machine — no cloud subscription fees, no data leaving your network.
 
@@ -50,7 +49,7 @@ The final notes are saved as **Markdown files** directly into your Obsidian vaul
 | **Runs locally** | Your meeting audio and content never leave your network — complete privacy and security |
 | **No subscription fees** | After setup, the AI runs for free on your hardware |
 | **GPU accelerated** | Uses your graphics card for fast transcription (a 30-minute meeting processes quickly) |
-| **Template-based** | 9 built-in meeting types (1-on-1s, standups, brainstorms, etc.) — each produces appropriately structured notes |
+| **Template-based** | 5 built-in meeting types (general meeting, 1-on-1, standup, working session, custom) — each produces appropriately structured notes |
 | **Real-time progress** | You see transcription and summarization progress live |
 | **Works remotely** | Optional secure tunneling lets you use it from your phone or another location |
 
@@ -65,9 +64,9 @@ You speak → Browser records → AI transcribes → AI summarizes → Notes app
 More specifically:
 1. **Record** in browser (works on desktop or mobile)
 2. **Audio saves** to your computer
-3. **Whisper AI** converts speech to text
-4. **Multi-stage pipeline** extracts structured items (actions, decisions, risks, questions) and generates narrative
-5. **Markdown file** lands in your Obsidian vault with both narrative summary and trackable item tables
+3. **Whisper AI** converts speech to text; speaker diarization identifies who said what
+4. **Local AI** generates structured meeting notes following your chosen template
+5. **Markdown file** lands in your Obsidian vault with summary, decisions, action items table, and full transcript
 
 ---
 

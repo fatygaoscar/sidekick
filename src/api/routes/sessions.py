@@ -683,6 +683,7 @@ async def get_recording(
             transcript_lines.append({
                 "timestamp": timestamp,
                 "text": segment.text,
+                "speaker": getattr(segment, "speaker", None),
                 "is_important": segment.is_important,
                 "start_time": segment.start_time,
             })

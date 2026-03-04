@@ -566,6 +566,18 @@ async def _run_export_pipeline(
     logger.info(f"Summarization: complete in {summarization_duration:.1f}s")
     await _emit_progress(progress_callback, "summarizing", "Summary complete", 1.0, 1.0)
 
+    # Persist resolved speaker names back to DB so the transcript UI shows real names
+    if summary_result.speaker_map:
+        segs = await repository.get_segments(session_id=session_id)
+        speaker_updates = {
+            seg.id: summary_result.speaker_map[seg.speaker]
+            for seg in segs
+            if getattr(seg, "speaker", None) in summary_result.speaker_map
+        }
+        if speaker_updates:
+            await repository.update_segments_speakers(speaker_updates)
+            logger.info(f"Resolved speaker labels for {len(speaker_updates)} segments: {summary_result.speaker_map}")
+
     await repository.add_summary(
         meeting_id=primary_meeting_id,
         content=summary_result.content,

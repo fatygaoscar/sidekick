@@ -20,7 +20,7 @@ async def generate_narrative(
     context_length: int = 4096,
 ) -> tuple[str, float, str, int, str]:
     """Generate narrative and return metadata for pipeline output."""
-    narrative, context_mode, passes_used, style_profile = await generate_cohesive_summary(
+    narrative, context_mode, passes_used, style_profile, _ = await generate_cohesive_summary(
         llm_call=llm_call,
         transcript=transcript,
         template=template,

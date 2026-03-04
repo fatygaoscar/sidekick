@@ -95,7 +95,7 @@ def _run_model_once(
             {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        "options": {"num_ctx": context_length, "think": False},
+        "options": {"num_ctx": context_length, "think": False, "num_gpu": 99, "temperature": 0.3},
     }
     t0 = time.perf_counter()
     response = _http_json("POST", f"{ollama_url}/api/chat", payload=payload, timeout_seconds=timeout_seconds)

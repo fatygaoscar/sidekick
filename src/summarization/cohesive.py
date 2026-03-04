@@ -1,7 +1,10 @@
 """Shared cohesive summary generation for regular and pipeline paths."""
 
+import logging
 import re
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from src.summarization.pipeline.types import StructuredItems
@@ -192,9 +195,7 @@ def _build_pass1_prompt(
             "- A '## Questions & Blockers' section listing unresolved questions or blockers raised\n"
         )
 
-    return f"""Template: {template}
-
-## Style Contract
+    return f"""## Style Contract
 {template_contract}
 {custom_block}
 ## Source Context ({context_mode})
@@ -204,6 +205,7 @@ Follow the exact section structure defined in the Style Contract above.
 Use the same section headers (##) as specified in the Style Contract.
 For Action Items, always use a markdown table with columns: | Owner | Action | Due |
 Each action item must be self-explanatory: include the owner, what they will do, and what system/project/feature it relates to. Include deadline if stated.
+Owner must come directly from the transcript: use the speaker's real name, or their SPEAKER_XX label if names are unresolved. Use "TBD" only when no speaker attribution exists at all. Never guess a name from context.
 Be specific: use actual names, exact terms, concrete details, dates, and numbers from the context.
 Omit filler, pleasantries, and off-topic chatter.{extra_tables_block}
 """
@@ -211,8 +213,6 @@ Omit filler, pleasantries, and off-topic chatter.{extra_tables_block}
 
 def _build_pass2_prompt(template: str, draft: str) -> str:
     return f"""You are editing a meeting summary draft for clarity, scannability, and Obsidian compatibility.
-
-Template: {template}
 
 Requirements:
 - **Preserve Structure**: Keep all ## headers and section flow.
@@ -247,8 +247,17 @@ async def _resolve_speaker_map(
     if not labels:
         return {}
 
-    # Use first ~3000 chars — enough context for name identification without wasting tokens
-    sample = transcript[:3000]
+    # Use first ~5000 chars for identification, plus lines where attendee names appear
+    beginning = transcript[:5000]
+    names = [n.strip() for n in attendees.split(",") if n.strip()]
+    name_lines = [
+        line for line in transcript.splitlines()
+        if any(n.lower() in line.lower() for n in names)
+    ]
+    name_context = "\n".join(name_lines[:40]) if name_lines else ""
+    sample = beginning
+    if name_context and name_context not in beginning:
+        sample = f"{beginning}\n\n[Lines containing attendee names throughout transcript:]\n{name_context}"
 
     system = (
         "You are identifying which speaker label corresponds to which person. "
@@ -257,8 +266,12 @@ async def _resolve_speaker_map(
     user = (
         f"Attendees: {attendees.strip()}\n"
         f"Speaker labels present: {', '.join(labels)}\n\n"
-        "Look for clues in the transcript: direct address ('Hey Oscar'), "
-        "self-introduction, or context that clearly identifies a speaker.\n\n"
+        "IMPORTANT: If a speaker says someone else's name (e.g. 'Thanks Pam', 'Hey Oscar'), "
+        "that identifies who is being ADDRESSED, not who is speaking. "
+        "Only assign a name to a label when that label is clearly identified AS that person "
+        "(e.g. they introduce themselves, are introduced by someone else, or context is unambiguous).\n\n"
+        "Look for clues: self-introduction ('I'm Oscar'), being introduced ('Oscar, you're up'), "
+        "or unmistakable context. When unsure, return null.\n\n"
         "Return ONLY a JSON object mapping each label to a name, or null if unsure.\n"
         'Example: {"SPEAKER_00": "Oscar", "SPEAKER_01": "Pam", "SPEAKER_02": null}\n\n'
         f"Transcript sample:\n{sample}"
@@ -306,15 +319,17 @@ async def generate_cohesive_summary(
     context_length: int = 4096,
     custom_instructions: Optional[str] = None,
     include_structured_tables: bool = False,
-) -> tuple[str, str, int, str]:
+) -> tuple[str, str, int, str, dict[str, str]]:
     """Generate summary with mandatory two-pass flow.
 
     Returns:
-        (final_summary, context_mode, passes_used, style_profile)
+        (final_summary, context_mode, passes_used, style_profile, speaker_map)
     """
     # Resolve SPEAKER_XX labels to real names before any summarization pass.
+    speaker_map: dict[str, str] = {}
     if attendees and attendees.strip() and _SPEAKER_LABEL_RE.search(transcript):
         speaker_map = await _resolve_speaker_map(llm_call, transcript, attendees)
+        logger.info("cohesive: speaker_map resolved: %s", speaker_map)
         if speaker_map:
             transcript = _apply_speaker_map(transcript, speaker_map)
 
@@ -323,6 +338,7 @@ async def generate_cohesive_summary(
         items=structured_items,
         context_length=context_length,
     )
+    logger.info("cohesive: transcript=%d chars, context_mode=%s", len(transcript), context_mode)
 
     if context_mode == "compressed_pack":
         chunks = _split_into_chunks(transcript, chunk_chars=8000, overlap_chars=400)
@@ -348,7 +364,7 @@ async def generate_cohesive_summary(
     # Skip Pass 2 (editorial polish) for very short transcripts to significantly speed up processing.
     # The first pass is usually high quality for short inputs.
     if len(transcript) < 3000 and not _needs_retry(draft, structured_items):
-        return draft.strip(), context_mode, 1, "narrative_first_v1"
+        return draft.strip(), context_mode, 1, "narrative_first_v1", speaker_map
 
     pass2_system = (
         f"{pass1_system}\n\nYou are now in editorial rewrite mode. Output polished final content."
@@ -367,4 +383,4 @@ async def generate_cohesive_summary(
         final = await llm_call(pass2_system, retry_user)
         passes_used = 3
 
-    return final.strip(), context_mode, passes_used, "narrative_first_v1"
+    return final.strip(), context_mode, passes_used, "narrative_first_v1", speaker_map

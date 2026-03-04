@@ -103,8 +103,9 @@ WHISPER_COMPUTE_TYPE=float16
 
 SUMMARIZATION_BACKEND=ollama
 OLLAMA_HOST=http://127.0.0.1:11434
-OLLAMA_MODEL=qwen3.5:9b
+OLLAMA_MODEL=qwen3:8b
 OLLAMA_THINK=false
+OLLAMA_NUM_GPU=99
 OLLAMA_CONTEXT_LENGTH=32768
 SUMMARIZATION_TIMEOUT_SECONDS=300
 
@@ -115,10 +116,11 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 ```
 
 **Model notes**:
-- `qwen3.5:9b` = 6.6GB, 100% VRAM on RTX 5070 Ti (16GB)
-- `OLLAMA_CONTEXT_LENGTH=32768` fits model + KV cache 100% in 16GB VRAM.
-- Supports ~2.5+ hours of continuous speech.
-- `OLLAMA_THINK=false` is critical — think mode adds thousands of tokens per call for no benefit in summarization
+- `qwen3:8b` = 5.2GB, 100% VRAM on RTX 5070 Ti (16GB). ~30s for 25K char recordings.
+- **qwen3 vs qwen3.5**: `qwen3:8b` properly respects `OLLAMA_THINK=false` (~300-400 output tokens). `qwen3.5` models always generate 3000-5000 think tokens regardless of the setting.
+- `OLLAMA_NUM_GPU=99` forces all layers to GPU (bypasses Ollama's conservative auto-estimate which offloads ~3 layers to CPU). Doubles tok/s.
+- `OLLAMA_CONTEXT_LENGTH=32768` fits model + KV cache 100% in 16GB VRAM. Supports ~2.5+ hours of speech.
+- `temperature=0.3` is set in all Ollama call options for more consistent, factual output.
 - Larger models (14b+) or larger context (40k+) cause CPU spillover (RAM spill = 40%+ CPU usage)
 - Ollama runs on **Windows host**; Sidekick in **WSL** with mirrored networking → `127.0.0.1:11434` works directly
 
@@ -159,9 +161,21 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 
 ## Handoff Notes (2026-03-03, latest)
 
-### Pipeline Optimizations (New)
+### Model Switch: qwen3:8b + num_gpu=99 + temperature
+- **Model**: Switched from `qwen3.5:9b` to `qwen3:8b`. qwen3.5 models always generate think tokens regardless of `think:False` (~3000-5000 wasted tokens per call = 80%+ of inference time). qwen3 models properly respect the option.
+- **num_gpu=99**: Ollama's auto-estimate offloads ~3 layers of qwen3:8b to CPU. `OLLAMA_NUM_GPU=99` forces all layers to GPU → 2x tok/s speedup (62→127 tok/s). Applied in `ollama_backend.py`, both benchmark scripts.
+- **temperature=0.3**: Added to all Ollama call options for consistent, factual summarization output.
+- **New .env keys**: `OLLAMA_NUM_GPU` (int, default 99) added to `config/settings.py` and `ollama_backend.py`.
+
+### Speaker Resolution Improvements
+- **Better sampling**: `_resolve_speaker_map()` now uses first ~5000 chars (was 3000) plus all lines containing attendee names from the full transcript — gives much more signal for identification.
+- **Clearer prompt**: Added explicit instruction that "if SPEAKER_00 says 'Hey Pam', that identifies who is being addressed, not who is speaking." This was the root cause of wrong assignments.
+- **DB persistence**: `generate_cohesive_summary()` now returns `speaker_map` as 5th element. Propagated through `SummarizationResult.speaker_map`. After summarization in `export.py`, resolved mappings are written back to DB transcript segments → transcript UI shows real names on next load (was showing raw SPEAKER_XX labels).
+- **Sessions API fix**: `speaker` field was being silently dropped from the `/api/recordings/{id}` transcript response — fixed in `sessions.py`.
+
+### Pipeline Optimizations (Previous)
 - **Speech-Aware Diarization:** Diarization scan now stops at the last Whisper transcript timestamp + 5s. Prevents 30+ min "waits" on forgotten recordings.
-- **Dynamic Context:** `SummarizationManager` now calculates required `num_ctx` based on input length (min 4096). Dramatically speeds up short meeting processing by reducing VRAM reservation time.
+- **Dynamic Context:** `SummarizationManager` calculates `num_ctx` based on input size. Dramatically speeds up short meeting processing.
 - **Single-Pass Early Exit:** Short transcripts (< 3000 chars) skip the editorial polish pass if the first draft is high quality.
 
 ### Unified View & Refinement
@@ -206,9 +220,12 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 ### Speaker Name Resolution (attendees field)
 
 - `ExportRequest.attendees: Optional[str]` — comma-separated names (e.g. "Oscar, Pam, Mike")
-- `cohesive.py: _resolve_speaker_map()` — dedicated pre-pass LLM call using first ~3000 chars of transcript
+- `cohesive.py: _resolve_speaker_map()` — dedicated pre-pass LLM call using first ~5000 chars + all lines containing attendee names (for better identification)
+- Prompt explicitly clarifies: "if SPEAKER_00 says 'Hey Pam', that identifies who is being addressed, not who is speaking"
 - Returns `{"SPEAKER_00": "Oscar", "SPEAKER_01": "Pam", ...}` via JSON extraction
 - `_apply_speaker_map()` does string replace across full transcript before Pass 1
+- `generate_cohesive_summary()` now returns `speaker_map` as 5th element — propagated through `SummarizationResult.speaker_map`
+- After summarization, `export.py` writes resolved names back to DB segments → transcript UI shows real names on next load
 - Separates speaker identification from summarization — LLM not asked to do both at once
 - UI: Attendees field in both `web/index.html` (naming modal) and `web/recordings.html` (re-summarize modal)
 
@@ -262,9 +279,11 @@ For long meetings (compressed pack fallback):
 | qwen3.5:35b-a3b | CPU+GPU split | — | Stalled under load |
 | qwen3.5:27b | 54/46 split | — | Too slow |
 | qwen3.5:9b-q8_0 | split | — | 10.7GB, split |
-| qwen2.5:14b | 100% GPU | 40960 | 18GB total with KV, 44% CPU |
-| qwen3.5:4b | 100% GPU | 40960 | 2.5GB, 64K context, quality concerns |
-| **qwen3.5:9b** | **100% GPU** | **40960** | **Current — 6.6GB, best balance** |
+| qwen2.5:14b | 100% GPU | 32768 | ~15.4GB total with KV, severe CPU spillover (5 tok/s) |
+| qwen3.5:4b | 100% GPU | 40960 | 2.5GB, quality concerns |
+| qwen3.5:9b | 100% GPU | 32768 | 6.6GB — always generates think tokens regardless of think:False |
+| qwen3:4b | 100% GPU | 32768 | 2.4GB, respects think:False, quality concerns |
+| **qwen3:8b** | **100% GPU** | **32768** | **Current — 5.2GB, respects think:False, ~30s/25K chars** |
 
 ## Notes
 

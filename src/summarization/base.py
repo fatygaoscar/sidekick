@@ -1,7 +1,7 @@
 """Abstract base interface for summarization backends."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -13,6 +13,7 @@ class SummarizationResult:
     model: str
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    speaker_map: dict[str, str] = field(default_factory=dict)
 
 
 class SummarizationBackend(ABC):

@@ -184,7 +184,8 @@ sidekick/
 └── scripts/
     ├── monitor_ollama.ps1            # PowerShell: Ollama + GPU live watcher
     ├── monitor_export_job.sh         # Bash: poll export job progress
-    └── benchmark_ollama_models.py    # Benchmark models on real transcript chunks
+    ├── benchmark_ollama_models.py    # Benchmark raw model latency on transcript chunks
+    └── benchmark_summary.py         # Benchmark full two-pass cohesive summary pipeline
 ```
 
 ## Configuration
@@ -205,8 +206,9 @@ DIARIZATION_ENABLED=true
 # Summarization
 SUMMARIZATION_BACKEND=ollama
 OLLAMA_HOST=http://127.0.0.1:11434
-OLLAMA_MODEL=qwen3.5:9b
+OLLAMA_MODEL=qwen3:8b
 OLLAMA_THINK=false
+OLLAMA_NUM_GPU=99
 SUMMARIZATION_TIMEOUT_SECONDS=300
 OLLAMA_CONTEXT_LENGTH=32768
 
@@ -218,13 +220,16 @@ OBSIDIAN_VAULT_PATH=/path/to/your/vault
 
 | Model | VRAM | Quality | Notes |
 |-------|------|---------|-------|
-| `qwen3.5:4b` | ~2.5 GB | Good | 100% GPU, fits 64K context on 16GB VRAM |
-| `qwen3.5:9b` | ~6.6 GB | Better | **Recommended** — 100% GPU at 32K context |
+| `qwen3:4b` | ~2.4 GB | Good | Respects `think:False`, 100% GPU |
+| `qwen3:8b` | ~5.2 GB | Better | **Recommended** — respects `think:False`, ~30s/25K chars |
+| `qwen3.5:9b` | ~6.6 GB | Better | Always generates think tokens (not suppressable) — slower |
 | `qwen2.5:14b` | ~10.3 GB | Best local | Spills to RAM at 32K context (requires 24GB VRAM for full GPU) |
 
-`qwen3.5:9b` with `OLLAMA_CONTEXT_LENGTH=32768` is the recommended default for 16GB VRAM systems.
+`qwen3:8b` with `OLLAMA_CONTEXT_LENGTH=32768` is the recommended default for 16GB VRAM systems.
 
-**Important**: `OLLAMA_THINK=false` is critical — qwen3.5 models output `<think>...</think>` chain-of-thought blocks by default. This wastes tokens and degrades quality.
+**Important**: Use `qwen3` models (not `qwen3.5`). `qwen3.5` models always generate internal thinking tokens regardless of `OLLAMA_THINK=false`, wasting 3000-5000 tokens per call. `qwen3` models properly suppress thinking.
+
+**`OLLAMA_NUM_GPU=99`**: Ollama's auto-estimate conservatively offloads some layers to CPU. Setting `num_gpu=99` forces all layers to GPU and roughly doubles throughput.
 
 ### WSL + Host Ollama
 
@@ -323,9 +328,12 @@ All templates are editable before export (click "Show" to view and modify the pr
 ## Gotchas
 
 - `get_settings()` is LRU-cached — restart required to pick up `.env` changes
-- `OLLAMA_THINK=false` is critical — think mode adds thousands of tokens with no benefit for meeting summaries
+- **`qwen3` vs `qwen3.5` thinking**: `qwen3:8b` properly respects `OLLAMA_THINK=false`. `qwen3.5` models always generate internal thinking tokens regardless of this setting — not suppressable.
+- **`OLLAMA_NUM_GPU=99`**: required to prevent Ollama's conservative auto-estimate from offloading layers to CPU.
 - Pipeline package (`src/summarization/pipeline/`) exists in codebase but is **not called from export**
 - Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist; diarization also skips if speakers already saved
+- Speaker name resolution requires the **Attendees field** at export time. Resolved names are written back to DB segments so the transcript view shows real names.
 - `start.sh` port check uses `connect()` (not `bind()`) to avoid false positives in WSL mirrored mode
 - Ollama runs on **Windows host**, Sidekick runs in **WSL** — mirrored networking makes `127.0.0.1:11434` work
-- Context budget: `OLLAMA_CONTEXT_LENGTH=32768` suits `qwen3.5:9b` (6.6 GB model, ~7.5 GB KV cache). Fits 100% in 16 GB VRAM. Supports ~2.5+ hours of speech. Larger context causes CPU spillover.
+- Context budget: `OLLAMA_CONTEXT_LENGTH=32768` suits `qwen3:8b` (5.2 GB model). Fits 100% in 16 GB VRAM. Supports ~2.5+ hours of speech.
+- Pull Ollama models from Windows: `powershell.exe -Command "ollama pull qwen3:8b"`

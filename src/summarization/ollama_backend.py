@@ -37,6 +37,7 @@ class OllamaBackend(SummarizationBackend):
         self._model_name = model or settings.ollama_model
         self._context_length = settings.ollama_context_length
         self._think = settings.ollama_think
+        self._num_gpu = settings.ollama_num_gpu
         self._client: Any = None
         self._initialized = False
 
@@ -82,7 +83,7 @@ class OllamaBackend(SummarizationBackend):
         user = user_prompt or USER_PROMPT_TEMPLATE.format(transcript=transcript)
 
         ctx_len = num_ctx or self._context_length
-        options: dict[str, Any] = {"num_ctx": ctx_len}
+        options: dict[str, Any] = {"num_ctx": ctx_len, "num_gpu": self._num_gpu, "temperature": 0.3}
         if not self._think:
             options["think"] = False
 

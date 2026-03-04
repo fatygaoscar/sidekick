@@ -1,6 +1,7 @@
 """Main entry point for Sidekick application."""
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 
@@ -15,6 +16,15 @@ def main() -> None:
 
     # Ensure data directory exists
     Path("data").mkdir(exist_ok=True)
+
+    # Configure application logging so logger.info() calls are captured in sidekick.log.
+    # Must run before uvicorn.run() — uvicorn's dictConfig uses disable_existing_loggers=False
+    # so this root handler is preserved after uvicorn configures its own loggers.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s:%(name)s:%(message)s",
+        stream=sys.stderr,
+    )
 
     # Run uvicorn server
     uvicorn.run(

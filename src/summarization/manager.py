@@ -167,12 +167,7 @@ class SummarizationManager:
         if not self._initialized or self._active_backend is None:
             await self.initialize()
 
-        # Calculate appropriate context length for this request
-        input_len = len(transcript or "") + len(system_prompt or "") + len(user_prompt or "")
-        estimated_tokens = int(input_len / 3) + 2000
-        
-        # Clamp between 4096 and the configured max
-        dynamic_ctx = max(4096, min(estimated_tokens, int(self._settings.ollama_context_length)))
+        ctx_len = int(self._settings.ollama_context_length)
 
         # Emit start event
         await self._event_bus.emit(
@@ -181,7 +176,6 @@ class SummarizationManager:
                 "backend": self._active_backend.name,
                 "model": self._active_backend.model,
                 "transcript_length": len(transcript),
-                "dynamic_ctx": dynamic_ctx,
             },
             source="summarization_manager",
         )
@@ -193,20 +187,15 @@ class SummarizationManager:
                     transcript=transcript,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
-                    num_ctx=dynamic_ctx,
+                    num_ctx=ctx_len,
                 )
             else:
                 async def llm_call(sys_prompt: str, usr_prompt: str) -> str:
-                    # Recalculate dynamic_ctx for individual pass calls
-                    call_input_len = len(sys_prompt or "") + len(usr_prompt or "")
-                    call_estimated_tokens = int(call_input_len / 3) + 2000
-                    call_dynamic_ctx = max(4096, min(call_estimated_tokens, dynamic_ctx))
-
                     llm_result = await self._summarize_with_timeout(
                         transcript="",
                         system_prompt=sys_prompt,
                         user_prompt=usr_prompt,
-                        num_ctx=call_dynamic_ctx,
+                        num_ctx=ctx_len,
                     )
                     return llm_result.content
 
@@ -216,14 +205,14 @@ class SummarizationManager:
                     else get_template_content(prompt_type)
                 )
 
-                cohesive_text, _, _, _ = await generate_cohesive_summary(
+                cohesive_text, _, _, _, speaker_map = await generate_cohesive_summary(
                     llm_call=llm_call,
                     transcript=transcript,
                     template=prompt_type,
                     template_contract=template_contract,
                     perspective=perspective,
                     attendees=attendees,
-                    context_length=dynamic_ctx,
+                    context_length=ctx_len,
                     custom_instructions=(
                         custom_instructions if prompt_type != "custom" else None
                     ),
@@ -233,6 +222,7 @@ class SummarizationManager:
                     content=cohesive_text,
                     backend=self._active_backend.name,
                     model=self._active_backend.model,
+                    speaker_map=speaker_map,
                 )
 
             # Emit completion event

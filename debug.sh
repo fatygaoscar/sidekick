@@ -10,14 +10,18 @@ Usage:
   ./debug.sh ollama [--gpu] [--interval N]
   ./debug.sh logs [filter_pattern]
   ./debug.sh benchmark [benchmark_args...]
+  ./debug.sh benchmark-summary [benchmark_args...]
 
 Examples:
-  ./debug.sh export                          # monitor latest export job
-  ./debug.sh export d447ae99                 # monitor specific job
+  ./debug.sh export                             # monitor latest export job
+  ./debug.sh export d447ae99                    # monitor specific job
   ./debug.sh ollama --gpu --interval 1
-  ./debug.sh logs                            # tail all logs
-  ./debug.sh logs "pipeline\|extraction"    # tail with grep filter
-  ./debug.sh benchmark --runs 2
+  ./debug.sh logs                               # tail all logs
+  ./debug.sh logs "pipeline\|extraction"       # tail with grep filter
+  ./debug.sh benchmark --runs 2                 # Ollama microbenchmark
+  ./debug.sh benchmark-summary                  # full pipeline, latest recording
+  ./debug.sh benchmark-summary --models qwen3.5:4b,qwen3.5:9b --contexts 16384,32768
+  ./debug.sh benchmark-summary --recording-id abc123 --template working_session --preview
 EOF
 }
 
@@ -79,8 +83,20 @@ cmd_logs() {
   fi
 }
 
+_venv_python() {
+  if [[ -x "./venv/bin/python3" ]]; then
+    echo "./venv/bin/python3"
+  else
+    echo "python3"
+  fi
+}
+
 cmd_benchmark() {
-  python3 ./scripts/benchmark_ollama_models.py "$@"
+  "$(_venv_python)" ./scripts/benchmark_ollama_models.py "$@"
+}
+
+cmd_benchmark_summary() {
+  "$(_venv_python)" ./scripts/benchmark_summary.py "$@"
 }
 
 cmd_default() {
@@ -103,9 +119,10 @@ fi
 cmd="$1"; shift
 
 case "$cmd" in
-  export)    cmd_export "$@" ;;
-  ollama)    cmd_ollama "$@" ;;
-  logs)      cmd_logs "$@" ;;
-  benchmark) cmd_benchmark "$@" ;;
+  export)             cmd_export "$@" ;;
+  ollama)             cmd_ollama "$@" ;;
+  logs)               cmd_logs "$@" ;;
+  benchmark)          cmd_benchmark "$@" ;;
+  benchmark-summary)  cmd_benchmark_summary "$@" ;;
   *) echo "Unknown command: $cmd"; usage; exit 1 ;;
 esac

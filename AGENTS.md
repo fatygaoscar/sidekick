@@ -78,7 +78,8 @@ sidekick/
 └── scripts/
     ├── monitor_ollama.ps1            # PowerShell: Ollama + GPU live watcher
     ├── monitor_export_job.sh         # Bash: poll export job progress
-    └── benchmark_ollama_models.py    # Benchmark models on real transcript chunks
+    ├── benchmark_ollama_models.py    # Benchmark raw model latency on transcript chunks
+    └── benchmark_summary.py         # Benchmark full two-pass cohesive summary pipeline
 ```
 
 ## Export Pipeline (Full Flow)
@@ -156,8 +157,9 @@ WHISPER_COMPUTE_TYPE=float16
 # Summarization
 SUMMARIZATION_BACKEND=ollama
 OLLAMA_HOST=http://127.0.0.1:11434
-OLLAMA_MODEL=qwen3.5:9b
+OLLAMA_MODEL=qwen3:8b
 OLLAMA_THINK=false
+OLLAMA_NUM_GPU=99
 OLLAMA_CONTEXT_LENGTH=32768
 SUMMARIZATION_TIMEOUT_SECONDS=300
 
@@ -216,11 +218,13 @@ Default template: `meeting`
 **Status**: Live and enabled.
 
 **Handoff Notes (2026-03-03, latest)**:
+- **Model**: `qwen3:8b` (5.2GB, 100% GPU). `OLLAMA_NUM_GPU=99` forces all layers to GPU. `temperature=0.3` added to all calls.
+- **Speaker Resolution**: `_resolve_speaker_map()` uses first 5000 chars + attendee name lines from full transcript. Prompt clarifies "addressing vs. being" speaker distinction. Resolved `speaker_map` returned from `generate_cohesive_summary()` as 5th element and persisted to DB segments after export.
 - **Pipeline Optimizations**:
-  - **Speech-Aware Diarization**: Diarization scan now stops at the last Whisper transcript timestamp + 5s. Prevents long waits on forgotten recordings.
-  - **Dynamic Context**: `SummarizationManager` calculates `num_ctx` based on input size. Dramatically speeds up short meeting processing.
-  - **Single-Pass Early Exit**: Short transcripts (< 3000 chars) skip the editorial polish pass if the first draft is high quality.
-- **Audio Quality**: Captures and saves at 48kHz (High-Fidelity playback); downsampled to 16kHz via manual resampler in `audio.js` for streaming.
+  - Speech-Aware Diarization: stops at last Whisper timestamp + 5s.
+  - Dynamic Context: `num_ctx` calculated from input size.
+  - Single-Pass Early Exit: short transcripts (< 3000 chars) skip polish pass.
+- **Audio Quality**: Captures and saves at 48kHz; downsampled to 16kHz for AI.
 - **Unified View & Refinement:** functionally identical review/view modals.
 - **Obsidian Versioning:** exports append `(v2)`, `(v3)`, etc.
 - **Markdown Logic:** Consolidated into `src/core/markdown_utils.py`.
@@ -229,11 +233,15 @@ Default template: `meeting`
 **Key implementation notes**:
 - Audio loaded via **PyAV** — no system `ffmpeg` needed.
 - pyannote 4.x returns `DiarizeOutput`.
-- Speaker name resolution pre-pass LLM call if `attendees` provided.
+- Speaker name resolution pre-pass LLM call if `attendees` provided. Results persisted to DB.
 
 ## Gotchas
 
 - `get_settings()` is LRU-cached — restart required to pick up `.env` changes.
-- `OLLAMA_THINK=false` is critical — suppresses token waste.
+- **qwen3 vs qwen3.5 thinking**: `qwen3:8b` properly respects `OLLAMA_THINK=false`. `qwen3.5` models always generate 3000-5000 think tokens per call regardless of this setting — not suppressable at the application level.
+- `OLLAMA_NUM_GPU=99` is required — Ollama's auto-estimate offloads ~3 layers to CPU for qwen3:8b (shows 8%/92% split in `ollama ps`). This halves tok/s. Setting `num_gpu=99` forces all layers to GPU.
+- `temperature=0.3` is set in all Ollama call options for consistent, factual output (Ollama default is 0.8).
 - Mobile: removed `max-height` from internal containers to fix double scrolling.
-- Context budget: `OLLAMA_CONTEXT_LENGTH=32768` suits `qwen3.5:9b` (6.6GB model, ~7.5GB KV cache). Fits 100% in 16GB VRAM. Supports ~2.5+ hours of speech. Larger context causes CPU spillover.
+- Context budget: `OLLAMA_CONTEXT_LENGTH=32768` suits `qwen3:8b` (5.2GB model). Fits 100% in 16GB VRAM. Supports ~2.5+ hours of speech. Larger context or larger models cause CPU spillover.
+- Speaker name resolution requires the **Attendees field** to be filled in at export time. Without it, SPEAKER_XX labels remain unresolved. With it, the pre-pass maps labels to names and writes them back to the DB.
+- Pull Ollama models from Windows PowerShell, not WSL: `powershell.exe -Command "ollama pull qwen3:8b"`
