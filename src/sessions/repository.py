@@ -28,6 +28,7 @@ class Repository:
             await self._ensure_session_transcription_column(conn)
             await self._ensure_transcript_speaker_column(conn)
             await self._ensure_summary_duration_column(conn)
+            await self._ensure_summary_template_column(conn)
 
     async def close(self) -> None:
         """Close database connection."""
@@ -329,6 +330,7 @@ class Repository:
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
         processing_duration_seconds: float | None = None,
+        template: str | None = None,
     ) -> Summary:
         """Add a summary for a meeting."""
         async with self._session_factory() as db:
@@ -340,6 +342,7 @@ class Repository:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 processing_duration_seconds=processing_duration_seconds,
+                template=template,
             )
             db.add(summary)
             await db.commit()
@@ -449,6 +452,13 @@ class Repository:
         column_names = {row[1] for row in result.fetchall()}
         if "processing_duration_seconds" not in column_names:
             await conn.execute(text("ALTER TABLE summaries ADD COLUMN processing_duration_seconds FLOAT"))
+
+    async def _ensure_summary_template_column(self, conn) -> None:
+        """Backfill schema for template name on existing SQLite DBs."""
+        result = await conn.execute(text("PRAGMA table_info(summaries)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "template" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN template VARCHAR(100)"))
 
     # Structured item operations
     async def add_structured_item(

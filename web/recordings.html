@@ -36,12 +36,11 @@
                     <label class="form-label">Details</label>
                     <div class="recording-meta" id="view-meta"></div>
                 </div>
-                <div class="form-group" id="view-audio-group">
-                    <label class="form-label">Audio</label>
-                    <audio id="view-audio-player" controls style="width: 100%;"></audio>
-                </div>
                 <div class="form-group hidden" id="view-summary-group">
-                    <label class="form-label">Summary</label>
+                    <label class="form-label">Summary Version</label>
+                    <div class="summary-version-row hidden" id="view-version-row">
+                        <select id="view-version-select" class="version-select"></select>
+                    </div>
                     <div class="summary-metadata" id="view-summary-meta">
                         <span id="view-exported-at"></span>
                         <span id="view-processing-time"></span>
@@ -50,7 +49,7 @@
                     <textarea id="view-summary-edit" class="summary-edit-textarea hidden"></textarea>
                     
                     <div class="refine-container mt-16" id="view-refine-section">
-                        <textarea id="view-refine-input" class="form-input" placeholder="Ask AI to revise (e.g., 'make it more technical', 'add a section for budget')"></textarea>
+                        <textarea id="view-refine-input" class="form-input" placeholder="e.g. 'Make it more technical'"></textarea>
                         <div class="refine-actions mt-8">
                             <div class="refine-actions-left">
                                 <button class="btn btn-small hidden" id="view-undo-btn">Undo</button>
@@ -64,6 +63,10 @@
                         <button class="btn" id="view-edit-btn">Edit Manually</button>
                         <button class="btn btn-primary hidden" id="view-save-obsidian-btn">Save to Obsidian</button>
                     </div>
+                </div>
+                <div class="form-group" id="view-audio-group">
+                    <label class="form-label">Audio</label>
+                    <audio id="view-audio-player" controls style="width: 100%;"></audio>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Downloads</label>

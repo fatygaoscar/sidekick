@@ -94,6 +94,7 @@ class RecordingsPage {
         this._summaryHistory = [];
         this._revisionInstruction = null;
         this._editMode = false;
+        this._allSummaries = [];
 
         this._init();
     }
@@ -118,6 +119,9 @@ class RecordingsPage {
         this.elements.viewUndoBtn.addEventListener('click', () => this._undoViewRevision());
         this.elements.viewEditBtn.addEventListener('click', () => this._toggleViewEditMode());
         this.elements.viewSaveObsidianBtn.addEventListener('click', () => this._handleSaveObsidian());
+        document.getElementById('view-version-select').addEventListener('change', (e) => {
+            this._handleVersionChange(parseInt(e.target.value));
+        });
 
         // Re-summarize modal
         this.elements.resummarizeClose.addEventListener('click', () => this._closeResummarizeModal());
@@ -265,7 +269,7 @@ class RecordingsPage {
         });
 
         const duration = this._formatDuration(rec.duration_seconds);
-        const title = this._buildRecordingDeviceFormattedTitle(rec);
+        const title = (rec.title || 'Untitled Recording').trim() || 'Untitled Recording';
         return `
             <div class="recording-card">
                 <div class="recording-date">${dateStr} ${timeStr}</div>
@@ -320,18 +324,10 @@ class RecordingsPage {
 
     _showViewModal() {
         const rec = this.currentRecording;
-        const date = new Date(rec.started_at);
-        const dateLabel = date.toLocaleDateString();
-        const timeLabel = date.toLocaleTimeString([], {
-            hour: '2-digit',
-            minute: '2-digit',
-        });
 
-        this.elements.viewTitle.textContent = this._buildRecordingDeviceFormattedTitle(rec);
-        this.elements.viewMeta.innerHTML = `
-            <span>Date: ${dateLabel} ${timeLabel}</span>
-            <span>Duration: ${this._formatDuration(rec.duration_seconds)}</span>
-        `;
+        this.elements.viewTitle.textContent = (rec.title || 'Untitled Recording').trim() || 'Untitled Recording';
+        const latestSummary = rec.all_summaries?.length ? rec.all_summaries[rec.all_summaries.length - 1] : null;
+        this.elements.viewMeta.innerHTML = this._renderDetailsMeta(rec, latestSummary);
 
         if (rec.has_audio && rec.audio_url) {
             this.elements.viewAudioGroup.classList.remove('hidden');
@@ -358,22 +354,8 @@ class RecordingsPage {
             this.elements.viewEditBtn.textContent = 'Edit Manually';
             this.elements.viewUndoBtn.classList.add('hidden');
 
-            // Metadata display
-            let metaHtml = '';
-            if (rec.summary_meeting_title) {
-                metaHtml += `<span class="summary-meeting-label">Meeting: ${this._escapeHtml(rec.summary_meeting_title)}</span>`;
-            }
-            if (rec.summary_created_at) {
-                const exportedDate = new Date(rec.summary_created_at);
-                metaHtml += `<span>Exported: ${exportedDate.toLocaleString()}</span>`;
-            }
-            if (rec.summary_processing_duration) {
-                const duration = Math.round(rec.summary_processing_duration);
-                metaHtml += `<span>Processing Time: ${this._formatSeconds(duration)}</span>`;
-            }
-            
-            this.elements.viewSummaryMeta.innerHTML = metaHtml;
-            this.elements.viewSummaryMeta?.classList.remove('hidden');
+            this.elements.viewSummaryMeta.innerHTML = '';
+            this.elements.viewSummaryMeta?.classList.add('hidden');
             this.elements.viewRefineInput.value = '';
             
             // Show Save to Obsidian button by default if summary exists
@@ -383,6 +365,22 @@ class RecordingsPage {
             this._currentInstruction = null;
             this._viewSummaryHistory = [rec.summary];
             this._viewEditMode = false;
+
+            // Populate version dropdown
+            const versions = rec.all_summaries || [];
+            this._allSummaries = versions;
+            const versionRow = document.getElementById('view-version-row');
+            const versionSelect = document.getElementById('view-version-select');
+            if (versions.length > 1) {
+                versionSelect.innerHTML = versions.map((s, i) => {
+                    const label = this._buildVersionLabel(s, i);
+                    const selected = i === versions.length - 1 ? 'selected' : '';
+                    return `<option value="${i}" ${selected}>${label}</option>`;
+                }).join('');
+                versionRow.classList.remove('hidden');
+            } else {
+                versionRow.classList.add('hidden');
+            }
         } else {
             this.elements.viewSummaryGroup.classList.add('hidden');
             this.elements.viewSummaryDisplay.innerHTML = '';
@@ -727,6 +725,74 @@ class RecordingsPage {
         const m = Math.floor(seconds / 60);
         const s = seconds % 60;
         return `${m}m ${s}s`;
+    }
+
+    _formatHumanDateTime(isoString, timezoneName, tzLabel) {
+        if (!isoString) return null;
+        const date = new Date(isoString);
+        try {
+            const opts = {
+                year: 'numeric', month: 'long', day: 'numeric',
+                hour: 'numeric', minute: '2-digit',
+                ...(timezoneName ? { timeZone: timezoneName } : {}),
+            };
+            const formatted = new Intl.DateTimeFormat('en-US', opts).format(date);
+            return tzLabel ? `${formatted} (${tzLabel})` : formatted;
+        } catch (_e) {
+            return date.toLocaleString();
+        }
+    }
+
+    _renderDetailsMeta(rec, summary) {
+        const row = (label, value) =>
+            `<div class="details-row"><span class="details-label">${label}</span><span class="details-value">${value}</span></div>`;
+
+        let html = '';
+
+        if (summary?.template) {
+            html += row('Template', this._escapeHtml(summary.template));
+        }
+
+        const recordedStr = this._formatHumanDateTime(rec.started_at, rec.timezone_name, rec.recorded_timezone_label);
+        if (recordedStr) html += row('Recorded', recordedStr);
+
+        if (summary?.created_at) {
+            const exportedStr = this._formatHumanDateTime(summary.created_at, rec.timezone_name, rec.recorded_timezone_label);
+            if (exportedStr) html += row('Exported', exportedStr);
+        }
+
+        html += row('Length', this._formatDuration(rec.duration_seconds));
+
+        if (summary?.processing_duration_seconds) {
+            html += row('Processing', this._formatSeconds(Math.round(summary.processing_duration_seconds)));
+        }
+
+        return html;
+    }
+
+    _buildVersionLabel(summary, index) {
+        const vNum = index + 1;
+        const date = new Date(summary.created_at).toLocaleString([], {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+        });
+        const type = index === 0 ? 'Original'
+            : summary.backend === 'manual' ? 'Revised' : 'Re-summarized';
+        return `v${vNum} · ${type} · ${date}`;
+    }
+
+    _handleVersionChange(index) {
+        const s = this._allSummaries[index];
+        if (!s) return;
+
+        this._renderViewSummaryDisplay(s.content);
+        this.elements.viewSummaryEdit.value = s.content;
+        this._currentDraft = s.content;
+        this._viewSummaryHistory = [s.content];
+        this._currentInstruction = null;
+        this.elements.viewUndoBtn.classList.add('hidden');
+
+        const rec = this.currentRecording;
+        this.elements.viewMeta.innerHTML = this._renderDetailsMeta(rec, s);
     }
 
     _openRecordingInObsidian() {

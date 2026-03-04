@@ -715,6 +715,11 @@ async def get_recording(
                 summary_meeting_title = meeting.title
                 summary_meeting_id = meeting.id
 
+    all_summaries_list = []
+    if summary_meeting_id:
+        raw = await repository.get_summaries(summary_meeting_id)
+        all_summaries_list = sorted(raw, key=lambda s: s.created_at)
+
     settings = get_settings()
     if not has_summary:
         # Check vault for existing note if DB has no summary (legacy migration)
@@ -805,6 +810,18 @@ async def get_recording(
                 "key_stop": to_utc_iso(m.key_stop),
             }
             for m in meetings
+        ],
+        "all_summaries": [
+            {
+                "id": str(s.id),
+                "content": s.content,
+                "backend": s.backend,
+                "model": s.model,
+                "created_at": to_utc_iso(s.created_at),
+                "processing_duration_seconds": s.processing_duration_seconds,
+                "template": s.template,
+            }
+            for s in all_summaries_list
         ],
     }
 

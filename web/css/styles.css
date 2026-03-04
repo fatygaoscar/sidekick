@@ -749,6 +749,32 @@ textarea.form-input {
     margin-bottom: 16px;
 }
 
+/* View modal Details section */
+#view-meta {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 3px 12px;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.details-row {
+    display: contents;
+}
+
+.details-label {
+    color: var(--text-dim);
+    font-size: 11px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.details-value {
+    color: var(--text);
+    word-break: break-word;
+}
+
 .recording-actions {
     display: flex;
     gap: 8px;
@@ -1099,6 +1125,20 @@ textarea.form-input {
 
 .refine-input::placeholder {
     color: var(--text-muted);
+}
+
+.summary-version-row {
+    margin-bottom: 8px;
+}
+
+.version-select {
+    font-size: 13px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+    cursor: pointer;
 }
 
 .summary-meta,

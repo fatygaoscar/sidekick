@@ -586,6 +586,8 @@ async def _run_export_pipeline(
             await repository.update_segments_speakers(speaker_updates)
             logger.info(f"Resolved speaker labels for {len(speaker_updates)} segments: {summary_result.speaker_map}")
 
+    template_label = TEMPLATE_INFO.get(template, {}).get("name", template.title())
+
     await repository.add_summary(
         meeting_id=primary_meeting_id,
         content=summary_result.content,
@@ -594,6 +596,7 @@ async def _run_export_pipeline(
         prompt_tokens=summary_result.prompt_tokens,
         completion_tokens=summary_result.completion_tokens,
         processing_duration_seconds=summarization_duration,
+        template=template_label,
     )
 
     summary_content = summary_result.content
@@ -606,8 +609,6 @@ async def _run_export_pipeline(
         session.timezone_offset_minutes,
     )
     tz_label = timezone_label(session.timezone_name, session.timezone_offset_minutes)
-
-    template_label = TEMPLATE_INFO.get(template, {}).get("name", template.title())
     safe_title = re.sub(r'[<>:"/\\|?*]', '', request_payload.title.strip())
     dow = local_started_at.strftime("%a")   # Mon, Tue, …
     time_hhmm = local_started_at.strftime("%H%M")  # 0930

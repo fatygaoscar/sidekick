@@ -115,6 +115,7 @@ class Summary(Base):
     prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     processing_duration_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    template: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
     # Relationships
     meeting: Mapped["Meeting"] = relationship("Meeting", back_populates="summaries")

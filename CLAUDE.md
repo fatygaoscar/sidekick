@@ -86,9 +86,14 @@ Legacy templates (constants kept for backward compat, not in UI): `strategic_rev
 - Recording list cards: `View` and `Delete` only.
 - Re-summarize/export initiated from the recording view modal, not cards.
 - **Unified Modals:** Both History "View" and post-recording "Review" modals now support identical features: AI refinement, manual editing, and undo history.
-- **Metadata Visibility:** Processed summaries display "Exported At" and "Processing Time" (tracked in DB).
+- **View Modal Title:** Shows plain meeting title (no date prefix). Date/time is in the Details section.
+- **Details Section:** Two-column grid (label + value) — Template, Recorded, Exported, Length, Processing Time. Template omitted for old summaries (null). Updates when switching summary versions.
+- **Summary label:** "Summary Version" (not "Summary") in the view modal.
+- **Metadata Visibility:** Details section mirrors Obsidian markdown header fields. Template is stored per-summary in DB (`summaries.template`).
 - **Obsidian Save:** "Save to Obsidian" button available in history view to create versioned copies or re-export.
+- **Audio player** is positioned at the bottom of the modal (below summary, above Downloads).
 - Download affordances in the view modal (`Download Audio`, `Download Transcript`).
+- Recording list cards show plain title (no date prefix) — date is shown separately on the card.
 - Template chooser shows 5 templates in the order above.
 - Keep `General Meeting` as default unless explicit product changes requested.
 - Attendees field (optional) in both export modals — used for speaker name resolution.
@@ -159,6 +164,16 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - `GET /api/transcription-jobs/{job_id}` poll transcription job status
 - `WS /ws/audio` live stream + optional live preview
 
+## Handoff Notes (2026-03-04)
+
+### View Modal — Details Rework & Template Tracking
+- **Template stored per-summary**: `summaries.template` column (VARCHAR 100, nullable). Auto-migration in `_ensure_summary_template_column()`. `export.py` computes `template_label` before `add_summary()` and passes it in. `all_summaries` API response now includes `"template"`.
+- **Details section (view modal)**: Replaced flex row with a two-column CSS grid (`#view-meta`). Rows: Template (omitted if null), Recorded, Exported (omitted if no summary), Length, Processing. Uses `_renderDetailsMeta(rec, summary)` helper; refreshes on version change.
+- **Plain titles everywhere**: Modal header and history cards both show `rec.title` (no date prefix). Date is shown on the card and in the Recorded row of Details.
+- **Audio player moved** to bottom of view modal (after summary, before Downloads).
+- **"Summary Version" label**: The summary form-group label was renamed from "Summary" to "Summary Version".
+- **Mobile Details fix**: `#view-meta` grid with `word-break: break-word` prevents horizontal overflow on iPhone. Label column uses `white-space: nowrap`.
+
 ## Handoff Notes (2026-03-03, latest)
 
 ### Model Switch: qwen3:8b + num_gpu=99 + temperature
@@ -191,8 +206,8 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 
 ### Markdown & Metadata
 - **Core Logic:** `src/core/markdown_utils.py` centralizes Obsidian note construction.
-- **Stats:** `Summary` model now includes `processing_duration_seconds`.
-- **Migration:** `src/sessions/repository.py` includes auto-backfill for new columns on startup.
+- **Stats:** `Summary` model includes `processing_duration_seconds` and `template` (display name, e.g. "General Meeting").
+- **Migration:** `src/sessions/repository.py` includes auto-backfill for new columns on startup (`_ensure_summary_template_column` added).
 - **Audio Quality:** Captures at 48kHz for high-fidelity playback; downsampled to 16kHz for AI.
 
 ## Handoff Notes (2026-03-03, earlier)

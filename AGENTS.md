@@ -37,7 +37,7 @@ sidekick/
 │   │   ├── datetime_utils.py         # Timezone helpers
 │   │   └── markdown_utils.py         # SHARED Obsidian note construction logic
 │   ├── sessions/
-│   │   ├── models.py                 # SQLAlchemy models (Summary has processing_duration_seconds)
+│   │   ├── models.py                 # SQLAlchemy models (Summary has processing_duration_seconds, template)
 │   │   └── repository.py             # DB CRUD incl. update_segments_speakers() + migrations
 │   ├── summarization/
 │   │   ├── cohesive.py               # Two-pass summary + speaker pre-pass
@@ -191,8 +191,12 @@ Default template: `meeting`
 - Recording list cards: `View` and `Delete` only.
 - Export / re-summarize initiated from the view modal, not from cards.
 - **Unified Modals:** History "View" matches post-recording "Review". Both support AI Refine, Manual Edit, and Undo.
-- **Mobile optimization:** `13px` text, `1.7` line height, single-unit scroll (no double scrollbars).
-- Metadata (`Exported At`, `Processing Time`) prominently displayed.
+- **View Modal Title:** Plain meeting title. Date/time is in the Details section.
+- **Details Section:** Two-column grid — Template (if stored), Recorded, Exported, Length, Processing Time. Updates on version change.
+- **Summary Version label:** "Summary Version" (not "Summary") in view modal.
+- **Audio player** is at the bottom of the view modal.
+- **Card titles:** Plain meeting title (no date prefix); date shown separately.
+- **Mobile optimization:** `13px` text, `1.7` line height, single-unit scroll, Details grid uses `word-break` to prevent horizontal overflow.
 - Template chooser shows 5 templates in the order above.
 - `General Meeting` is default unless explicitly changed.
 
@@ -228,7 +232,7 @@ Default template: `meeting`
 - **Unified View & Refinement:** functionally identical review/view modals.
 - **Obsidian Versioning:** exports append `(v2)`, `(v3)`, etc.
 - **Markdown Logic:** Consolidated into `src/core/markdown_utils.py`.
-- **Database:** Auto-migrations in `repository.py` for `processing_duration_seconds`.
+- **Database:** Auto-migrations in `repository.py` for `processing_duration_seconds` and `template`.
 
 **Key implementation notes**:
 - Audio loaded via **PyAV** — no system `ffmpeg` needed.
