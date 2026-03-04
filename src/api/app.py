@@ -1,11 +1,13 @@
 """FastAPI application factory."""
 
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from config.settings import get_settings
@@ -108,6 +110,20 @@ def create_app() -> FastAPI:
     if web_dir.exists():
         app.mount("/static", StaticFiles(directory=str(web_dir)), name="static")
 
+    def _static_version() -> str:
+        """Return a version string based on the most recently modified static file."""
+        static_dirs = [web_dir / "css", web_dir / "js"]
+        mtimes = [
+            f.stat().st_mtime
+            for d in static_dirs if d.exists()
+            for f in d.iterdir() if f.is_file()
+        ]
+        return str(int(max(mtimes))) if mtimes else "0"
+
+    def _serve_html(path: Path) -> HTMLResponse:
+        content = re.sub(r"\?v=[^\"']+", f"?v={_static_version()}", path.read_text())
+        return HTMLResponse(content=content, headers={"Cache-Control": "no-store"})
+
     # Health check endpoint
     @app.get("/health")
     async def health_check() -> dict:
@@ -118,22 +134,18 @@ def create_app() -> FastAPI:
 
     # Root redirect to UI
     @app.get("/")
-    async def root() -> dict:
-        from fastapi.responses import FileResponse
-
+    async def root():
         index_path = web_dir / "index.html"
         if index_path.exists():
-            return FileResponse(str(index_path))
+            return _serve_html(index_path)
         return {"message": "Sidekick API", "docs": "/docs"}
 
     # Recordings page
     @app.get("/recordings")
-    async def recordings_page() -> dict:
-        from fastapi.responses import FileResponse
-
+    async def recordings_page():
         recordings_path = web_dir / "recordings.html"
         if recordings_path.exists():
-            return FileResponse(str(recordings_path))
+            return _serve_html(recordings_path)
         return {"message": "Page not found"}, 404
 
     return app
