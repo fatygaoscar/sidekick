@@ -733,10 +733,65 @@ textarea.form-input {
     margin-bottom: 4px;
 }
 
+.recording-title-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.recording-title-row .recording-title {
+    margin-bottom: 0;
+}
+
 .recording-title {
     font-size: 14px;
     color: var(--text);
     margin-bottom: 12px;
+}
+
+.rename-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 13px;
+    padding: 0 2px;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+    line-height: 1;
+}
+
+.recording-card:hover .rename-btn {
+    opacity: 1;
+}
+
+.rename-input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border-hover);
+    color: var(--text);
+    font-size: 14px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    min-width: 0;
+}
+
+.rename-save-btn,
+.rename-cancel-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    white-space: nowrap;
+}
+
+.rename-save-btn:hover {
+    border-color: var(--border-hover);
+    color: var(--text);
 }
 
 .recording-meta {

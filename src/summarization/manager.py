@@ -153,6 +153,7 @@ class SummarizationManager:
         include_structured_tables: bool = False,
         system_prompt: str | None = None,
         user_prompt: str | None = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
     ) -> SummarizationResult:
         """
         Generate a summary from transcript.
@@ -221,6 +222,7 @@ class SummarizationManager:
                         custom_instructions if prompt_type != "custom" else None
                     ),
                     include_structured_tables=include_structured_tables,
+                    progress_callback=progress_callback,
                 )
                 result = SummarizationResult(
                     content=cohesive_text,

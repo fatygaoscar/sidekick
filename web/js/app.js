@@ -281,6 +281,7 @@ class SidekickApp {
             }
             this.state.lastSessionId = startedSessionId;
             this.audioUploadPromise = null;
+            this._eagerProcessingPromise = null;
 
             // Reset chunk tracking for parallel uploads
             this.chunkUploads = new Map();
@@ -427,6 +428,24 @@ class SidekickApp {
         this._selectTemplate('meeting');
         this.elements.namingModal.classList.remove('hidden');
         this.elements.recordingTitle.focus();
+        // Start background audio persistence + transcription immediately so the
+        // export job can skip Whisper when the user clicks Process 30–120s later.
+        this._startEagerProcessing();
+    }
+
+    _startEagerProcessing() {
+        const sessionId = this.state.sessionId || this.state.lastSessionId;
+        if (!sessionId) return;
+        if (!this._eagerProcessingPromise) {
+            this._eagerProcessingPromise = (async () => {
+                try {
+                    await this._ensureRecordingAudioPersisted(sessionId);
+                    this._triggerEagerTranscription(sessionId);
+                } catch (e) {
+                    console.warn('Eager processing failed (non-critical):', e);
+                }
+            })();
+        }
     }
 
     async _closeNamingModal() {
@@ -507,8 +526,13 @@ class SidekickApp {
         this.elements.processingOverlay.classList.remove('hidden');
 
         try {
-            await this._ensureRecordingAudioPersisted(exportSessionId);
-            this._triggerEagerTranscription(exportSessionId);
+            // Await eager processing started in _showNamingModal (likely already done).
+            if (this._eagerProcessingPromise) {
+                try { await this._eagerProcessingPromise; } catch (_) {}
+            } else {
+                await this._ensureRecordingAudioPersisted(exportSessionId);
+                this._triggerEagerTranscription(exportSessionId);
+            }
 
             const createResponse = await fetch(`/api/recordings/${exportSessionId}/export-obsidian-job`, {
                 method: 'POST',
@@ -858,17 +882,8 @@ class SidekickApp {
             this.elements.processingTranscriptionFill.classList.remove('indeterminate');
         }
         if (this.elements.processingSummarizationFill) {
-            // Use indeterminate animation during summarization (LLM timing is unpredictable)
-            const isSummarizing = stage === 'summarizing';
-            this.elements.processingSummarizationFill.classList.toggle('indeterminate', isSummarizing);
-            if (isSummarizing) {
-                this.elements.processingSummarizationFill.style.width = '';
-                if (this.elements.processingSummarizationText) {
-                    this.elements.processingSummarizationText.textContent = '...';
-                }
-            } else {
-                this.elements.processingSummarizationFill.style.width = `${sumPct}%`;
-            }
+            this.elements.processingSummarizationFill.classList.remove('indeterminate');
+            this.elements.processingSummarizationFill.style.width = `${sumPct}%`;
         }
     }
 

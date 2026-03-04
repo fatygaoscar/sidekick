@@ -331,12 +331,22 @@ async def generate_cohesive_summary(
     context_length: int = 4096,
     custom_instructions: Optional[str] = None,
     include_structured_tables: bool = False,
+    progress_callback: Optional[Callable[[float], None]] = None,
 ) -> tuple[str, str, int, str, dict[str, str]]:
     """Generate summary with mandatory two-pass flow.
 
     Returns:
         (final_summary, context_mode, passes_used, style_profile, speaker_map)
     """
+    def _emit(p: float) -> None:
+        if progress_callback:
+            try:
+                progress_callback(p)
+            except Exception:
+                pass
+
+    _emit(0.02)
+
     # Resolve SPEAKER_XX labels to real names before any summarization pass.
     speaker_map: dict[str, str] = {}
     if attendees and attendees.strip() and _SPEAKER_LABEL_RE.search(transcript):
@@ -347,6 +357,7 @@ async def generate_cohesive_summary(
         logger.info("cohesive: speaker_map=%s", speaker_map)
         if speaker_map:
             transcript = _apply_speaker_map(transcript, speaker_map)
+    _emit(0.08)
 
     approx_char_budget = max(2200, int(context_length * 3.2 * 0.75))
     context_text, context_mode = _build_context(
@@ -382,10 +393,12 @@ async def generate_cohesive_summary(
     )
     with pipeline_step(logger, "summarize_pass1", mode=context_mode, chars=len(transcript)):
         draft = await llm_call(pass1_system, pass1_user)
+    _emit(0.65)
 
     # Skip Pass 2 (editorial polish) for very short transcripts to significantly speed up processing.
     # The first pass is usually high quality for short inputs.
     if len(transcript) < 3000 and not _needs_retry(draft, structured_items):
+        _emit(0.90)
         return draft.strip(), context_mode, 1, "narrative_first_v1", speaker_map
 
     pass2_system = (
@@ -395,6 +408,7 @@ async def generate_cohesive_summary(
     with pipeline_step(logger, "summarize_pass2"):
         final = await llm_call(pass2_system, pass2_user)
     passes_used = 2
+    _emit(0.90)
 
     if _needs_retry(final, structured_items):
         retry_user = (
@@ -406,5 +420,6 @@ async def generate_cohesive_summary(
         with pipeline_step(logger, "summarize_retry"):
             final = await llm_call(pass2_system, retry_user)
         passes_used = 3
+        _emit(0.95)
 
     return final.strip(), context_mode, passes_used, "narrative_first_v1", speaker_map

@@ -1,5 +1,6 @@
 """Session and meeting REST endpoints."""
 
+import logging
 import os
 import re
 import urllib.parse
@@ -39,6 +40,7 @@ from src.summarization.manager import SummarizationManager
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _sanitize_title_for_filename(title: str) -> str:
@@ -555,16 +557,17 @@ async def save_recording_summary(
     existing_summaries = await repository.get_summaries(primary_meeting.id)
     original_summary = existing_summaries[0] if existing_summaries else None
     
-    # Save to DB
+    # Save to DB (always committed; vault write is best-effort below)
     summary = await repository.add_summary(
         meeting_id=primary_meeting.id,
         content=request.content,
         backend="manual",
         model="user-refined",
+        template=original_summary.template if original_summary else None,
         processing_duration_seconds=original_summary.processing_duration_seconds if original_summary else None,
     )
-    
-    # Now write to Obsidian if path is configured
+
+    # Best-effort vault write
     settings = get_settings()
     if settings.obsidian_vault_path:
         # Determine filename with versioning
@@ -619,13 +622,42 @@ async def save_recording_summary(
             revision_instruction=request.revision_instruction,
         )
 
-        from src.api.routes.export import _write_obsidian_file
-        filepath, obsidian_uri = await _write_obsidian_file(
-            markdown_content, relative_path, settings.obsidian_vault_path
-        )
+        obsidian_uri = None
+        try:
+            from src.api.routes.export import _write_obsidian_file
+            _, obsidian_uri = await _write_obsidian_file(
+                markdown_content, relative_path, settings.obsidian_vault_path
+            )
+        except Exception as e:
+            logger.warning("save_recording_summary: vault write failed (non-fatal): %s", e)
+
         return {"success": True, "summary_id": summary.id, "obsidian_uri": obsidian_uri}
 
     return {"success": True, "summary_id": summary.id}
+
+
+class RenameRecordingRequest(BaseModel):
+    title: str
+
+
+@router.patch("/recordings/{session_id}/title")
+async def rename_recording(
+    session_id: str,
+    request: RenameRecordingRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Rename a recording."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    meetings = sorted(session.meetings, key=lambda m: m.key_start)
+    if not meetings:
+        raise HTTPException(status_code=400, detail="No meeting found")
+    title = request.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="Title cannot be empty")
+    await repository.update_meeting_title(meetings[0].id, title)
+    return {"success": True, "title": title}
 
 
 @router.delete("/recordings/{session_id}")

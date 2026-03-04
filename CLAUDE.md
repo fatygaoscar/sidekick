@@ -152,6 +152,7 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - `GET /api/templates` list templates with prompts
 - `GET /api/recordings` list recordings
 - `GET /api/recordings/{id}` recording details (includes latest `summary` + metadata)
+- `PATCH /api/recordings/{id}/title` rename a recording (updates primary meeting title in DB)
 - `POST /api/recordings/{id}/summaries` save refined/manual summary to DB and vault
 - `POST /api/summaries/refine` general purpose AI refinement endpoint
 - `PUT /api/recordings/{id}/audio` upload full audio blob
@@ -163,6 +164,29 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - `GET /api/export-jobs/{job_id}` poll export job status
 - `GET /api/transcription-jobs/{job_id}` poll transcription job status
 - `WS /ws/audio` live stream + optional live preview
+
+## Handoff Notes (2026-03-04, latest)
+
+### Inline Rename on Recordings Page
+- **Pencil icon on hover**: `.recording-title-row` wraps the title `<span>` + a `rename-btn` (✎). Icon is `opacity:0`, fades in on `.recording-card:hover`.
+- **`_startRename(id, currentTitle)`** in `recordings.js`: replaces title row HTML with an `<input>` + Save/✕ buttons inline. Enter = save, Escape = cancel.
+- **`_saveRename(id, newTitle)`**: `PATCH /api/recordings/{id}/title` → updates `this.recordings` local state → re-renders cards. Cancel and error both call `_renderRecordings()` to restore from state.
+- **Backend**: `RenameRecordingRequest` + `PATCH /recordings/{session_id}/title` in `sessions.py`. Resolves primary meeting (sorted by `key_start`), validates non-empty title, calls `repository.update_meeting_title()`.
+
+### Eager Background Transcription
+- **`_startEagerProcessing()`** in `app.js`: called immediately when recording stops (alongside showing the naming modal). Persists audio and triggers a transcription job in the background.
+- **Result**: by the time the user fills in the title/template and clicks Process, Whisper is likely done → export job skips transcription and goes straight to summarization.
+- Uses `_eagerProcessingPromise` to avoid duplicate work; the export flow awaits it if still in progress.
+
+### Summarization Progress Callbacks
+- `generate_cohesive_summary()` in `cohesive.py` now accepts an optional `progress_callback: Callable[[float], None]`.
+- `export.py` passes a callback that maps summarization progress (0–1) to the job's `summarization_progress` field.
+- Result: the summarization progress bar in the UI now moves during LLM inference instead of being stuck at 0.
+
+### Debug Monitor — WSL Inline (`scripts/monitor_sidekick.sh`)
+- **New file**: `scripts/monitor_sidekick.sh` — alternate-screen TUI showing GPU, Whisper, Ollama, latest export job, and recent pipeline steps. Refreshes every 2s.
+- **`./debug.sh`** (default) and **`./debug.sh monitor`** now launch this inline WSL monitor instead of spawning a PowerShell window.
+- **Bug fix**: was using `set -euo pipefail` but multiple grep/pipeline commands lacked `|| true`. Script would flash then exit. Fixed by dropping `-e` (kept `-uo pipefail`) and adding `|| true` to grep extraction pipelines. Monitoring scripts should be resilient, not brittle.
 
 ## Handoff Notes (2026-03-04)
 

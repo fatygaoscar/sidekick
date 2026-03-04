@@ -8,6 +8,8 @@ Browser-based meeting recorder that transcribes audio, identifies speakers, and 
 - **Local transcription** via faster-whisper large-v3 (CUDA)
 - **Speaker diarization** via pyannote.audio 3.1 — speech-aware optimization skips silent ends
 - **Speaker name resolution** — provide attendee names and the LLM maps labels to real people before summarizing
+- **Eager background processing** — transcription starts in the background as soon as recording stops, so export skips Whisper when you click Process
+- **Inline rename** — hover a recording card and click the pencil icon to rename without opening the view modal
 - **History Summary View** — view and refine processed summaries directly in the recordings history
 - **Unified Review/View** — functionally identical modals for new and past recordings (Refine, Edit, Undo)
 - **Obsidian-Optimized Formatting** — summaries use nested bullet points and clean spacing for maximum scannability
@@ -182,6 +184,7 @@ sidekick/
 │       └── chunks/{session_id}/{client_id}/  # Temp upload chunks
 │
 └── scripts/
+    ├── monitor_sidekick.sh           # Bash: inline WSL live monitor (GPU, Whisper, Ollama, job, pipeline)
     ├── monitor_ollama.ps1            # PowerShell: Ollama + GPU live watcher
     ├── monitor_export_job.sh         # Bash: poll export job progress
     ├── benchmark_ollama_models.py    # Benchmark raw model latency on transcript chunks
@@ -289,6 +292,7 @@ All templates are editable before export (click "Show" to view and modify the pr
 | `GET /api/templates` | List templates with prompts |
 | `GET /api/recordings` | List recordings |
 | `GET /api/recordings/{id}` | Recording detail |
+| `PATCH /api/recordings/{id}/title` | Rename a recording |
 | `POST /api/recordings/{id}/export-obsidian-job` | Start async export |
 | `GET /api/export-jobs/{job_id}` | Poll export job |
 | `POST /api/recordings/{id}/transcription-job` | Transcription only (no summary) |
@@ -301,20 +305,27 @@ All templates are editable before export (click "Show" to view and modify the pr
 ## Debugging
 
 ```bash
-# Unified debug helper (defaults to export monitor + Ollama GPU window)
+# Inline WSL live monitor — GPU, Whisper, Ollama, export job, pipeline steps
 ./debug.sh
-
-# Monitor latest export job from logs
-./debug.sh export-latest
+./debug.sh monitor            # same
 
 # Monitor a specific export job
+./debug.sh export
 ./debug.sh export <job_id>
 
 # Live Ollama + GPU stats (launches PowerShell watcher)
-./debug.sh ollama
+./debug.sh ollama --gpu
+
+# Tail app logs (optional grep filter)
+./debug.sh logs
+./debug.sh logs "speaker"
+
+# Watch pipeline step timing lines only
+./debug.sh pipeline
 
 # Benchmark model latency on a real recording
 ./debug.sh benchmark --runs 2
+./debug.sh benchmark-summary
 ```
 
 ## Requirements

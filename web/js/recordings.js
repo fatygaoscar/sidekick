@@ -254,6 +254,14 @@ class RecordingsPage {
         this.elements.recordingsList.querySelectorAll('.delete-btn').forEach(btn => {
             btn.addEventListener('click', () => this._confirmDelete(btn.dataset.id));
         });
+
+        this.elements.recordingsList.querySelectorAll('.rename-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const rec = this.recordings.find(r => r.id === btn.dataset.id);
+                this._startRename(btn.dataset.id, rec?.title || '');
+            });
+        });
     }
 
     _renderCard(rec) {
@@ -271,9 +279,12 @@ class RecordingsPage {
         const duration = this._formatDuration(rec.duration_seconds);
         const title = (rec.title || 'Untitled Recording').trim() || 'Untitled Recording';
         return `
-            <div class="recording-card">
+            <div class="recording-card" data-id="${rec.id}">
                 <div class="recording-date">${dateStr} ${timeStr}</div>
-                <div class="recording-title">${this._escapeHtml(title)}</div>
+                <div class="recording-title-row">
+                    <span class="recording-title">${this._escapeHtml(title)}</span>
+                    <button class="rename-btn" data-id="${rec.id}" title="Rename">✎</button>
+                </div>
                 <div class="recording-meta">
                     <span>Duration: ${duration}</span>
                     ${rec.has_summary ? '<span>Has Summary</span>' : ''}
@@ -619,14 +630,35 @@ class RecordingsPage {
 
             this._currentDraft = revised;
             this._currentInstruction = instruction;
-            this._viewSummaryHistory.push(revised);
-            
-            this._renderViewSummaryDisplay(revised);
-            this.elements.viewSummaryEdit.value = revised;
-            
-            this.elements.viewSaveObsidianBtn.classList.remove('hidden');
-            this.elements.viewUndoBtn.classList.remove('hidden');
-            this.elements.viewSummaryDisplay.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+            // Auto-save to DB so the version dropdown updates immediately.
+            // Best-effort: if save fails, fall back to showing revised text with manual Save button.
+            let autoSaved = false;
+            try {
+                const saveResp = await fetch(`/api/recordings/${rec.id}/summaries`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        content: revised,
+                        revision_instruction: instruction,
+                        meeting_id: rec.meetings?.[0]?.id,
+                    }),
+                });
+                if (saveResp.ok) {
+                    autoSaved = true;
+                    await this._viewRecording(rec.id);
+                }
+            } catch (_) { /* fall through */ }
+
+            if (!autoSaved) {
+                // Fallback: show revised text with manual save option.
+                this._viewSummaryHistory.push(revised);
+                this._renderViewSummaryDisplay(revised);
+                this.elements.viewSummaryEdit.value = revised;
+                this.elements.viewSaveObsidianBtn.classList.remove('hidden');
+                this.elements.viewUndoBtn.classList.remove('hidden');
+                this.elements.viewSummaryDisplay.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
 
         } catch (error) {
             alert(`Revision failed: ${error.message}`);
@@ -1029,18 +1061,10 @@ class RecordingsPage {
             this.elements.processingTranscriptionFill.classList.remove('indeterminate');
         }
         if (this.elements.processingSummarizationFill) {
-            const isSummarizing = stage === 'summarizing';
-            this.elements.processingSummarizationFill.classList.toggle('indeterminate', isSummarizing);
-            if (isSummarizing) {
-                this.elements.processingSummarizationFill.style.width = '';
-                if (this.elements.processingSummarizationText) {
-                    this.elements.processingSummarizationText.textContent = '...';
-                }
-            } else {
-                this.elements.processingSummarizationFill.style.width = `${sumPct}%`;
-                if (this.elements.processingSummarizationText) {
-                    this.elements.processingSummarizationText.textContent = `${sumPct}%`;
-                }
+            this.elements.processingSummarizationFill.classList.remove('indeterminate');
+            this.elements.processingSummarizationFill.style.width = `${sumPct}%`;
+            if (this.elements.processingSummarizationText) {
+                this.elements.processingSummarizationText.textContent = `${sumPct}%`;
             }
         }
     }
@@ -1234,6 +1258,45 @@ class RecordingsPage {
             window.open(this.obsidianUri, '_blank');
         }
         this._closeConfirmationModal();
+    }
+
+    _startRename(id, currentTitle) {
+        const card = this.elements.recordingsList.querySelector(`.recording-card[data-id="${id}"]`);
+        if (!card) return;
+        const row = card.querySelector('.recording-title-row');
+        row.innerHTML = `
+            <input class="rename-input" type="text" value="${this._escapeHtml(currentTitle)}" maxlength="255" />
+            <button class="rename-save-btn">Save</button>
+            <button class="rename-cancel-btn">✕</button>
+        `;
+        const input = row.querySelector('.rename-input');
+        input.focus();
+        input.select();
+        const save = () => this._saveRename(id, input.value.trim());
+        const cancel = () => this._renderRecordings();
+        row.querySelector('.rename-save-btn').addEventListener('click', save);
+        row.querySelector('.rename-cancel-btn').addEventListener('click', cancel);
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Enter') save();
+            if (e.key === 'Escape') cancel();
+        });
+    }
+
+    async _saveRename(id, newTitle) {
+        if (!newTitle) { this._renderRecordings(); return; }
+        try {
+            const resp = await fetch(`/api/recordings/${id}/title`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title: newTitle }),
+            });
+            if (!resp.ok) throw new Error('Rename failed');
+            const rec = this.recordings.find(r => r.id === id);
+            if (rec) rec.title = newTitle;
+        } catch (e) {
+            console.error('Rename failed:', e);
+        }
+        this._renderRecordings();
     }
 
     _confirmDelete(id) {

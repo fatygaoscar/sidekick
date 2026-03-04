@@ -6,6 +6,8 @@ cd "$(dirname "$0")"
 usage() {
   cat <<'EOF'
 Usage:
+  ./debug.sh                                    # inline WSL monitor (GPU, Ollama, Job, Pipeline)
+  ./debug.sh monitor                            # same as above
   ./debug.sh export [job_id] [interval_seconds] [base_url]
   ./debug.sh ollama [--gpu] [--interval N]
   ./debug.sh logs [filter_pattern]
@@ -14,6 +16,8 @@ Usage:
   ./debug.sh benchmark-summary [benchmark_args...]
 
 Examples:
+  ./debug.sh                                    # live monitor in current terminal
+  ./debug.sh monitor                            # same
   ./debug.sh export                             # monitor latest export job
   ./debug.sh export d447ae99                    # monitor specific job
   ./debug.sh ollama --gpu --interval 1
@@ -161,16 +165,7 @@ cmd_benchmark_summary() {
 }
 
 cmd_default() {
-  local script_win log_win
-  script_win="$(wslpath -w "$PWD/scripts/monitor_ollama.ps1")"
-  log_win="$(wslpath -w "$PWD/data/sidekick.log")"
-  powershell.exe -Command "Start-Process powershell -ArgumentList \
-    '-ExecutionPolicy','Bypass',\
-    '-File','$script_win',\
-    '-IntervalSeconds','2',\
-    '-ShowGpu',\
-    '-SidekickLogPath','$log_win',\
-    '-SidekickBaseUrl','http://127.0.0.1:8000'"
+  bash "$PWD/scripts/monitor_sidekick.sh"
 }
 
 if [[ $# -lt 1 ]]; then
@@ -180,6 +175,7 @@ fi
 cmd="$1"; shift
 
 case "$cmd" in
+  monitor)            cmd_default ;;
   export)             cmd_export "$@" ;;
   ollama)             cmd_ollama "$@" ;;
   logs)               cmd_logs "$@" ;;

@@ -559,12 +559,18 @@ async def _run_export_pipeline(
     await _emit_progress(progress_callback, "summarizing", "Generating summary", 1.0, 0.02)
     _sum_t0 = time.monotonic()
     logger.info("[step] summarization | start | chars=%d | template=%s", len(full_transcript), template)
+
+    def _on_sum_progress(p: float) -> None:
+        if progress_callback:
+            progress_callback("summarizing", "Generating summary", 1.0, min(p, 0.99))
+
     try:
         summary_result = await summarization_manager.summarize(
             transcript=full_transcript,
             prompt_type=template,
             custom_instructions=request_payload.custom_prompt,
             attendees=request_payload.attendees,
+            progress_callback=_on_sum_progress,
         )
     except Exception as e:
         logger.warning("[step] summarization | error | elapsed=%.1fs", time.monotonic() - _sum_t0)
