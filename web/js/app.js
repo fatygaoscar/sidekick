@@ -939,6 +939,10 @@ class SidekickApp {
             this.elements.reviewSummaryEdit.classList.remove('hidden');
             this.elements.reviewSummaryDisplay.classList.add('hidden');
             this.elements.reviewEditBtn.textContent = 'Done Editing';
+            
+            // Auto-resize textarea to fit content
+            this.elements.reviewSummaryEdit.style.height = 'auto';
+            this.elements.reviewSummaryEdit.style.height = (this.elements.reviewSummaryEdit.scrollHeight + 2) + 'px';
         } else {
             // Apply edits and switch back to rendered view
             const edited = this.elements.reviewSummaryEdit.value;

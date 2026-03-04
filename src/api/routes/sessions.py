@@ -3,7 +3,7 @@
 import os
 import re
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -12,6 +12,13 @@ from pydantic import BaseModel
 
 from config.settings import get_settings
 from src.core.datetime_utils import localize_datetime, timezone_label, to_utc_iso
+from src.core.markdown_utils import (
+    build_obsidian_markdown,
+    format_datetime_human,
+    format_duration_human,
+    format_processing_time,
+    week_folder,
+)
 from src.audio.storage import (
     assemble_chunks,
     cleanup_chunk_storage,
@@ -519,6 +526,108 @@ async def list_recordings(
     return sessions
 
 
+class SaveSummaryRequest(BaseModel):
+    content: str
+    revision_instruction: Optional[str] = None
+    meeting_id: Optional[str] = None
+
+
+@router.post("/recordings/{session_id}/summaries")
+async def save_recording_summary(
+    session_id: str,
+    request: SaveSummaryRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Save a new summary for a recording session."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    meetings = sorted(session.meetings, key=lambda m: m.key_start)
+    if not meetings:
+        raise HTTPException(status_code=400, detail="No meeting found for this session")
+
+    # Use specified meeting or primary
+    target_meeting_id = request.meeting_id or meetings[0].id
+    primary_meeting = next((m for m in meetings if m.id == target_meeting_id), meetings[0])
+    
+    # Get original summary to copy metadata if possible
+    existing_summaries = await repository.get_summaries(primary_meeting.id)
+    original_summary = existing_summaries[0] if existing_summaries else None
+    
+    # Save to DB
+    summary = await repository.add_summary(
+        meeting_id=primary_meeting.id,
+        content=request.content,
+        backend="manual",
+        model="user-refined",
+        processing_duration_seconds=original_summary.processing_duration_seconds if original_summary else None,
+    )
+    
+    # Now write to Obsidian if path is configured
+    settings = get_settings()
+    if settings.obsidian_vault_path:
+        # Determine filename with versioning
+        version_suffix = ""
+        if len(existing_summaries) >= 1:
+            version_suffix = f" (v{len(existing_summaries) + 1})"
+            
+        local_started_at = localize_datetime(
+            session.started_at,
+            session.timezone_name,
+            session.timezone_offset_minutes,
+        )
+        tz_label = timezone_label(session.timezone_name, session.timezone_offset_minutes)
+        
+        # Get title
+        title = primary_meeting.title or "Untitled Recording"
+        safe_title = re.sub(r'[<>:"/\\|?*]', '', title.strip())
+        dow = local_started_at.strftime("%a")
+        time_hhmm = local_started_at.strftime("%H%M")
+        
+        filename = f"{local_started_at.day:02d} {dow} {time_hhmm} - {safe_title}{version_suffix}.md"
+        week_folder_name = week_folder(local_started_at)
+        relative_path = f"Meetings/{week_folder_name}/{filename}"
+        
+        # Build metadata for markdown
+        recorded_at = format_datetime_human(local_started_at, tz_label)
+        local_exported_at = localize_datetime(
+            datetime.now(timezone.utc),
+            session.timezone_name,
+            session.timezone_offset_minutes,
+        )
+        exported_at = format_datetime_human(local_exported_at, tz_label)
+        
+        # Get transcript
+        segments = await repository.get_segments(session_id=session_id)
+        from src.api.routes.export import _segments_to_transcript
+        full_transcript, audio_duration_seconds = _segments_to_transcript(segments)
+        
+        duration_str = format_duration_human(int(audio_duration_seconds))
+        processing_time_str = ""
+        if original_summary and original_summary.processing_duration_seconds:
+            processing_time_str = format_processing_time(original_summary.processing_duration_seconds)
+
+        markdown_content = build_obsidian_markdown(
+            content=request.content,
+            template_label="Refined",
+            recorded_at=recorded_at,
+            exported_at=exported_at,
+            duration_str=duration_str,
+            processing_time_str=processing_time_str,
+            transcript=full_transcript,
+            revision_instruction=request.revision_instruction,
+        )
+
+        from src.api.routes.export import _write_obsidian_file
+        filepath, obsidian_uri = await _write_obsidian_file(
+            markdown_content, relative_path, settings.obsidian_vault_path
+        )
+        return {"success": True, "summary_id": summary.id, "obsidian_uri": obsidian_uri}
+
+    return {"success": True, "summary_id": summary.id}
+
+
 @router.delete("/recordings/{session_id}")
 async def delete_recording(
     session_id: str,
@@ -592,6 +701,8 @@ async def get_recording(
 
     has_summary = False
     latest_summary = None
+    summary_meeting_title = None
+    summary_meeting_id = None
     for meeting in meetings:
         summaries = await repository.get_summaries(meeting.id)
         if summaries:
@@ -600,9 +711,13 @@ async def get_recording(
             current_latest = sorted(summaries, key=lambda s: s.created_at, reverse=True)[0]
             if not latest_summary or current_latest.created_at > latest_summary.created_at:
                 latest_summary = current_latest
+                summary_meeting_title = meeting.title
+                summary_meeting_id = meeting.id
 
     settings = get_settings()
     if not has_summary:
+        # Check vault for existing note if DB has no summary (legacy migration)
+        # Note: this might be why summaries from different meetings show up if titles are generic.
         has_summary = _has_exported_note_in_vault(
             settings.obsidian_vault_path,
             session.started_at,
@@ -670,6 +785,10 @@ async def get_recording(
         "has_transcription": bool(session.has_transcription),
         "has_summary": has_summary,
         "summary": latest_summary.content if latest_summary else None,
+        "summary_meeting_id": summary_meeting_id,
+        "summary_meeting_title": summary_meeting_title,
+        "summary_created_at": to_utc_iso(latest_summary.created_at) if latest_summary else None,
+        "summary_processing_duration": latest_summary.processing_duration_seconds if latest_summary else None,
         "open_in_obsidian_uri": open_in_obsidian_uri,
         "has_audio": audio_path is not None,
         "audio_url": f"/api/recordings/{session.id}/audio" if audio_path else None,

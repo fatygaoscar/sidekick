@@ -28,7 +28,17 @@ class RecordingsPage {
             viewAudioDownload: document.getElementById('view-audio-download'),
             viewTranscriptDownload: document.getElementById('view-transcript-download'),
             viewSummaryGroup: document.getElementById('view-summary-group'),
-            viewSummary: document.getElementById('view-summary'),
+            viewSummaryDisplay: document.getElementById('view-summary-display'),
+            viewSummaryEdit: document.getElementById('view-summary-edit'),
+            viewSummaryMeta: document.getElementById('view-summary-meta'),
+            viewExportedAt: document.getElementById('view-exported-at'),
+            viewProcessingTime: document.getElementById('view-processing-time'),
+            viewRefineSection: document.getElementById('view-refine-section'),
+            viewRefineInput: document.getElementById('view-refine-input'),
+            viewRefineBtn: document.getElementById('view-refine-btn'),
+            viewUndoBtn: document.getElementById('view-undo-btn'),
+            viewEditBtn: document.getElementById('view-edit-btn'),
+            viewSaveObsidianBtn: document.getElementById('view-save-obsidian-btn'),
             viewTranscriptGroup: document.getElementById('view-transcript-group'),
             viewTranscript: document.getElementById('view-transcript'),
             viewTranscriptMoreBtn: document.getElementById('view-transcript-more-btn'),
@@ -104,6 +114,10 @@ class RecordingsPage {
         this.elements.viewOpenObsidianBtn.addEventListener('click', () => this._openRecordingInObsidian());
         this.elements.viewTranscriptDownload.addEventListener('click', () => this._downloadTranscript());
         this.elements.viewTranscriptMoreBtn.addEventListener('click', () => this._showMoreTranscript());
+        this.elements.viewRefineBtn.addEventListener('click', () => this._handleRefine());
+        this.elements.viewUndoBtn.addEventListener('click', () => this._undoViewRevision());
+        this.elements.viewEditBtn.addEventListener('click', () => this._toggleViewEditMode());
+        this.elements.viewSaveObsidianBtn.addEventListener('click', () => this._handleSaveObsidian());
 
         // Re-summarize modal
         this.elements.resummarizeClose.addEventListener('click', () => this._closeResummarizeModal());
@@ -337,14 +351,44 @@ class RecordingsPage {
         // Render summary if available
         if (rec.has_summary && rec.summary) {
             this.elements.viewSummaryGroup.classList.remove('hidden');
-            if (typeof marked !== 'undefined') {
-                this.elements.viewSummary.innerHTML = marked.parse(rec.summary);
-            } else {
-                this.elements.viewSummary.textContent = rec.summary;
+            this._renderViewSummaryDisplay(rec.summary);
+            this.elements.viewSummaryEdit.value = rec.summary;
+            this.elements.viewSummaryEdit.classList.add('hidden');
+            this.elements.viewSummaryDisplay.classList.remove('hidden');
+            this.elements.viewEditBtn.textContent = 'Edit Manually';
+            this.elements.viewUndoBtn.classList.add('hidden');
+
+            // Metadata display
+            let metaHtml = '';
+            if (rec.summary_meeting_title) {
+                metaHtml += `<span class="summary-meeting-label">Meeting: ${this._escapeHtml(rec.summary_meeting_title)}</span>`;
             }
+            if (rec.summary_created_at) {
+                const exportedDate = new Date(rec.summary_created_at);
+                metaHtml += `<span>Exported: ${exportedDate.toLocaleString()}</span>`;
+            }
+            if (rec.summary_processing_duration) {
+                const duration = Math.round(rec.summary_processing_duration);
+                metaHtml += `<span>Processing Time: ${this._formatSeconds(duration)}</span>`;
+            }
+            
+            this.elements.viewSummaryMeta.innerHTML = metaHtml;
+            this.elements.viewSummaryMeta?.classList.remove('hidden');
+            this.elements.viewRefineInput.value = '';
+            
+            // Show Save to Obsidian button by default if summary exists
+            this.elements.viewSaveObsidianBtn.classList.remove('hidden');
+            
+            this._currentDraft = rec.summary;
+            this._currentInstruction = null;
+            this._viewSummaryHistory = [rec.summary];
+            this._viewEditMode = false;
         } else {
             this.elements.viewSummaryGroup.classList.add('hidden');
-            this.elements.viewSummary.innerHTML = '';
+            this.elements.viewSummaryDisplay.innerHTML = '';
+            this.elements.viewSummaryMeta?.classList.add('hidden');
+            this._viewSummaryHistory = [];
+            this._viewEditMode = false;
         }
 
         // Render transcript only after authoritative transcription has been run.
@@ -534,6 +578,155 @@ class RecordingsPage {
         const hasSummary = !!rec?.has_summary;
         this.elements.resummarizeBtn.disabled = !canResummarize;
         this.elements.viewOpenObsidianBtn.disabled = !hasSummary || !rec?.open_in_obsidian_uri;
+    }
+
+    _renderViewSummaryDisplay(markdown) {
+        if (typeof marked !== 'undefined') {
+            this.elements.viewSummaryDisplay.innerHTML = marked.parse(markdown);
+        } else {
+            this.elements.viewSummaryDisplay.textContent = markdown;
+        }
+    }
+
+    async _handleRefine() {
+        const instruction = this.elements.viewRefineInput.value.trim();
+        if (!instruction) {
+            this.elements.viewRefineInput.focus();
+            return;
+        }
+        
+        const rec = this.currentRecording;
+        if (!rec || !rec.summary) return;
+
+        this.elements.viewRefineBtn.disabled = true;
+        this.elements.viewRefineBtn.textContent = 'Revising...';
+
+        try {
+            const response = await fetch('/api/summaries/refine', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    instruction, 
+                    current_summary: this._currentDraft || rec.summary 
+                }),
+            });
+
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(err.detail || 'Refinement failed');
+            }
+
+            const data = await response.json();
+            const revised = data.revised_summary || '';
+
+            this._currentDraft = revised;
+            this._currentInstruction = instruction;
+            this._viewSummaryHistory.push(revised);
+            
+            this._renderViewSummaryDisplay(revised);
+            this.elements.viewSummaryEdit.value = revised;
+            
+            this.elements.viewSaveObsidianBtn.classList.remove('hidden');
+            this.elements.viewUndoBtn.classList.remove('hidden');
+            this.elements.viewSummaryDisplay.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+        } catch (error) {
+            alert(`Revision failed: ${error.message}`);
+        } finally {
+            this.elements.viewRefineBtn.disabled = false;
+            this.elements.viewRefineBtn.textContent = 'Ask AI to Revise';
+        }
+    }
+
+    _toggleViewEditMode() {
+        this._viewEditMode = !this._viewEditMode;
+        if (this._viewEditMode) {
+            const current = this._viewSummaryHistory[this._viewSummaryHistory.length - 1] || '';
+            this.elements.viewSummaryEdit.value = current;
+            this.elements.viewSummaryEdit.classList.remove('hidden');
+            this.elements.viewSummaryDisplay.classList.add('hidden');
+            this.elements.viewEditBtn.textContent = 'Done Editing';
+
+            // Auto-resize textarea to fit content
+            this.elements.viewSummaryEdit.style.height = 'auto';
+            this.elements.viewSummaryEdit.style.height = (this.elements.viewSummaryEdit.scrollHeight + 2) + 'px';
+        } else {
+            const edited = this.elements.viewSummaryEdit.value;
+            if (edited !== this._viewSummaryHistory[this._viewSummaryHistory.length - 1]) {
+                this._viewSummaryHistory.push(edited);
+                this._currentDraft = edited;
+                this.elements.viewUndoBtn.classList.remove('hidden');
+                this.elements.viewSaveObsidianBtn.classList.remove('hidden');
+            }
+            this._renderViewSummaryDisplay(edited);
+            this.elements.viewSummaryEdit.classList.add('hidden');
+            this.elements.viewSummaryDisplay.classList.remove('hidden');
+            this.elements.viewEditBtn.textContent = 'Edit Manually';
+        }
+    }
+
+    _undoViewRevision() {
+        if (this._viewSummaryHistory.length <= 1) return;
+        this._viewSummaryHistory.pop();
+        const previous = this._viewSummaryHistory[this._viewSummaryHistory.length - 1] || '';
+        this._currentDraft = previous;
+        this._renderViewSummaryDisplay(previous);
+        this.elements.viewSummaryEdit.value = previous;
+        if (this._viewSummaryHistory.length <= 1) {
+            this.elements.viewUndoBtn.classList.add('hidden');
+            this.elements.viewSaveObsidianBtn.classList.add('hidden');
+            this._currentInstruction = null;
+        }
+    }
+
+    async _handleSaveObsidian() {
+        const rec = this.currentRecording;
+        if (!rec || !this._currentDraft) return;
+
+        this.elements.viewSaveObsidianBtn.disabled = true;
+        this.elements.viewSaveObsidianBtn.textContent = 'Saving...';
+
+        try {
+            const response = await fetch(`/api/recordings/${rec.id}/summaries`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    content: this._currentDraft,
+                    revision_instruction: this._currentInstruction,
+                    meeting_id: rec.meetings?.[0]?.id,
+                }),
+            });
+
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(err.detail || 'Save failed');
+            }
+
+            const result = await response.json();
+            
+            // Success
+            this.elements.viewSaveObsidianBtn.classList.add('hidden');
+            this.elements.viewSaveObsidianBtn.disabled = false;
+            this.elements.viewSaveObsidianBtn.textContent = 'Save to Obsidian';
+            this.elements.viewUndoBtn.classList.add('hidden');
+            
+            // Reload recording data to update all metadata
+            await this._viewRecording(rec.id);
+
+            alert('Summary saved to database and Obsidian.');
+
+        } catch (error) {
+            alert(`Save failed: ${error.message}`);
+            this.elements.viewSaveObsidianBtn.disabled = false;
+            this.elements.viewSaveObsidianBtn.textContent = 'Save to Obsidian';
+        }
+    }
+
+    _formatSeconds(seconds) {
+        if (seconds < 60) return `${seconds}s`;
+        const m = Math.floor(seconds / 60);
+        const s = seconds % 60;
+        return `${m}m ${s}s`;
     }
 
     _openRecordingInObsidian() {

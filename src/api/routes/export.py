@@ -19,6 +19,13 @@ from pydantic import BaseModel
 from config.settings import get_settings
 from src.audio.storage import ensure_session_audio_path, get_session_audio_path
 from src.core.datetime_utils import localize_datetime, timezone_label, to_utc_iso
+from src.core.markdown_utils import (
+    build_obsidian_markdown,
+    format_datetime_human,
+    format_duration_human,
+    format_processing_time,
+    week_folder,
+)
 from src.sessions.repository import Repository
 from src.summarization.manager import SummarizationManager
 from src.summarization.prompts import TEMPLATE_INFO, get_template_content
@@ -410,78 +417,6 @@ def _build_transcript_from_segments(segments: list) -> tuple[str, float]:
     return transcript, duration
 
 
-def _week_folder(dt: datetime) -> str:
-    """Return e.g. '2026 Week 12' for the ISO week containing dt. Zero-pads for correct sort."""
-    iso_year, week_num, _ = dt.isocalendar()
-    return f"{iso_year} Week {week_num:02d}"
-
-
-def _format_duration_human(seconds: int) -> str:
-    """Return e.g. '45 min' or '1 hour 45 min'."""
-    minutes = seconds // 60
-    if minutes < 1:
-        return "< 1 min"
-    if minutes < 60:
-        return f"{minutes} min"
-    hours = minutes // 60
-    remaining = minutes % 60
-    hour_word = "hour" if hours == 1 else "hours"
-    if remaining == 0:
-        return f"{hours} {hour_word}"
-    return f"{hours} {hour_word} {remaining} min"
-
-
-def _format_processing_time(seconds: float) -> str:
-    """Return e.g. '4m 05s' or '45s'."""
-    total = int(seconds)
-    m, s = divmod(total, 60)
-    if m == 0:
-        return f"{s}s"
-    return f"{m}m {s:02d}s"
-
-
-def _format_datetime_human(dt: datetime, tz_label: str) -> str:
-    """Return e.g. 'March 16, 2026 at 2:30pm (CST)'."""
-    month = dt.strftime("%B")
-    day = dt.day
-    year = dt.year
-    hour_12 = dt.strftime("%I").lstrip("0") or "12"
-    minute = dt.strftime("%M")
-    ampm = dt.strftime("%p").lower()
-    time_str = f"{hour_12}:{minute}{ampm}" if minute != "00" else f"{hour_12}{ampm}"
-    return f"{month} {day}, {year} at {time_str} ({tz_label})"
-
-
-def _build_singlepass_markdown(
-    content: str,
-    template_label: str,
-    recorded_at: str,
-    exported_at: str,
-    duration_str: str,
-    processing_time_str: str,
-    transcript: str,
-    revision_instruction: Optional[str] = None,
-) -> str:
-    """Assemble the final Obsidian markdown note."""
-    revision_line = ""
-    if revision_instruction and revision_instruction.strip():
-        revision_line = f'**Revised**: "{revision_instruction.strip()}"\n'
-    return (
-        f"**Template**: {template_label}\n"
-        f"{revision_line}"
-        f"**Recorded**: {recorded_at}\n"
-        f"**Exported**: {exported_at}\n"
-        f"**Meeting Length**: {duration_str}\n"
-        f"**Processing Time**: {processing_time_str}\n"
-        f"\n---\n\n"
-        f"{content}\n"
-        f"\n---\n\n"
-        f"<details>\n<summary>Full Transcript</summary>\n\n"
-        f"{transcript}\n\n"
-        f"</details>\n"
-    )
-
-
 async def _write_obsidian_file(
     markdown_content: str,
     relative_path: str,
@@ -602,6 +537,7 @@ async def _run_export_pipeline(
     template = request_payload.template
 
     await _emit_progress(progress_callback, "summarizing", "Generating summary", 1.0, 0.02)
+    summarization_start = datetime.now(timezone.utc)
     try:
         summary_result = await summarization_manager.summarize(
             transcript=full_transcript,
@@ -612,6 +548,7 @@ async def _run_export_pipeline(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
 
+    summarization_duration = (datetime.now(timezone.utc) - summarization_start).total_seconds()
     await _emit_progress(progress_callback, "summarizing", "Summary complete", 1.0, 1.0)
 
     await repository.add_summary(
@@ -621,12 +558,12 @@ async def _run_export_pipeline(
         model=summary_result.model,
         prompt_tokens=summary_result.prompt_tokens,
         completion_tokens=summary_result.completion_tokens,
+        processing_duration_seconds=summarization_duration,
     )
 
     summary_content = summary_result.content
-    processing_time_str = _format_processing_time(
-        (datetime.now(timezone.utc) - pipeline_start).total_seconds()
-    )
+    total_pipeline_duration = (datetime.now(timezone.utc) - pipeline_start).total_seconds()
+    processing_time_str = format_processing_time(total_pipeline_duration)
 
     # Build filename and folder
     local_started_at = localize_datetime(
@@ -640,12 +577,20 @@ async def _run_export_pipeline(
     safe_title = re.sub(r'[<>:"/\\|?*]', '', request_payload.title.strip())
     dow = local_started_at.strftime("%a")   # Mon, Tue, …
     time_hhmm = local_started_at.strftime("%H%M")  # 0930
-    filename = f"{local_started_at.day:02d} {dow} {time_hhmm} - {safe_title}.md"
-    week_folder = _week_folder(local_started_at)
-    relative_path = f"Meetings/{week_folder}/{filename}"
+    base_filename = f"{local_started_at.day:02d} {dow} {time_hhmm} - {safe_title}"
+    
+    # Check for existing summaries to determine version
+    existing_summaries = await repository.get_summaries(primary_meeting_id)
+    version_suffix = ""
+    if len(existing_summaries) > 1:
+        version_suffix = f" (v{len(existing_summaries)})"
+    
+    filename = f"{base_filename}{version_suffix}.md"
+    week_folder_name = week_folder(local_started_at)
+    relative_path = f"Meetings/{week_folder_name}/{filename}"
 
-    recorded_at = _format_datetime_human(local_started_at, tz_label)
-    duration_str = _format_duration_human(int(audio_duration_seconds))
+    recorded_at = format_datetime_human(local_started_at, tz_label)
+    duration_str = format_duration_human(int(audio_duration_seconds))
 
     await _emit_progress(progress_callback, "writing", "Summary ready", 1.0, 1.0)
 
@@ -824,8 +769,8 @@ async def export_to_obsidian(
         bp.get("session_timezone_name"),
         bp.get("session_timezone_offset_minutes"),
     )
-    exported_at = _format_datetime_human(local_exported_at, bp["tz_label"])
-    markdown_content = _build_singlepass_markdown(
+    exported_at = format_datetime_human(local_exported_at, bp["tz_label"])
+    markdown_content = build_obsidian_markdown(
         content=bp["summary_content"],
         template_label=bp["template_label"],
         recorded_at=bp["recorded_at"],
@@ -941,11 +886,11 @@ async def save_export_job(job_id: str, request: SaveRequest):
         bp.get("session_timezone_name"),
         bp.get("session_timezone_offset_minutes"),
     )
-    exported_at = _format_datetime_human(local_exported_at, bp["tz_label"])
+    exported_at = format_datetime_human(local_exported_at, bp["tz_label"])
 
     summary = request.edited_summary.strip() if request.edited_summary and request.edited_summary.strip() else bp["summary_content"]
 
-    markdown_content = _build_singlepass_markdown(
+    markdown_content = build_obsidian_markdown(
         content=summary,
         template_label=bp["template_label"],
         recorded_at=bp["recorded_at"],
@@ -978,7 +923,7 @@ async def refine_export_job(
     request: RefineRequest,
     summarization_manager: SummarizationManager = Depends(get_summarization_manager),
 ):
-    """Apply a single AI revision pass to the current summary."""
+    """Apply a single AI revision pass to the current summary (active job)."""
     job = _EXPORT_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Export job not found")
@@ -994,6 +939,22 @@ async def refine_export_job(
         raise HTTPException(status_code=500, detail=f"Refinement failed: {str(e)}")
 
     return {"revised_summary": revised}
+
+
+@router.post("/summaries/refine")
+async def refine_summary(
+    request: RefineRequest,
+    summarization_manager: SummarizationManager = Depends(get_summarization_manager),
+):
+    """Apply a single AI revision pass to any provided summary text."""
+    try:
+        revised = await summarization_manager.refine_summary(
+            instruction=request.instruction,
+            current_summary=request.current_summary,
+        )
+        return {"revised_summary": revised}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Refinement failed: {str(e)}")
 
 
 @router.get("/transcription-jobs/{job_id}", response_model=TranscriptionJobStatus)

@@ -27,6 +27,7 @@ class Repository:
             await self._ensure_session_timezone_columns(conn)
             await self._ensure_session_transcription_column(conn)
             await self._ensure_transcript_speaker_column(conn)
+            await self._ensure_summary_duration_column(conn)
 
     async def close(self) -> None:
         """Close database connection."""
@@ -327,6 +328,7 @@ class Repository:
         model: str,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
+        processing_duration_seconds: float | None = None,
     ) -> Summary:
         """Add a summary for a meeting."""
         async with self._session_factory() as db:
@@ -337,6 +339,7 @@ class Repository:
                 model=model,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                processing_duration_seconds=processing_duration_seconds,
             )
             db.add(summary)
             await db.commit()
@@ -439,6 +442,13 @@ class Repository:
         column_names = {row[1] for row in result.fetchall()}
         if "speaker" not in column_names:
             await conn.execute(text("ALTER TABLE transcript_segments ADD COLUMN speaker VARCHAR(64)"))
+
+    async def _ensure_summary_duration_column(self, conn) -> None:
+        """Backfill schema for processing duration on existing SQLite DBs."""
+        result = await conn.execute(text("PRAGMA table_info(summaries)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "processing_duration_seconds" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN processing_duration_seconds FLOAT"))
 
     # Structured item operations
     async def add_structured_item(

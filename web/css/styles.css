@@ -949,10 +949,9 @@ textarea.form-input {
 }
 
 .summary-body,
-.summary-view {
-    min-height: 200px;
-    max-height: 50vh;
-    overflow-y: auto;
+.summary-view,
+.summary-edit-textarea {
+    min-height: 300px;
     background: var(--bg);
     border: 1px solid var(--border);
     padding: 20px 24px;
@@ -969,11 +968,11 @@ textarea.form-input {
 .summary-view h2,
 .summary-view h3 {
     font-size: 13px;
-    font-weight: 400;
-    letter-spacing: 0.12em;
+    font-weight: 500;
+    letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: var(--text);
-    margin: 20px 0 8px;
+    color: var(--accent);
+    margin: 20px 0 10px;
     padding-bottom: 6px;
     border-bottom: 1px solid var(--border);
 }
@@ -1009,7 +1008,7 @@ textarea.form-input {
 .summary-view table {
     width: 100%;
     border-collapse: collapse;
-    margin: 0 0 12px;
+    margin: 10px 0 12px;
     font-size: 12px;
 }
 
@@ -1027,7 +1026,7 @@ textarea.form-input {
 .summary-view th {
     background: var(--bg-elevated);
     color: var(--text-dim);
-    font-weight: 400;
+    font-weight: 500;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     font-size: 10px;
@@ -1042,30 +1041,37 @@ textarea.form-input {
     border: 1px solid var(--border);
 }
 
+.view-actions-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.refine-actions-left {
+    display: flex;
+    gap: 8px;
+}
+
+.refine-actions-right {
+    margin-left: auto;
+}
+
 .summary-edit-textarea {
     width: 100%;
-    min-height: 200px;
-    max-height: 50vh;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
     font-family: inherit;
-    font-size: 12px;
-    line-height: 1.6;
-    padding: 20px 24px;
     resize: none;
-    overflow-y: auto;
+    outline: none;
 }
 
 .summary-edit-textarea:focus {
-    outline: none;
     border-color: var(--accent);
 }
 
 .refine-input-row {
     display: flex;
-    gap: 8px;
-    margin-top: 12px;
+    gap: 12px;
+    margin-top: 16px;
 }
 
 .refine-input {
@@ -1087,11 +1093,40 @@ textarea.form-input {
     color: var(--text-muted);
 }
 
-.summary-meta {
+.summary-meta,
+.summary-metadata {
     font-size: 11px;
     letter-spacing: 0.08em;
     color: var(--text-muted);
     margin-bottom: 12px;
+    display: flex;
+    gap: 16px;
+    text-transform: uppercase;
+}
+
+.summary-meeting-label {
+    color: var(--accent);
+    font-weight: 500;
+}
+
+.refine-container {
+    padding: 16px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+}
+
+.refine-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#view-refine-input,
+#review-refine-input {
+    min-height: 60px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    line-height: 1.5;
 }
 
 .review-footer-left {

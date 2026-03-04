@@ -42,7 +42,28 @@
                 </div>
                 <div class="form-group hidden" id="view-summary-group">
                     <label class="form-label">Summary</label>
-                    <div class="summary-view" id="view-summary"></div>
+                    <div class="summary-metadata" id="view-summary-meta">
+                        <span id="view-exported-at"></span>
+                        <span id="view-processing-time"></span>
+                    </div>
+                    <div class="summary-view" id="view-summary-display"></div>
+                    <textarea id="view-summary-edit" class="summary-edit-textarea hidden"></textarea>
+                    
+                    <div class="refine-container mt-16" id="view-refine-section">
+                        <textarea id="view-refine-input" class="form-input" placeholder="Ask AI to revise (e.g., 'make it more technical', 'add a section for budget')"></textarea>
+                        <div class="refine-actions mt-8">
+                            <div class="refine-actions-left">
+                                <button class="btn btn-small hidden" id="view-undo-btn">Undo</button>
+                            </div>
+                            <div class="refine-actions-right">
+                                <button class="btn" id="view-refine-btn">Ask AI to Revise</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="view-actions-row mt-16">
+                        <button class="btn" id="view-edit-btn">Edit Manually</button>
+                        <button class="btn btn-primary hidden" id="view-save-obsidian-btn">Save to Obsidian</button>
+                    </div>
                 </div>
                 <div class="form-group">
                     <label class="form-label">Downloads</label>
