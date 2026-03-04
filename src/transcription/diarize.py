@@ -61,7 +61,7 @@ def _load_waveform(audio_path: str, duration_limit: float | None = None) -> dict
 
 def diarize(audio_path: str, hf_token: str, duration_limit: float | None = None) -> list[tuple[float, float, str]]:
     """Return (start_sec, end_sec, speaker_label) for every speaker turn.
-    
+
     Args:
         audio_path: Path to audio file
         hf_token: HuggingFace token
@@ -70,7 +70,18 @@ def diarize(audio_path: str, hf_token: str, duration_limit: float | None = None)
     pipeline = _load_pipeline(hf_token)
     audio = _load_waveform(audio_path, duration_limit=duration_limit)
     result = pipeline(audio)
-    return [(seg.start, seg.end, spk) for seg, _, spk in result.exclusive_speaker_diarization.itertracks(yield_label=True)]
+    spans = [(seg.start, seg.end, spk) for seg, _, spk in result.exclusive_speaker_diarization.itertracks(yield_label=True)]
+
+    # Log diarization results for debugging speaker mapping issues
+    from collections import Counter
+    counts = Counter(spk for _, _, spk in spans)
+    logger.info(
+        "diarize: %d spans, %d unique speakers: %s",
+        len(spans),
+        len(counts),
+        ", ".join(f"{spk}={n}" for spk, n in sorted(counts.items())),
+    )
+    return spans
 
 
 def assign_speaker(start: float, end: float, spans: list[tuple[float, float, str]]) -> str | None:

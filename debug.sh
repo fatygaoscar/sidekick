@@ -21,6 +21,7 @@ Examples:
   ./debug.sh logs "pipeline\|extraction"       # tail with grep filter
   ./debug.sh pipeline                           # tail [step] timing lines only
   ./debug.sh pipeline "summarize"              # filter pipeline steps by name
+  ./debug.sh speakers                           # tail diarization + speaker mapping logs
   ./debug.sh benchmark --runs 2                 # Ollama microbenchmark
   ./debug.sh benchmark-summary                  # full pipeline, latest recording
   ./debug.sh benchmark-summary --models qwen3.5:4b,qwen3.5:9b --contexts 16384,32768
@@ -145,6 +146,16 @@ cmd_benchmark() {
   "$(_venv_python)" ./scripts/benchmark_ollama_models.py "$@"
 }
 
+cmd_speakers() {
+  if [[ ! -f "data/sidekick.log" ]]; then
+    echo "No log file at data/sidekick.log"; exit 1
+  fi
+  printf "\033[2mWatching diarization + speaker mapping logs... (Ctrl+C to stop)\033[0m\n\n"
+  tail -f "data/sidekick.log" \
+    | grep --line-buffered -iE "diariz|speaker_prepass|speaker_map|resolve_speaker|cohesive: speaker" \
+    | sed 's/^[A-Z]*:[^:]*:[^:]*: *//'
+}
+
 cmd_benchmark_summary() {
   "$(_venv_python)" ./scripts/benchmark_summary.py "$@"
 }
@@ -173,6 +184,7 @@ case "$cmd" in
   ollama)             cmd_ollama "$@" ;;
   logs)               cmd_logs "$@" ;;
   pipeline)           cmd_pipeline "$@" ;;
+  speakers)           cmd_speakers "$@" ;;
   benchmark)          cmd_benchmark "$@" ;;
   benchmark-summary)  cmd_benchmark_summary "$@" ;;
   *) echo "Unknown command: $cmd"; usage; exit 1 ;;

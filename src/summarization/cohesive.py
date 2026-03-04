@@ -279,16 +279,26 @@ async def _resolve_speaker_map(
         f"Transcript sample:\n{sample}"
     )
 
+    logger.info(
+        "speaker_prepass: labels=%s attendees=%r sample_chars=%d name_lines=%d",
+        labels, attendees.strip(), len(sample), len(name_lines),
+    )
     try:
         raw = await llm_call(system, user)
+        logger.info("speaker_prepass: raw_response=%r", raw[:600] if raw else "")
         # Extract JSON object from response
         match = re.search(r"\{[^{}]+\}", raw, re.DOTALL)
         if not match:
+            logger.warning("speaker_prepass: no JSON found in response — returning {}")
             return {}
         import json
         mapping = json.loads(match.group())
-        return {k: v for k, v in mapping.items() if isinstance(v, str) and v.strip()}
-    except Exception:
+        resolved = {k: v for k, v in mapping.items() if isinstance(v, str) and v.strip()}
+        nulled = [k for k, v in mapping.items() if v is None]
+        logger.info("speaker_prepass: resolved=%s nulled=%s", resolved, nulled)
+        return resolved
+    except Exception as exc:
+        logger.warning("speaker_prepass: exception=%s — returning {}", exc)
         return {}
 
 
