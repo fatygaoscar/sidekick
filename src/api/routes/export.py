@@ -467,7 +467,6 @@ async def _run_export_pipeline(
       audio file -> transcription -> transcript segments -> summary -> markdown components
     """
     settings = get_settings()
-    pipeline_start = datetime.now(timezone.utc)
 
     await _emit_progress(progress_callback, "transcribing", "Preparing recording", 0.03, 0.0)
 
@@ -589,8 +588,7 @@ async def _run_export_pipeline(
     )
 
     summary_content = summary_result.content
-    total_pipeline_duration = (datetime.now(timezone.utc) - pipeline_start).total_seconds()
-    processing_time_str = format_processing_time(total_pipeline_duration)
+    processing_time_str = format_processing_time(summarization_duration)
 
     # Build filename and folder
     local_started_at = localize_datetime(
