@@ -83,6 +83,7 @@ class ExportJobStatus(BaseModel):
     transcription_progress: float
     summarization_progress: float
     overall_progress: float
+    title: Optional[str] = None
     result: Optional[ExportResponse] = None
     error: Optional[str] = None
     created_at: str
@@ -890,6 +891,7 @@ async def export_to_obsidian_job(
 
     job = _create_export_job(session_id)
     job_id = str(job["job_id"])
+    job["title"] = request.title
     _update_export_job(job_id, message="Starting export")
 
     task = asyncio.create_task(
