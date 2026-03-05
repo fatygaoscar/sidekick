@@ -118,7 +118,14 @@ class AudioWebSocketHandler:
             if command == "start_session":
                 mode = data.get("mode", "work")
                 submode = data.get("submode")
-                await self._session_manager.start_session(mode=mode, submode=submode)
+                timezone_name = data.get("timezone_name")
+                timezone_offset_minutes = data.get("timezone_offset_minutes")
+                await self._session_manager.start_session(
+                    mode=mode,
+                    submode=submode,
+                    timezone_name=timezone_name,
+                    timezone_offset_minutes=timezone_offset_minutes,
+                )
                 await self._send_state()
 
             elif command == "end_session":

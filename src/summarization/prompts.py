@@ -1,178 +1,242 @@
 """Prompt templates for summarization."""
 
-SYSTEM_PROMPT = """You are an expert meeting summarizer. Your task is to create clear, actionable summaries from meeting transcripts.
+SYSTEM_PROMPT = """You are an expert meeting summarizer optimized for Obsidian markdown. Your task is to create clear, highly scannable, and well-structured summaries.
 
-Guidelines:
-- Focus on key decisions, action items, and important discussions
-- Use bullet points for clarity
-- Highlight any deadlines or assignments mentioned
-- Keep the summary concise but comprehensive
-- Pay special attention to sections marked as [IMPORTANT START]...[IMPORTANT END]
-- If the transcript contains important markers, ensure those topics are prominently featured"""
+Formatting Guidelines for Obsidian:
+- **Prioritize Bullet Points:** Avoid long paragraphs. Break down discussions into concise bullet points using `-`.
+- **Indentation & Hierarchy:** Use nested bullet points (indented by 2 spaces) to show supporting details or sub-topics.
+- **Spacing:** ALWAYS include a blank line between a header and the content below it. Include a blank line between different topics or sections.
+- **Tables:** Use standard Markdown tables for Action Items and structured data.
+- **Typography:** Use bolding for emphasis on key terms, names, or decisions within bullets.
+- **Cleanliness:** Correct transcription errors, omit filler, and ensure proper capitalization.
+- **Factual Accuracy:** Focus on decisions, action items, and specific details (dates, numbers, names).
+- **Markers:** Pay special attention to sections marked [IMPORTANT START]...[IMPORTANT END]."""
 
-USER_PROMPT_TEMPLATE = """Please summarize the following meeting transcript. Pay special attention to any sections marked with [IMPORTANT START] and [IMPORTANT END] tags - these indicate topics that were flagged as particularly important during the meeting.
+USER_PROMPT_TEMPLATE = """Please summarize the following meeting transcript. Use clear Obsidian-friendly markdown with plenty of bullet points and proper spacing.
 
 TRANSCRIPT:
 {transcript}
 
 Please provide:
-1. **Executive Summary** (2-3 sentences)
-2. **Key Discussion Points** (bullet points)
-3. **Decisions Made** (if any)
-4. **Action Items** (with assignees if mentioned)
-5. **Important Highlights** (from marked sections)
-6. **Next Steps** (if discussed)"""
+1. **Executive Summary**: 2-3 concise sentences.
+2. **Key Discussion Points**: Use nested bullet points to capture topics and details.
+3. **Decisions Made**: A clear list of what was decided.
+4. **Action Items**: A markdown table with columns | Owner | Action | Due |.
+5. **Important Highlights**: Featured points from any [IMPORTANT] marked sections.
+6. **Next Steps**: Immediate follow-ups."""
 
-QUICK_SUMMARY_TEMPLATE = """Summarize this meeting transcript in 3-5 bullet points, focusing on the most important outcomes:
+QUICK_SUMMARY_TEMPLATE = """Summarize this meeting transcript in 5-8 concise bullet points. Use nested bullets for supporting details. Use '-' for all bullets.
 
 {transcript}"""
 
-ACTION_ITEMS_TEMPLATE = """Extract all action items and tasks from this meeting transcript. For each item, identify:
-- The task description
-- Who is responsible (if mentioned)
-- Any deadline (if mentioned)
+ACTION_ITEMS_TEMPLATE = """Extract all action items into a clean markdown table with columns | Owner | Action | Due |. If owner or due date is unknown, use "TBD" or leave blank.
 
 TRANSCRIPT:
 {transcript}"""
 
-DECISION_LOG_TEMPLATE = """Extract all decisions made during this meeting. For each decision, note:
-- What was decided
-- The context/reasoning (if discussed)
-- Any conditions or caveats
+DECISION_LOG_TEMPLATE = """Extract all decisions made during this meeting. Format as a bulleted list where each decision is followed by a brief nested bullet explaining the rationale.
 
 TRANSCRIPT:
 {transcript}"""
 
 # New structured templates for Obsidian export
 
-MEETING_TEMPLATE = """Create a comprehensive meeting summary following this structure:
+ONE_ON_ONE_TEMPLATE = """Create 1-on-1 meeting notes optimized for Obsidian.
 
-## Meeting Overview
-Brief 2-3 sentence summary of the meeting's purpose and outcome.
+## Summary
+- 2-3 sentences: who met and the main themes.
 
-## Attendees
-List participants if mentioned, otherwise note "Not specified"
+## Highlights & Recognition
+- Use bullet points for positive feedback, achievements, and wins mentioned.
 
-## Agenda/Topics Discussed
-- Topic 1
-- Topic 2
-...
+## Feedback & Challenges
+- Use bullet points for constructive feedback, concerns, or growth areas.
 
-## Key Decisions
-- Decision 1: [description] - Rationale: [if mentioned]
-- Decision 2: ...
+## Goals & Development
+- Use bullet points for career goals and development plans.
+
+## Action Items
+| Owner | Action | Due |
+|-------|--------|-----|
+Every concrete next step.
+
+If a section has nothing to note, write "None discussed."
+Use actual names. Use nested bullets for detail."""
+
+STANDUP_TEMPLATE = """Create a concise standup summary.
+
+## Updates
+For each person:
+- **[Name]**
+  - **Done:** Bulleted list of completions.
+  - **Doing:** Bulleted list of current work.
+  - **Blocked:** Any impediments (omit if none).
+
+## Team Blockers
+- List any issues needing coordination.
+
+## Action Items
+| Owner | Action |
+|-------|--------|
+Follow-ups and immediate needs.
+
+Keep it very brief and scannable."""
+
+STRATEGIC_REVIEW_TEMPLATE = """Create a strategic meeting summary for Obsidian. Include ONLY relevant sections.
+
+## Meeting Context
+- Brief overview of participants and primary outcomes.
+
+## Report/Dashboard Review
+- Key metrics and trends discussed (use bullets).
+
+## Feedback & Discussion
+- Stakeholder feedback (attribute by name).
+- Use nested bullets for specific suggestions/concerns.
+
+## Decisions Made
+- **[Decision Title]**: Brief description.
+  - **Rationale**: Why it was decided.
+  - **Owner**: Who is responsible.
+
+## Strategy & Direction Changes
+- Bulleted list of shifts in approach and their impact.
+
+## Timeline & Milestones
+| Milestone | Date | Owner | Notes |
+|-----------|------|-------|-------|
 
 ## Action Items
 | Task | Owner | Due Date |
 |------|-------|----------|
-| ... | ... | ... |
-
-## Follow-up Items
-Items requiring future discussion or pending resolution.
-
-## Additional Notes
-Any other relevant information.
-
----
-TRANSCRIPT:
-{transcript}"""
-
-BRAINSTORM_TEMPLATE = """Create a brainstorming session summary following this structure:
-
-## Session Focus
-What problem or topic was being explored?
-
-## Ideas Generated
-List all ideas mentioned, grouped by theme if applicable:
-
-### Theme 1
-- Idea 1
-- Idea 2
-
-### Theme 2
-- Idea 3
-- Idea 4
-
-## Promising Directions
-Which ideas showed the most potential or received the most discussion?
-
-## Concerns/Constraints
-Any limitations, risks, or concerns raised about the ideas.
 
 ## Next Steps
-What was decided for further exploration?
+- What happens next and when to reconvene.
 
-## Raw Ideas
-Unfiltered list of all concepts mentioned.
-
----
 TRANSCRIPT:
 {transcript}"""
 
-INTERVIEW_TEMPLATE = """Create an interview summary following this structure:
+WORKING_SESSION_TEMPLATE = """Create a technical working session summary for Obsidian. Preserve detail using nested bullets.
+
+## Session Focus
+- What problem or system was being worked on?
+
+## Work Completed
+- Detailed list of what was built, fixed, or changed.
+- Use sub-bullets for technical specifics (fields, logic, etc.).
+
+## Technical Decisions
+- **Decision Title**
+  - **What**: The decision.
+  - **Why**: Reasoning/trade-offs.
+  - **Alternatives**: Why other options were rejected.
+
+## Data Model & Logic
+- Schema changes, SQL notes, or architectural shifts.
+
+## Issues Discovered
+- What project or report it concerns, problems found, root causes, and proposed fixes.
+
+## Outstanding Questions
+| Question | Context | Owner | Urgency |
+|----------|---------|-------|---------|
+
+## Next Session Agenda
+- Carry-over items and next priorities.
+
+TRANSCRIPT:
+{transcript}"""
+
+MEETING_TEMPLATE = """Create structured meeting notes for Obsidian. Use nested bullets for discussion points.
+
+## Summary
+- 2-3 sentences on purpose and outcome.
+
+## Key Decisions
+- List of decisions. Use nested bullets for context. Write "None" if none.
+
+## Action Items
+| Owner | Action | Due |
+|-------|--------|-----|
+Use actual names. If owner not named, use "TBD".
+
+## Discussion Notes
+Group by topic using ### headers.
+### [Topic Name]
+- Key points and positions.
+- Use nested bullets for supporting details or sub-topics.
+- Be specific about who said what.
+
+Guidelines: Avoid paragraphs; use bullets. Use actual names. Include dates and numbers.
+
+TRANSCRIPT:
+{transcript}"""
+
+BRAINSTORM_TEMPLATE = """Create a brainstorming session summary for Obsidian.
+
+## Session Focus
+- Goal of the exploration.
+
+## Ideas Generated
+Grouped by theme:
+### [Theme]
+- Idea 1
+  - Detail/Variant A
+  - Detail/Variant B
+- Idea 2
+
+## Promising Directions
+- Ideas with the most potential or consensus.
+
+## Next Steps
+- Decision for further exploration.
+
+TRANSCRIPT:
+{transcript}"""
+
+INTERVIEW_TEMPLATE = """Create an interview summary for Obsidian.
 
 ## Interview Overview
-Who was interviewed and for what purpose?
+- Purpose and participants.
 
 ## Key Questions & Answers
+- **[Question]**
+  - **A**: [Summary of answer]
+  - Use sub-bullets for specific examples or details provided.
 
-### Q1: [Question]
-**A:** [Summary of answer]
-
-### Q2: [Question]
-**A:** [Summary of answer]
-
-(Continue for all significant Q&A exchanges)
-
-## Candidate/Interviewee Assessment
-Key strengths and areas of concern observed.
+## Candidate Assessment
+- **Strengths**: Bulleted list.
+- **Concerns**: Bulleted list.
 
 ## Notable Quotes
-Direct quotes that were particularly insightful or relevant.
+- "> [Direct quote]"
 
-## Follow-up Questions
-Questions that should be explored in future conversations.
+## Next Steps
+- Recommended follow-up actions.
 
-## Recommendation/Conclusion
-Overall assessment or next steps.
-
----
 TRANSCRIPT:
 {transcript}"""
 
-LECTURE_TEMPLATE = """Create lecture/presentation notes following this structure:
+LECTURE_TEMPLATE = """Create structured lecture/presentation notes for Obsidian.
 
 ## Topic
-Main subject of the lecture/presentation.
+- Main subject.
 
 ## Key Concepts
-
-### Concept 1
-- Definition/explanation
-- Key points
-
-### Concept 2
-- Definition/explanation
-- Key points
+### [Concept Name]
+- Definition and explanation.
+- Key points and sub-details (indented).
 
 ## Important Terms
 | Term | Definition |
 |------|------------|
-| ... | ... |
-
-## Examples/Case Studies
-Examples used to illustrate concepts.
 
 ## Key Takeaways
-The most important points to remember.
+- Most important points to remember.
 
-## Questions Raised
-Questions asked during the session or topics for further study.
+## Questions & Further Study
+- Unanswered questions or topics for exploration.
 
-## Study Notes
-Additional context helpful for understanding the material.
-
----
 TRANSCRIPT:
 {transcript}"""
 
@@ -183,6 +247,33 @@ TRANSCRIPT:
 
 USER INSTRUCTIONS:
 {custom_prompt}"""
+
+# Default prompt shown in the UI when "Custom" template is selected
+CUSTOM_DEFAULT_PROMPT = """Review the transcript and extract only the parts that are relevant to [insert audience or artifact here, e.g. "Account Manager dashboard", "Leadership report", "Product X rollout", "Incentive design"].
+
+Ignore casual conversation, side topics, and implementation details unless they directly affect the design, scope, audience, timing, or guardrails.
+
+For the relevant sections, produce:
+
+Where the topic is discussed (what moments in the conversation matter, summarized concisely — not verbatim quotes unless critical)
+
+Explicit decisions and implied direction (what was decided, even if not stated formally)
+
+Non-negotiable constraints / guardrails
+
+Audience definition and access expectations
+
+Timeline and sequencing expectations
+
+Then synthesize that into:
+
+A clear, forward-looking summary of what the team wants to build or deliver
+
+Written as if it will be handed to someone who was not in the meeting
+
+Do not restate the transcript.
+Do not speculate beyond what the conversation supports.
+Optimize for clarity, alignment, and reusability."""
 
 
 def get_prompt(
@@ -207,6 +298,10 @@ def get_prompt(
         "quick": QUICK_SUMMARY_TEMPLATE,
         "action_items": ACTION_ITEMS_TEMPLATE,
         "decisions": DECISION_LOG_TEMPLATE,
+        "one_on_one": ONE_ON_ONE_TEMPLATE,
+        "standup": STANDUP_TEMPLATE,
+        "strategic_review": STRATEGIC_REVIEW_TEMPLATE,
+        "working_session": WORKING_SESSION_TEMPLATE,
         "meeting": MEETING_TEMPLATE,
         "brainstorm": BRAINSTORM_TEMPLATE,
         "interview": INTERVIEW_TEMPLATE,
@@ -229,23 +324,46 @@ def get_prompt(
 # Template metadata for frontend display
 TEMPLATE_INFO = {
     "meeting": {
-        "name": "Meeting",
-        "description": "Structured meeting notes with decisions and action items",
+        "name": "General Meeting",
+        "description": "Standard meeting notes with decisions and action items",
     },
-    "brainstorm": {
-        "name": "Brainstorm",
-        "description": "Capture ideas, themes, and promising directions",
+    "one_on_one": {
+        "name": "1-on-1",
+        "description": "Personal meetings - feedback, goals, development",
     },
-    "interview": {
-        "name": "Interview",
-        "description": "Q&A format with assessment and key quotes",
+    "standup": {
+        "name": "Standup",
+        "description": "Brief status updates - done, doing, blocked",
     },
-    "lecture": {
-        "name": "Lecture",
-        "description": "Study notes with key concepts and terms",
+    "working_session": {
+        "name": "Working Session",
+        "description": "Technical work - high detail, decisions, open questions",
     },
     "custom": {
         "name": "Custom",
-        "description": "Provide your own summarization instructions",
+        "description": "Targeted extraction for a specific audience or artifact",
     },
 }
+
+
+def get_template_content(template_key: str) -> str:
+    """Get the raw template content for display/editing in the UI."""
+    templates = {
+        "meeting": MEETING_TEMPLATE,
+        "one_on_one": ONE_ON_ONE_TEMPLATE,
+        "standup": STANDUP_TEMPLATE,
+        "working_session": WORKING_SESSION_TEMPLATE,
+        "custom": CUSTOM_DEFAULT_PROMPT,
+        # Legacy templates kept for backward compatibility with existing recordings
+        "strategic_review": STRATEGIC_REVIEW_TEMPLATE,
+        "brainstorm": BRAINSTORM_TEMPLATE,
+        "interview": INTERVIEW_TEMPLATE,
+        "lecture": LECTURE_TEMPLATE,
+    }
+    content = templates.get(template_key, "")
+    # Remove the transcript placeholder section for display (legacy templates only)
+    if content:
+        parts = content.split("---\nTRANSCRIPT:")
+        if len(parts) > 1:
+            content = parts[0].strip()
+    return content

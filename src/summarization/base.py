@@ -1,7 +1,7 @@
 """Abstract base interface for summarization backends."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -13,6 +13,7 @@ class SummarizationResult:
     model: str
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    speaker_map: dict[str, str] = field(default_factory=dict)
 
 
 class SummarizationBackend(ABC):
@@ -52,6 +53,7 @@ class SummarizationBackend(ABC):
         transcript: str,
         system_prompt: str | None = None,
         user_prompt: str | None = None,
+        num_ctx: int | None = None,
     ) -> SummarizationResult:
         """
         Generate a summary from transcript.
@@ -60,6 +62,7 @@ class SummarizationBackend(ABC):
             transcript: The transcript text to summarize
             system_prompt: Optional system prompt override
             user_prompt: Optional user prompt template (use {transcript} placeholder)
+            num_ctx: Optional context length override
 
         Returns:
             SummarizationResult with summary and metadata

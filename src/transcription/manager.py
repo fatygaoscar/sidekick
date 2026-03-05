@@ -1,6 +1,7 @@
 """Transcription engine manager for switching between backends."""
 
 from pathlib import Path
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -10,6 +11,9 @@ from src.core.events import EventType, get_event_bus
 from .base import TranscriptionEngine, TranscriptionResult
 from .whisper_api import WhisperAPIEngine
 from .whisper_local import WhisperLocalEngine
+
+# Progress callback type: (progress: float, message: str) -> None
+ProgressCallback = Callable[[float, str], None]
 
 
 class TranscriptionManager:
@@ -96,6 +100,7 @@ class TranscriptionManager:
         sample_rate: int = 16000,
         language: str | None = None,
         start_offset: float = 0.0,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> TranscriptionResult:
         """
         Transcribe audio using the active engine.
@@ -105,6 +110,7 @@ class TranscriptionManager:
             sample_rate: Audio sample rate
             language: Language code or None for auto-detect
             start_offset: Time offset for the audio chunk (seconds)
+            progress_callback: Optional callback for progress updates
 
         Returns:
             TranscriptionResult with adjusted timestamps
@@ -112,18 +118,26 @@ class TranscriptionManager:
         if not self._initialized or self._active_engine is None:
             await self.initialize()
 
+        audio_duration = len(audio) / sample_rate
+
         # Emit start event
         await self._event_bus.emit(
             EventType.TRANSCRIPTION_STARTED,
             {
                 "engine": self._active_engine.name,
-                "audio_duration": len(audio) / sample_rate,
+                "audio_duration": audio_duration,
             },
             source="transcription_manager",
         )
 
         try:
-            result = await self._active_engine.transcribe(audio, sample_rate, language)
+            result = await self._active_engine.transcribe(
+                audio,
+                sample_rate,
+                language,
+                progress_callback=progress_callback,
+                audio_duration=audio_duration,
+            )
 
             # Adjust timestamps by offset
             adjusted_result = TranscriptionResult(
@@ -168,9 +182,16 @@ class TranscriptionManager:
         file_path: str | Path,
         language: str | None = None,
         start_offset: float = 0.0,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> tuple[TranscriptionResult, float]:
         """
         Transcribe an audio file from disk.
+
+        Args:
+            file_path: Path to audio file
+            language: Language code or None for auto-detect
+            start_offset: Time offset (seconds)
+            progress_callback: Optional callback for progress updates
 
         Returns:
             Tuple of (TranscriptionResult, duration_seconds)
@@ -185,6 +206,7 @@ class TranscriptionManager:
             sample_rate=16000,
             language=language,
             start_offset=start_offset,
+            progress_callback=progress_callback,
         )
         return result, duration_seconds
 

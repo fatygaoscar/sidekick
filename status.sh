@@ -11,6 +11,9 @@ NC='\033[0m'
 PID_FILE="data/sidekick.pid"
 NGROK_PID_FILE="data/ngrok.pid"
 NGROK_URL_FILE="data/ngrok.url"
+CLOUDFLARE_PID_FILE="data/cloudflare.pid"
+CLOUDFLARE_URL_FILE="data/cloudflare.url"
+CLOUDFLARE_LOG_FILE="data/cloudflare.log"
 PORT="${PORT:-8000}"
 HEALTH_URL="http://127.0.0.1:${PORT}/health"
 NGROK_API_PORT="${NGROK_API_PORT:-4040}"
@@ -52,6 +55,10 @@ for t in data.get("tunnels", []):
         print(u)
         raise SystemExit(0)
 print("")' || true
+}
+
+read_cloudflare_public_url() {
+    grep -Eo 'https://[[:alnum:].-]+\.trycloudflare\.com' "$CLOUDFLARE_LOG_FILE" 2>/dev/null | tail -n 1 || true
 }
 
 # Sidekick status
@@ -102,4 +109,24 @@ if [ -f "$NGROK_PID_FILE" ]; then
     fi
 else
     echo -e "${YELLOW}ngrok status: stopped${NC}"
+fi
+
+# Cloudflare tunnel status
+if [ -f "$CLOUDFLARE_PID_FILE" ]; then
+    CLOUDFLARE_PID="$(cat "$CLOUDFLARE_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$CLOUDFLARE_PID" ] && is_running "$CLOUDFLARE_PID"; then
+        CLOUDFLARE_URL="$(cat "$CLOUDFLARE_URL_FILE" 2>/dev/null || true)"
+        if [ -z "$CLOUDFLARE_URL" ]; then
+            CLOUDFLARE_URL="$(read_cloudflare_public_url)"
+            [ -n "$CLOUDFLARE_URL" ] && echo "$CLOUDFLARE_URL" > "$CLOUDFLARE_URL_FILE"
+        fi
+        echo -e "${GREEN}cloudflare status: running${NC}"
+        echo "PID: ${CLOUDFLARE_PID}"
+        [ -n "$CLOUDFLARE_URL" ] && echo "Public URL: ${CLOUDFLARE_URL}"
+    else
+        echo -e "${YELLOW}cloudflare status: stale PID file${NC}"
+        rm -f "$CLOUDFLARE_PID_FILE" "$CLOUDFLARE_URL_FILE"
+    fi
+else
+    echo -e "${YELLOW}cloudflare status: stopped${NC}"
 fi

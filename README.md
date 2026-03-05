@@ -1,81 +1,350 @@
-# Sidekick - Personal Audio Transcription Assistant
+# Sidekick
 
-A Python-based web application that provides real-time audio transcription with mode-based behavior, meeting controls, and AI-powered summarization.
+Browser-based meeting recorder that transcribes audio, identifies speakers, and exports structured notes to Obsidian — entirely local.
 
 ## Features
 
-- **Real-time audio transcription** from microphone via browser
-- **Mode system** - Work mode with Meeting sub-mode
-- **Meeting controls** - Key Start/Key Stop buttons to delineate meeting time
-- **Important marker** - Button to flag discussions for emphasis in summaries
-- **AI summarization** - Configurable backends (local Ollama or cloud APIs)
-
-## Tech Stack
-
-- **Backend**: Python + FastAPI (async WebSocket support)
-- **Frontend**: HTML/CSS/JS (vanilla JS with WebSocket)
-- **Transcription**: faster-whisper (local default) / OpenAI Whisper API (cloud option)
-- **Summarization**: Ollama (local) / OpenAI / Claude (configurable)
-- **Database**: SQLite with SQLAlchemy async
+- **High-fidelity audio** — captures and plays back at 48kHz (DVD quality) while downsampling to 16kHz for AI
+- **Local transcription** via faster-whisper large-v3 (CUDA)
+- **Speaker diarization** via pyannote.audio 3.1 — speech-aware optimization skips silent ends
+- **Speaker name resolution** — provide attendee names and the LLM maps labels to real people before summarizing
+- **Eager background processing** — transcription starts in the background as soon as recording stops, so export skips Whisper when you click Process
+- **Inline rename** — hover a recording card and click the pencil icon to rename without opening the view modal
+- **History Summary View** — view and refine processed summaries directly in the recordings history
+- **Unified Review/View** — functionally identical modals for new and past recordings (Refine, Edit, Undo)
+- **Obsidian-Optimized Formatting** — summaries use nested bullet points and clean spacing for maximum scannability
+- **Smart Versioning** — Obsidian exports append `(v2)`, `(v3)`, etc., to prevent overwriting existing notes
+- **Performance Optimizations** — dynamic context sizing and single-pass early exit for ultra-fast short meeting processing
+- **Structured templates** — meeting notes, 1-on-1, standup, working session, custom
+- **Editable prompts** — customize any template before export
+- **Real-time progress** — live percent tracking through transcription and summarization
+- **Obsidian export** — writes a dated `.md` file and opens it with `obsidian://`
+- **Phone access** — ngrok or Cloudflare tunnel support
 
 ## Quick Start
 
 ```bash
-# Start managed background server (creates venv and installs deps if needed)
-./start.sh
-
-# Start with ngrok public URL for phone testing
-./start.sh --ngrok
-
-# Check status
-./status.sh
-
-# Stop server
-./stop.sh
+./start.sh                # Start in background
+./start.sh --ngrok        # Start + ngrok public URL
+./start.sh --cloudflare   # Start + Cloudflare quick tunnel
+./restart.sh              # Restart cleanly
+./status.sh               # Check status + public URL
+./stop.sh                 # Stop server
+./debug.sh                # Unified debug helper
 ```
 
-Then open http://localhost:8000 in your browser.
+Then open `http://localhost:8000`.
 
-Manual run is still available:
+## Architecture
 
-```bash
-source venv/bin/activate
-python -m src.main
+### Two Transcription Pipelines
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ LIVE PREVIEW PIPELINE (optional UX only)                    │
+│                                                             │
+│  Microphone → WebSocket chunks → Live preview text         │
+│  src/api/routes/websocket.py                               │
+│  Not source of truth. Not used in export.                  │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│ EXPORT PIPELINE (authoritative)                             │
+│                                                             │
+│  Saved audio file → Whisper → Diarization →                │
+│  Speaker map → Two-pass summary → Obsidian .md             │
+│  src/api/routes/export.py                                   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-Managed ngrok artifacts:
-- `data/ngrok.pid`
-- `data/ngrok.log`
-- `data/ngrok.url`
+### Export Pipeline — Full Flow
+
+```
+Browser
+  │
+  ├─[during recording]──► WebSocket stream ──► Live preview text (not authoritative)
+  │
+  └─[stop recording]────► Audio saved: data/audio/{session_id}.webm
+                                │
+                     POST /api/recordings/{id}/export-obsidian-job
+                     {title, template, attendees, custom_prompt}
+                                │
+                    ┌───────────▼────────────┐
+                    │   HAS TRANSCRIPT?      │
+                    └───────┬────────┬───────┘
+                         YES│        │NO
+                            │        ▼
+                            │   faster-whisper large-v3 (CUDA)
+                            │   Word-level timestamps → segments → DB
+                            │        │
+                    ┌───────▼────────▼───────┐
+                    │  DIARIZATION ENABLED?  │
+                    │  (DIARIZATION_ENABLED) │
+                    └───────────┬────────────┘
+                             YES│  (skipped if speakers already in DB)
+                                ▼
+                    pyannote/speaker-diarization-3.1
+                    Audio loaded via PyAV (bundled FFmpeg)
+                    → (start, end, SPEAKER_XX) spans
+                    → assign_speaker() aligns to transcript segments
+                    → Saved to DB (TranscriptSegment.speaker)
+                                │
+                    ┌───────────▼────────────────────────────────┐
+                    │  Build transcript string                    │
+                    │  [MM:SS] SPEAKER_XX: text (per segment)    │
+                    └───────────┬────────────────────────────────┘
+                                │
+                    ┌───────────▼────────────────────────────────┐
+                    │  SUMMARIZATION  (cohesive.py)              │
+                    │                                            │
+                    │  Pre-pass (if attendees provided):         │
+                    │    LLM maps SPEAKER_XX → real names        │
+                    │    Apply string replace across transcript  │
+                    │                                            │
+                    │  Pass 1: Draft                             │
+                    │    system: template style contract         │
+                    │           + attendees note                 │
+                    │    user:  transcript (or compressed pack   │
+                    │           if transcript > context budget)  │
+                    │                                            │
+                    │  Pass 2: Editorial polish                  │
+                    │    Preserves all ## headers from draft     │
+                    │                                            │
+                    │  Retry (if artifacts / repetition):        │
+                    │    One additional cleanup pass             │
+                    └───────────┬────────────────────────────────┘
+                                │
+                    Build Obsidian markdown:
+                    YYYY-MM-DD-HHMM - [Title] [Template].md
+                    Metadata block + summary + collapsible transcript
+                                │
+                    Write to OBSIDIAN_VAULT_PATH
+                                │
+                    Return job result + obsidian:// URI
+```
+
+### File Structure
+
+```
+sidekick/
+├── start.sh / restart.sh / stop.sh / status.sh / debug.sh
+├── .env                              # All runtime config
+├── config/
+│   └── settings.py                   # Pydantic settings, LRU-cached via get_settings()
+│
+├── src/
+│   ├── main.py                       # FastAPI app entry point
+│   ├── api/
+│   │   └── routes/
+│   │       ├── export.py             # Async export jobs, diarization, transcription pipeline
+│   │       ├── sessions.py           # Recording CRUD, chunked audio upload
+│   │       └── websocket.py          # Live audio stream + optional live preview
+│   ├── audio/
+│   │   └── storage.py                # Audio file management, chunk recovery
+│   ├── core/
+│   │   └── datetime_utils.py         # Timezone helpers
+│   ├── sessions/
+│   │   ├── models.py                 # SQLAlchemy models (Session, Meeting,
+│   │   │                             #   TranscriptSegment w/ speaker, StructuredItem)
+│   │   └── repository.py             # DB CRUD incl. update_segments_speakers()
+│   ├── summarization/
+│   │   ├── cohesive.py               # Two-pass summary + speaker pre-pass
+│   │   ├── manager.py                # Summarization orchestration, passes attendees
+│   │   ├── ollama_backend.py         # Ollama client, strips <think> blocks
+│   │   ├── prompts.py                # Template strings + TEMPLATE_INFO (UI order)
+│   │   └── pipeline/                 # Kept in codebase but NOT invoked from export
+│   │       ├── types.py
+│   │       ├── chunker.py
+│   │       ├── extraction.py
+│   │       ├── merger.py
+│   │       ├── structurer.py
+│   │       ├── narrator.py
+│   │       └── pipeline.py
+│   └── transcription/
+│       ├── diarize.py                # pyannote.audio 4.x diarization (PyAV audio loading)
+│       ├── manager.py                # Transcription orchestration
+│       └── whisper_local.py          # faster-whisper with progress callbacks
+│
+├── web/
+│   ├── index.html                    # Main recording UI (has Attendees field)
+│   ├── recordings.html               # History / re-summarize UI (has Attendees field)
+│   ├── css/styles.css
+│   └── js/
+│       ├── app.js                    # Recording + export flow
+│       ├── recordings.js             # History + re-summarize flow
+│       ├── audio.js                  # AudioCapture, visualizer
+│       └── websocket.js              # WebSocket client, 25s keepalive ping
+│
+├── data/                             # Runtime data (gitignored)
+│   ├── sidekick.db                   # SQLite database
+│   ├── sidekick.log                  # App logs (cleared on each start)
+│   ├── sidekick.pid                  # Managed process PID
+│   └── audio/
+│       ├── {session_id}.webm         # Finalized recordings
+│       └── chunks/{session_id}/{client_id}/  # Temp upload chunks
+│
+└── scripts/
+    ├── monitor_sidekick.sh           # Bash: inline WSL live monitor (GPU, Whisper, Ollama, job, pipeline)
+    ├── monitor_ollama.ps1            # PowerShell: Ollama + GPU live watcher
+    ├── monitor_export_job.sh         # Bash: poll export job progress
+    ├── benchmark_ollama_models.py    # Benchmark raw model latency on transcript chunks
+    └── benchmark_summary.py         # Benchmark full two-pass cohesive summary pipeline
+```
 
 ## Configuration
 
-See `.env.example` for all available configuration options including:
-- Transcription backend (local faster-whisper or OpenAI API)
-- Summarization backend (Ollama, OpenAI, or Anthropic)
-- Audio settings
-- API keys
+Edit `.env`:
+
+```bash
+# Transcription
+TRANSCRIPTION_BACKEND=local
+WHISPER_MODEL_SIZE=large-v3
+WHISPER_DEVICE=cuda
+WHISPER_COMPUTE_TYPE=float16
+
+# Speaker Diarization
+HF_TOKEN=<your_huggingface_read_token>
+DIARIZATION_ENABLED=true
+
+# Summarization
+SUMMARIZATION_BACKEND=ollama
+OLLAMA_HOST=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen3:8b
+OLLAMA_THINK=false
+OLLAMA_NUM_GPU=99
+SUMMARIZATION_TIMEOUT_SECONDS=300
+OLLAMA_CONTEXT_LENGTH=32768
+
+# Export
+OBSIDIAN_VAULT_PATH=/path/to/your/vault
+```
+
+### Model Selection Guide
+
+| Model | VRAM | Quality | Notes |
+|-------|------|---------|-------|
+| `qwen3:4b` | ~2.4 GB | Good | Respects `think:False`, 100% GPU |
+| `qwen3:8b` | ~5.2 GB | Better | **Recommended** — respects `think:False`, ~30s/25K chars |
+| `qwen3.5:9b` | ~6.6 GB | Better | Always generates think tokens (not suppressable) — slower |
+| `qwen2.5:14b` | ~10.3 GB | Best local | Spills to RAM at 32K context (requires 24GB VRAM for full GPU) |
+
+`qwen3:8b` with `OLLAMA_CONTEXT_LENGTH=32768` is the recommended default for 16GB VRAM systems.
+
+**Important**: Use `qwen3` models (not `qwen3.5`). `qwen3.5` models always generate internal thinking tokens regardless of `OLLAMA_THINK=false`, wasting 3000-5000 tokens per call. `qwen3` models properly suppress thinking.
+
+**`OLLAMA_NUM_GPU=99`**: Ollama's auto-estimate conservatively offloads some layers to CPU. Setting `num_gpu=99` forces all layers to GPU and roughly doubles throughput.
+
+### WSL + Host Ollama
+
+Sidekick runs in WSL; Ollama runs on Windows host. With WSL mirrored networking mode, `127.0.0.1:11434` works directly — no special host address needed.
+
+```bash
+# .env
+OLLAMA_HOST=http://127.0.0.1:11434
+```
+
+### Speaker Diarization Setup
+
+Diarization is free, fully local, and runs on GPU.
+
+1. Create a free account at [huggingface.co](https://huggingface.co)
+2. Accept the license for each gated model:
+   - [pyannote/speaker-diarization-3.1](https://hf.co/pyannote/speaker-diarization-3.1)
+   - [pyannote/segmentation-3.0](https://hf.co/pyannote/segmentation-3.0)
+   - [pyannote/speaker-diarization-community-1](https://hf.co/pyannote/speaker-diarization-community-1)
+3. Generate a read token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+4. Add to `.env`:
+   ```bash
+   HF_TOKEN=hf_...
+   DIARIZATION_ENABLED=true
+   ```
+
+Models download once (~1 GB total) and run locally from then on. Diarization runs once per recording — re-summarizing reuses the saved speaker labels.
+
+## Templates
+
+| Template | Best For |
+|----------|----------|
+| **General Meeting** | Standard meetings — summary, decisions, action items, discussion notes (default) |
+| **1-on-1** | Manager/report — highlights, feedback, goals, action items |
+| **Standup** | Daily status — per-person done/doing/blocked, team blockers |
+| **Working Session** | Technical work — decisions, SQL notes, open questions, high detail |
+| **Custom** | User-provided prompt — targeted extraction for a specific audience or artifact |
+
+All templates are editable before export (click "Show" to view and modify the prompt).
 
 ## Usage
 
-1. Start the application
-2. Click "Start Session" to begin recording
-3. Use "Key Start" to mark the beginning of a meeting
-4. Press "Mark Important" to flag key moments
-5. Use "Key Stop" to end the meeting
-6. Click "Generate Summary" to create an AI-powered summary
+1. **Record** — Click the microphone button to start
+2. **Stop** — Click again to stop recording
+3. **Title** — Give the recording a name
+4. **Attendees** *(optional)* — Enter names (e.g. `Oscar, Jane, Mike`) to resolve speaker labels to real names in the summary
+5. **Template** — Choose a template; click "Show" to edit the prompt
+6. **Export** — Watch real-time progress through transcription and summarization
+7. **Open in Obsidian** — One click opens the exported note
 
-## Transcription Pipelines
+## API
 
-Sidekick now has two explicit transcription pipelines:
+| Endpoint | Description |
+|----------|-------------|
+| `GET /` | Main recording UI |
+| `GET /recordings` | History UI |
+| `GET /api/templates` | List templates with prompts |
+| `GET /api/recordings` | List recordings |
+| `GET /api/recordings/{id}` | Recording detail |
+| `PATCH /api/recordings/{id}/title` | Rename a recording |
+| `POST /api/recordings/{id}/export-obsidian-job` | Start async export |
+| `GET /api/export-jobs/{job_id}` | Poll export job |
+| `POST /api/recordings/{id}/transcription-job` | Transcription only (no summary) |
+| `GET /api/transcription-jobs/{job_id}` | Poll transcription job |
+| `PUT /api/recordings/{id}/audio` | Upload full audio blob (fallback) |
+| `PUT /api/recordings/{id}/audio/chunks/{n}` | Upload chunk (needs `X-Client-ID`) |
+| `POST /api/recordings/{id}/audio/finalize` | Finalize chunks (needs `X-Client-ID`) |
+| `WS /ws/audio` | Live audio stream |
 
-- **Live Preview pipeline (optional)**:
-  `microphone stream -> websocket chunks -> live preview text`
-  - Controlled by `LIVE_TRANSCRIPTION_PREVIEW` (`true` by default).
-  - Used only for UX feedback while recording.
-  - Not used as export source of truth.
+## Debugging
 
-- **Export pipeline (authoritative)**:
-  `saved recording audio -> full transcription -> transcript segments -> summary -> markdown export`
-  - Runs when you click Process/Export.
-  - Rebuilds transcript segments from saved audio for deterministic exports.
+```bash
+# Inline WSL live monitor — GPU, Whisper, Ollama, export job, pipeline steps
+./debug.sh
+./debug.sh monitor            # same
+
+# Monitor a specific export job
+./debug.sh export
+./debug.sh export <job_id>
+
+# Live Ollama + GPU stats (launches PowerShell watcher)
+./debug.sh ollama --gpu
+
+# Tail app logs (optional grep filter)
+./debug.sh logs
+./debug.sh logs "speaker"
+
+# Watch pipeline step timing lines only
+./debug.sh pipeline
+
+# Benchmark model latency on a real recording
+./debug.sh benchmark --runs 2
+./debug.sh benchmark-summary
+```
+
+## Requirements
+
+- Python 3.10+
+- CUDA-capable GPU (for Whisper transcription + diarization)
+- Ollama with a pulled model (for summarization)
+- HuggingFace account with accepted licenses (for diarization)
+- ngrok or cloudflared (optional, for remote access)
+
+## Gotchas
+
+- `get_settings()` is LRU-cached — restart required to pick up `.env` changes
+- **`qwen3` vs `qwen3.5` thinking**: `qwen3:8b` properly respects `OLLAMA_THINK=false`. `qwen3.5` models always generate internal thinking tokens regardless of this setting — not suppressable.
+- **`OLLAMA_NUM_GPU=99`**: required to prevent Ollama's conservative auto-estimate from offloading layers to CPU.
+- Pipeline package (`src/summarization/pipeline/`) exists in codebase but is **not called from export**
+- Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist; diarization also skips if speakers already saved
+- Speaker name resolution requires the **Attendees field** at export time. Resolved names are written back to DB segments so the transcript view shows real names.
+- `start.sh` port check uses `connect()` (not `bind()`) to avoid false positives in WSL mirrored mode
+- Ollama runs on **Windows host**, Sidekick runs in **WSL** — mirrored networking makes `127.0.0.1:11434` work
+- Context budget: `OLLAMA_CONTEXT_LENGTH=32768` suits `qwen3:8b` (5.2 GB model). Fits 100% in 16 GB VRAM. Supports ~2.5+ hours of speech.
+- Pull Ollama models from Windows: `powershell.exe -Command "ollama pull qwen3:8b"`

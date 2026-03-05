@@ -51,10 +51,14 @@ class Settings(BaseSettings):
 
     # Summarization
     summarization_backend: SummarizationBackend = SummarizationBackend.OLLAMA
+    summarization_timeout_seconds: int = 600
 
     # Ollama settings
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.2"
+    ollama_context_length: int = 8192
+    ollama_think: bool = False  # Set true to enable thinking mode for qwen3 models (slower, better for complex tasks)
+    ollama_num_gpu: int = 99  # Layers to load on GPU; 99 = force all (overrides Ollama's conservative auto-estimate)
 
     # OpenAI summarization
     openai_summarization_model: str = "gpt-4o-mini"
@@ -70,6 +74,10 @@ class Settings(BaseSettings):
 
     # Important marker duration (seconds)
     important_marker_duration: int = 60
+
+    # Speaker diarization
+    hf_token: str = ""
+    diarization_enabled: bool = False
 
     # Obsidian integration
     obsidian_vault_path: str = "/mnt/c/Users/ozzfa/Documents/Obsidian Vault"

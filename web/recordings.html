@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Recordings - Sidekick</title>
-    <link rel="stylesheet" href="/static/css/styles.css">
+    <link rel="stylesheet" href="/static/css/styles.css?v=0">
 </head>
 <body>
     <div class="app">
@@ -36,21 +36,54 @@
                     <label class="form-label">Details</label>
                     <div class="recording-meta" id="view-meta"></div>
                 </div>
+                <div class="form-group hidden" id="view-summary-group">
+                    <label class="form-label">Summary Version</label>
+                    <div class="summary-version-row hidden" id="view-version-row">
+                        <select id="view-version-select" class="version-select"></select>
+                    </div>
+                    <div class="summary-metadata" id="view-summary-meta">
+                        <span id="view-exported-at"></span>
+                        <span id="view-processing-time"></span>
+                    </div>
+                    <div class="summary-view" id="view-summary-display"></div>
+                    <textarea id="view-summary-edit" class="summary-edit-textarea hidden"></textarea>
+                    
+                    <div class="refine-container mt-16" id="view-refine-section">
+                        <textarea id="view-refine-input" class="form-input" placeholder="e.g. 'Make it more technical'"></textarea>
+                        <div class="refine-actions mt-8">
+                            <div class="refine-actions-left">
+                                <button class="btn btn-small hidden" id="view-undo-btn">Undo</button>
+                            </div>
+                            <div class="refine-actions-right">
+                                <button class="btn" id="view-refine-btn">Ask AI to Revise</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="view-actions-row mt-16">
+                        <button class="btn" id="view-edit-btn">Edit Manually</button>
+                        <button class="btn btn-primary hidden" id="view-save-obsidian-btn">Save to Obsidian</button>
+                    </div>
+                </div>
                 <div class="form-group" id="view-audio-group">
                     <label class="form-label">Audio</label>
                     <audio id="view-audio-player" controls style="width: 100%;"></audio>
-                    <div style="margin-top: 8px;">
-                        <a id="view-audio-download" class="btn" download>Download Audio</a>
-                    </div>
                 </div>
                 <div class="form-group">
+                    <label class="form-label">Downloads</label>
+                    <div class="download-actions">
+                        <a id="view-audio-download" class="btn" download>Download Audio</a>
+                        <button class="btn" id="view-transcript-download">Download Transcript</button>
+                    </div>
+                </div>
+                <div class="form-group" id="view-transcript-group">
                     <label class="form-label">Transcript</label>
                     <div class="transcript-view" id="view-transcript"></div>
+                    <button class="btn btn-small hidden" id="view-transcript-more-btn" type="button">Show More</button>
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn" id="view-close-btn">Close</button>
-                <button class="btn btn-primary" id="resummarize-btn">Re-summarize</button>
+                <button class="btn" id="resummarize-btn">Re-summarize</button>
+                <button class="btn btn-primary" id="view-open-obsidian-btn">Open in Obsidian</button>
             </div>
         </div>
     </div>
@@ -70,18 +103,25 @@
 
                 <div class="form-group">
                     <label class="form-label">Template</label>
-                    <div class="template-grid">
-                        <button type="button" class="template-btn selected" data-template="meeting">Meeting</button>
-                        <button type="button" class="template-btn" data-template="brainstorm">Brainstorm</button>
-                        <button type="button" class="template-btn" data-template="interview">Interview</button>
-                        <button type="button" class="template-btn" data-template="lecture">Lecture</button>
-                        <button type="button" class="template-btn full-width" data-template="custom">Custom</button>
+                    <div id="resummarize-template-grid" class="template-grid">
+                        <!-- Templates loaded dynamically -->
                     </div>
                 </div>
 
-                <div class="form-group hidden" id="resummarize-custom-group">
-                    <label class="form-label">Custom Prompt</label>
-                    <textarea id="resummarize-custom-prompt" class="form-input" placeholder="Describe how you want the recording summarized..."></textarea>
+                <div class="form-group">
+                    <label class="form-label">Attendees <span class="form-label-optional">(optional)</span></label>
+                    <input type="text" id="resummarize-attendees" class="form-input" placeholder="e.g. Oscar, Jane, Mike">
+                </div>
+
+                <div class="form-group" id="resummarize-prompt-group">
+                    <div class="prompt-header">
+                        <label class="form-label">Prompt</label>
+                        <button type="button" class="btn-toggle" id="resummarize-toggle-prompt">Show</button>
+                    </div>
+                    <div id="resummarize-prompt-container" class="hidden">
+                        <textarea id="resummarize-custom-prompt" class="form-input form-textarea" placeholder="Template prompt will appear here..."></textarea>
+                        <div class="prompt-hint">Edit to customize for this recording</div>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer">
@@ -112,10 +152,69 @@
 
     <!-- Processing Overlay -->
     <div id="processing-overlay" class="processing-overlay hidden">
-        <div class="processing-spinner"></div>
-        <div class="processing-text">Processing...</div>
+        <div class="processing-panel">
+            <div class="processing-panel-header">
+                <div class="processing-title">EXPORT PIPELINE</div>
+                <div id="processing-overall" class="processing-overall">0%</div>
+            </div>
+            <div id="processing-stage" class="processing-stage">Queued</div>
+            <div class="processing-grid">
+                <div class="processing-row">
+                    <div class="processing-label-wrap">
+                        <span class="processing-label">TRANSCRIPTION</span>
+                        <span id="processing-transcription-text" class="processing-percent">0%</span>
+                    </div>
+                    <div class="processing-bar">
+                        <div id="processing-transcription-fill" class="processing-bar-fill"></div>
+                    </div>
+                </div>
+                <div class="processing-row">
+                    <div class="processing-label-wrap">
+                        <span class="processing-label">SUMMARIZATION</span>
+                        <span id="processing-summarization-text" class="processing-percent">0%</span>
+                    </div>
+                    <div class="processing-bar">
+                        <div id="processing-summarization-fill" class="processing-bar-fill"></div>
+                    </div>
+                </div>
+            </div>
+            <div id="processing-text" class="processing-text">Preparing export...</div>
+        </div>
     </div>
 
-    <script src="/static/js/recordings.js"></script>
+    <!-- Summary Review Modal -->
+    <div id="review-modal" class="modal hidden summary-review-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">Summary Review</h2>
+                <button class="modal-close" id="review-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="summary-meta" id="review-meta"></div>
+                <div id="review-summary-display" class="summary-body"></div>
+                <textarea id="review-summary-edit" class="summary-edit-textarea hidden" spellcheck="true"></textarea>
+                <div id="review-refine-section" class="hidden">
+                    <div class="refine-input-row">
+                        <input type="text" id="review-refine-input" class="refine-input" placeholder="e.g. Be more concise, add more detail on the cost discussion...">
+                        <button class="btn" id="review-refine-cancel">Cancel</button>
+                        <button class="btn btn-primary" id="review-refine-submit">Revise</button>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="review-footer-left">
+                    <button class="btn" id="review-edit-btn">Edit</button>
+                    <button class="btn" id="review-revise-btn">Ask AI to Revise</button>
+                    <button class="btn hidden" id="review-undo-btn">Undo</button>
+                </div>
+                <div class="review-footer-right">
+                    <button class="btn btn-primary" id="review-save-btn">Save to Obsidian</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="/static/js/recordings.js?v=20260210h"></script>
 </body>
 </html>

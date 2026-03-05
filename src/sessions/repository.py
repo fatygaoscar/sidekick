@@ -3,11 +3,12 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
 
-from .models import Base, ImportantMarker, Meeting, Session, Summary, TranscriptSegment
+from .models import Base, ImportantMarker, Meeting, Session, StructuredItem, Summary, TranscriptSegment
+from src.core.datetime_utils import to_utc_iso
 
 
 class Repository:
@@ -23,16 +24,32 @@ class Repository:
         """Initialize database and create tables."""
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await self._ensure_session_timezone_columns(conn)
+            await self._ensure_session_transcription_column(conn)
+            await self._ensure_transcript_speaker_column(conn)
+            await self._ensure_summary_duration_column(conn)
+            await self._ensure_summary_template_column(conn)
 
     async def close(self) -> None:
         """Close database connection."""
         await self._engine.dispose()
 
     # Session operations
-    async def create_session(self, mode: str = "work", submode: str | None = None) -> Session:
+    async def create_session(
+        self,
+        mode: str = "work",
+        submode: str | None = None,
+        timezone_name: str | None = None,
+        timezone_offset_minutes: int | None = None,
+    ) -> Session:
         """Create a new session."""
         async with self._session_factory() as db:
-            session = Session(mode=mode, submode=submode)
+            session = Session(
+                mode=mode,
+                submode=submode,
+                timezone_name=timezone_name,
+                timezone_offset_minutes=timezone_offset_minutes,
+            )
             db.add(session)
             await db.commit()
             await db.refresh(session)
@@ -110,6 +127,19 @@ class Repository:
             await db.commit()
             return await self.get_session(session_id)
 
+    async def set_session_has_transcription(
+        self, session_id: str, has_transcription: bool = True
+    ) -> Session | None:
+        """Mark whether authoritative transcription has been run for a session."""
+        async with self._session_factory() as db:
+            await db.execute(
+                update(Session)
+                .where(Session.id == session_id)
+                .values(has_transcription=has_transcription)
+            )
+            await db.commit()
+            return await self.get_session(session_id)
+
     # Meeting operations
     async def create_meeting(
         self, session_id: str, title: str | None = None
@@ -172,6 +202,7 @@ class Repository:
         meeting_id: str | None = None,
         is_important: bool = False,
         confidence: float | None = None,
+        speaker: str | None = None,
     ) -> TranscriptSegment:
         """Add a transcript segment."""
         async with self._session_factory() as db:
@@ -183,6 +214,7 @@ class Repository:
                 end_time=end_time,
                 is_important=is_important,
                 confidence=confidence,
+                speaker=speaker,
             )
             db.add(segment)
             await db.commit()
@@ -220,6 +252,19 @@ class Repository:
             )
             await db.commit()
             return result.rowcount or 0
+
+    async def update_segments_speakers(self, updates: dict[str, str | None]) -> None:
+        """Bulk update speaker labels. updates maps segment_id → speaker label."""
+        from sqlalchemy import update
+
+        async with self._session_factory() as db:
+            for segment_id, speaker in updates.items():
+                await db.execute(
+                    update(TranscriptSegment)
+                    .where(TranscriptSegment.id == segment_id)
+                    .values(speaker=speaker)
+                )
+            await db.commit()
 
     async def mark_segments_important(
         self, session_id: str, start_time: float, end_time: float
@@ -284,6 +329,8 @@ class Repository:
         model: str,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
+        processing_duration_seconds: float | None = None,
+        template: str | None = None,
     ) -> Summary:
         """Add a summary for a meeting."""
         async with self._session_factory() as db:
@@ -294,6 +341,8 @@ class Repository:
                 model=model,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                processing_duration_seconds=processing_duration_seconds,
+                template=template,
             )
             db.add(summary)
             await db.commit()
@@ -360,11 +409,157 @@ class Repository:
                 recordings.append({
                     "id": session.id,
                     "title": title,
-                    "started_at": session.started_at.isoformat(),
-                    "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+                    "timezone_name": session.timezone_name,
+                    "timezone_offset_minutes": session.timezone_offset_minutes,
+                    "has_transcription": bool(session.has_transcription),
+                    "started_at": to_utc_iso(session.started_at),
+                    "ended_at": to_utc_iso(session.ended_at),
                     "duration_seconds": duration_seconds,
                     "segment_count": len(segments),
                     "has_summary": has_summary,
                 })
 
             return recordings
+
+    async def _ensure_session_timezone_columns(self, conn) -> None:
+        """Backfill schema for timezone metadata on existing SQLite DBs."""
+        result = await conn.execute(text("PRAGMA table_info(sessions)"))
+        column_names = {row[1] for row in result.fetchall()}
+
+        if "timezone_name" not in column_names:
+            await conn.execute(text("ALTER TABLE sessions ADD COLUMN timezone_name VARCHAR(128)"))
+
+        if "timezone_offset_minutes" not in column_names:
+            await conn.execute(text("ALTER TABLE sessions ADD COLUMN timezone_offset_minutes INTEGER"))
+
+    async def _ensure_session_transcription_column(self, conn) -> None:
+        """Backfill schema for transcription state on existing SQLite DBs."""
+        result = await conn.execute(text("PRAGMA table_info(sessions)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "has_transcription" not in column_names:
+            await conn.execute(text("ALTER TABLE sessions ADD COLUMN has_transcription BOOLEAN DEFAULT 0"))
+
+    async def _ensure_transcript_speaker_column(self, conn) -> None:
+        """Backfill schema for speaker label on existing SQLite DBs."""
+        result = await conn.execute(text("PRAGMA table_info(transcript_segments)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "speaker" not in column_names:
+            await conn.execute(text("ALTER TABLE transcript_segments ADD COLUMN speaker VARCHAR(64)"))
+
+    async def _ensure_summary_duration_column(self, conn) -> None:
+        """Backfill schema for processing duration on existing SQLite DBs."""
+        result = await conn.execute(text("PRAGMA table_info(summaries)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "processing_duration_seconds" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN processing_duration_seconds FLOAT"))
+
+    async def _ensure_summary_template_column(self, conn) -> None:
+        """Backfill schema for template name on existing SQLite DBs."""
+        result = await conn.execute(text("PRAGMA table_info(summaries)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "template" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN template VARCHAR(100)"))
+
+    # Structured item operations
+    async def add_structured_item(
+        self,
+        meeting_id: str,
+        item_id: str,
+        item_type: str,
+        text: str,
+        owner: str | None = None,
+        due_date: str | None = None,
+        blocking: str | None = None,
+        source_timestamp: str | None = None,
+        confidence: float = 1.0,
+        rationale: str | None = None,
+        impact: str | None = None,
+        mitigation: str | None = None,
+        context: str | None = None,
+        who_decides: str | None = None,
+        timeline: str | None = None,
+        status: str = "open",
+    ) -> StructuredItem:
+        """Add a structured item for a meeting."""
+        async with self._session_factory() as db:
+            item = StructuredItem(
+                meeting_id=meeting_id,
+                item_id=item_id,
+                item_type=item_type,
+                text=text,
+                owner=owner,
+                due_date=due_date,
+                blocking=blocking,
+                source_timestamp=source_timestamp,
+                confidence=confidence,
+                rationale=rationale,
+                impact=impact,
+                mitigation=mitigation,
+                context=context,
+                who_decides=who_decides,
+                timeline=timeline,
+                status=status,
+            )
+            db.add(item)
+            await db.commit()
+            await db.refresh(item)
+            return item
+
+    async def add_structured_items_bulk(
+        self,
+        meeting_id: str,
+        items: list[dict],
+    ) -> list[StructuredItem]:
+        """Add multiple structured items for a meeting in a single transaction."""
+        async with self._session_factory() as db:
+            created = []
+            for item_data in items:
+                item = StructuredItem(
+                    meeting_id=meeting_id,
+                    item_id=item_data.get("item_id", ""),
+                    item_type=item_data.get("item_type", "action"),
+                    text=item_data.get("text", ""),
+                    owner=item_data.get("owner"),
+                    due_date=item_data.get("due_date"),
+                    blocking=item_data.get("blocking"),
+                    source_timestamp=item_data.get("source_timestamp"),
+                    confidence=item_data.get("confidence", 1.0),
+                    rationale=item_data.get("rationale"),
+                    impact=item_data.get("impact"),
+                    mitigation=item_data.get("mitigation"),
+                    context=item_data.get("context"),
+                    who_decides=item_data.get("who_decides"),
+                    timeline=item_data.get("timeline"),
+                    status=item_data.get("status", "open"),
+                )
+                db.add(item)
+                created.append(item)
+            await db.commit()
+            for item in created:
+                await db.refresh(item)
+            return created
+
+    async def get_structured_items(
+        self,
+        meeting_id: str,
+        item_type: str | None = None,
+    ) -> list[StructuredItem]:
+        """Get structured items for a meeting."""
+        async with self._session_factory() as db:
+            query = select(StructuredItem).where(StructuredItem.meeting_id == meeting_id)
+            if item_type:
+                query = query.where(StructuredItem.item_type == item_type)
+            query = query.order_by(StructuredItem.item_id)
+            result = await db.execute(query)
+            return list(result.scalars().all())
+
+    async def delete_structured_items(self, meeting_id: str) -> int:
+        """Delete all structured items for a meeting."""
+        from sqlalchemy import delete
+
+        async with self._session_factory() as db:
+            result = await db.execute(
+                delete(StructuredItem).where(StructuredItem.meeting_id == meeting_id)
+            )
+            await db.commit()
+            return result.rowcount or 0

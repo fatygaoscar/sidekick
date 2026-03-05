@@ -23,6 +23,9 @@ class Session(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     mode: Mapped[str] = mapped_column(String(50), nullable=False, default="work")
     submode: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    timezone_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    timezone_offset_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    has_transcription: Mapped[bool] = mapped_column(Boolean, default=False)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -74,6 +77,7 @@ class TranscriptSegment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     is_important: Mapped[bool] = mapped_column(Boolean, default=False)
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    speaker: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     # Relationships
     session: Mapped["Session"] = relationship("Session", back_populates="segments")
@@ -110,9 +114,36 @@ class Summary(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    processing_duration_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    template: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
     # Relationships
     meeting: Mapped["Meeting"] = relationship("Meeting", back_populates="summaries")
+
+
+class StructuredItem(Base):
+    """Structured items extracted from meetings (actions, decisions, risks, etc.)."""
+
+    __tablename__ = "structured_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    meeting_id: Mapped[str] = mapped_column(String(36), ForeignKey("meetings.id"), nullable=False)
+    item_id: Mapped[str] = mapped_column(String(10), nullable=False)  # e.g., "A-001"
+    item_type: Mapped[str] = mapped_column(String(20), nullable=False)  # action|decision|risk|question|followup
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    owner: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    due_date: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    blocking: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    source_timestamp: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    impact: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mitigation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    who_decides: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    timeline: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 async def init_db(database_url: str) -> None:

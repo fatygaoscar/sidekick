@@ -13,28 +13,40 @@ LOG_FILE="data/sidekick.log"
 NGROK_PID_FILE="data/ngrok.pid"
 NGROK_LOG_FILE="data/ngrok.log"
 NGROK_URL_FILE="data/ngrok.url"
+CLOUDFLARE_PID_FILE="data/cloudflare.pid"
+CLOUDFLARE_LOG_FILE="data/cloudflare.log"
+CLOUDFLARE_URL_FILE="data/cloudflare.url"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8000}"
 HEALTH_URL="http://127.0.0.1:${PORT}/health"
 NGROK_API_PORT="${NGROK_API_PORT:-4040}"
 
 ENABLE_NGROK=0
+ENABLE_CLOUDFLARE=0
 for arg in "$@"; do
     case "$arg" in
         --ngrok)
             ENABLE_NGROK=1
             ;;
+        --cloudflare)
+            ENABLE_CLOUDFLARE=1
+            ;;
         --help|-h)
-            echo "Usage: ./start.sh [--ngrok]"
+            echo "Usage: ./start.sh [--ngrok|--cloudflare]"
             exit 0
             ;;
         *)
             echo -e "${RED}Unknown argument: ${arg}${NC}"
-            echo "Usage: ./start.sh [--ngrok]"
+            echo "Usage: ./start.sh [--ngrok|--cloudflare]"
             exit 1
             ;;
     esac
 done
+
+if [ "$ENABLE_NGROK" -eq 1 ] && [ "$ENABLE_CLOUDFLARE" -eq 1 ]; then
+    echo -e "${RED}Choose only one tunnel flag: --ngrok or --cloudflare${NC}"
+    exit 1
+fi
 
 mkdir -p data
 
@@ -59,21 +71,14 @@ is_sidekick_pid() {
 
 port_is_available() {
     python3 - "$PORT" <<'PY'
-import socket
-import sys
-
+import socket, sys
 port = int(sys.argv[1])
-try:
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-except PermissionError:
-    sys.exit(2)
-try:
-    s.bind(("0.0.0.0", port))
-except OSError:
-    sys.exit(1)
-finally:
-    s.close()
-sys.exit(0)
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.5)
+result = s.connect_ex(('127.0.0.1', port))
+s.close()
+# connect succeeded = something is listening = port NOT available
+sys.exit(1 if result == 0 else 0)
 PY
 }
 
@@ -95,6 +100,11 @@ for t in data.get("tunnels", []):
         print(u)
         raise SystemExit(0)
 print("")' || true
+}
+
+read_cloudflare_public_url() {
+    local log_file="$1"
+    grep -Eo 'https://[[:alnum:].-]+\.trycloudflare\.com' "$log_file" 2>/dev/null | tail -n 1 || true
 }
 
 start_ngrok() {
@@ -150,13 +160,72 @@ start_ngrok() {
     return 0
 }
 
+start_cloudflare() {
+    if [ "$ENABLE_CLOUDFLARE" -ne 1 ]; then
+        return 0
+    fi
+
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        echo -e "${RED}cloudflared not found. Install cloudflared or run without --cloudflare.${NC}"
+        return 1
+    fi
+
+    if [ -f "$CLOUDFLARE_PID_FILE" ]; then
+        existing_cloudflare_pid="$(cat "$CLOUDFLARE_PID_FILE" 2>/dev/null || true)"
+        if [ -n "$existing_cloudflare_pid" ] && is_running "$existing_cloudflare_pid"; then
+            cloudflare_url="$(cat "$CLOUDFLARE_URL_FILE" 2>/dev/null || true)"
+            if [ -z "$cloudflare_url" ]; then
+                cloudflare_url="$(read_cloudflare_public_url "$CLOUDFLARE_LOG_FILE")"
+                [ -n "$cloudflare_url" ] && echo "$cloudflare_url" > "$CLOUDFLARE_URL_FILE"
+            fi
+            echo -e "${GREEN}cloudflare tunnel already running (PID ${existing_cloudflare_pid})${NC}"
+            [ -n "$cloudflare_url" ] && echo -e "${GREEN}Public URL: ${cloudflare_url}${NC}"
+            return 0
+        fi
+        rm -f "$CLOUDFLARE_PID_FILE" "$CLOUDFLARE_URL_FILE"
+    fi
+
+    echo -e "${YELLOW}Starting Cloudflare tunnel...${NC}"
+    : > "$CLOUDFLARE_LOG_FILE"
+    nohup cloudflared tunnel --url "http://localhost:${PORT}" --no-autoupdate >> "$CLOUDFLARE_LOG_FILE" 2>&1 &
+    cloudflare_pid=$!
+    echo "$cloudflare_pid" > "$CLOUDFLARE_PID_FILE"
+
+    for _ in $(seq 1 20); do
+        if ! is_running "$cloudflare_pid"; then
+            echo -e "${RED}cloudflare tunnel exited unexpectedly.${NC}"
+            rm -f "$CLOUDFLARE_PID_FILE" "$CLOUDFLARE_URL_FILE"
+            tail -n 40 "$CLOUDFLARE_LOG_FILE" || true
+            return 1
+        fi
+
+        cloudflare_url="$(read_cloudflare_public_url "$CLOUDFLARE_LOG_FILE")"
+        if [ -n "$cloudflare_url" ]; then
+            echo "$cloudflare_url" > "$CLOUDFLARE_URL_FILE"
+            echo -e "${GREEN}Public URL: ${cloudflare_url}${NC}"
+            return 0
+        fi
+
+        sleep 1
+    done
+
+    echo -e "${YELLOW}Cloudflare tunnel started but URL not ready yet. Check: tail -f ${CLOUDFLARE_LOG_FILE}${NC}"
+    return 0
+}
+
+start_tunnel() {
+    start_ngrok || return 1
+    start_cloudflare || return 1
+    return 0
+}
+
 adopt_existing_sidekick() {
     LISTENER_PID="$(get_listener_pid)"
     if [ -n "$LISTENER_PID" ] && is_sidekick_pid "$LISTENER_PID"; then
         echo "$LISTENER_PID" > "$PID_FILE"
         echo -e "${YELLOW}Sidekick is already running on port ${PORT} (PID ${LISTENER_PID}).${NC}"
         echo -e "${YELLOW}Adopted existing process into ${PID_FILE}.${NC}"
-        start_ngrok || true
+        start_tunnel || true
         exit 0
     fi
 }
@@ -165,7 +234,7 @@ if [ -f "$PID_FILE" ]; then
     EXISTING_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
     if [ -n "${EXISTING_PID}" ] && is_running "$EXISTING_PID"; then
         echo -e "${YELLOW}Sidekick is already running (PID ${EXISTING_PID})${NC}"
-        start_ngrok || true
+        start_tunnel || true
         echo -e "${YELLOW}Status: ./status.sh${NC}"
         echo -e "${YELLOW}Stop:   ./stop.sh${NC}"
         exit 0
@@ -236,7 +305,7 @@ for _ in $(seq 1 30); do
         echo -e "${GREEN}Sidekick started (PID ${NEW_PID})${NC}"
         echo -e "${GREEN}URL: http://localhost:${PORT}${NC}"
         echo -e "${YELLOW}Logs: tail -f ${LOG_FILE}${NC}"
-        start_ngrok || true
+        start_tunnel || true
         exit 0
     fi
 
@@ -253,7 +322,7 @@ for _ in $(seq 1 30); do
             echo -e "${GREEN}Sidekick started (PID ${NEW_PID})${NC}"
             echo -e "${GREEN}URL: http://localhost:${PORT}${NC}"
             echo -e "${YELLOW}Logs: tail -f ${LOG_FILE}${NC}"
-            start_ngrok || true
+            start_tunnel || true
             exit 0
         fi
     fi

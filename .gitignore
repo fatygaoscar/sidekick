@@ -40,9 +40,15 @@ ENV/
 Thumbs.db
 
 # Project-specific
-data/*.db
+data/
+src/data/
 *.log
 logs/
+PLAN.md
+2026-03-03-182010-implement-the-following-plan.txt
+GUI_inspo.jpg
+CLAUDE - Copy.md:Zone.Identifier
+GUI_inspo.jpg:Zone.Identifier
 
 # Test/coverage
 .pytest_cache/
@@ -53,3 +59,6 @@ htmlcov/
 
 # mypy
 .mypy_cache/
+
+# Local ops docs
+docs/HOST_OLLAMA_SETUP.md
