@@ -13,13 +13,17 @@ Quick reference for AI agents working on this codebase.
 ./stop.sh                 # Stop server
 ./status.sh               # Check status + public URL
 ./debug.sh                # Unified debug helper (ollama / export / benchmark)
+./use-main.sh             # Stop app, switch to main, restart on the stable branch
+./use-dev.sh              # Stop app, switch to dev, restore auto-stashed work, restart
+./scripts/switch_sidekick_branch.sh <main|dev> [start args...]
+                           # Underlying helper used by use-main/use-dev
 ```
 
 ## File Structure
 
 ```
 sidekick/
-├── start.sh / restart.sh / stop.sh / status.sh / debug.sh
+├── start.sh / restart.sh / stop.sh / status.sh / debug.sh / use-main.sh / use-dev.sh
 ├── .env                              # All runtime config
 ├── config/
 │   └── settings.py                   # Pydantic settings, LRU-cached via get_settings()
@@ -79,7 +83,8 @@ sidekick/
     ├── monitor_ollama.ps1            # PowerShell: Ollama + GPU live watcher
     ├── monitor_export_job.sh         # Bash: poll export job progress
     ├── benchmark_ollama_models.py    # Benchmark raw model latency on transcript chunks
-    └── benchmark_summary.py         # Benchmark full two-pass cohesive summary pipeline
+    ├── benchmark_summary.py          # Benchmark full two-pass cohesive summary pipeline
+    └── switch_sidekick_branch.sh     # Stop/stash/switch/restart helper for main/dev workflows
 ```
 
 ## Export Pipeline (Full Flow)
