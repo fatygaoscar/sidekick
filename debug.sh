@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 usage() {
   cat <<'EOF'
 Usage:
-  ./debug.sh                                    # inline WSL monitor (GPU, Ollama, Job, Pipeline)
+  ./debug.sh                                    # inline WSL monitor (GPU, Ollama, Job, Workflow)
   ./debug.sh monitor                            # same as above
   ./debug.sh export [job_id] [interval_seconds] [base_url]
   ./debug.sh ollama [--gpu] [--interval N]

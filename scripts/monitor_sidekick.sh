@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sidekick live monitor — Whisper · Ollama · GPU · Export Job · Pipeline
+# Sidekick live monitor — Whisper · Ollama · GPU · Export Job · Workflow
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -88,6 +88,101 @@ _step_running() {
   [[ -n "$s" && ( -z "$d" || "$s" -gt "$d" ) ]]
 }
 
+_fetch_job_raw() {
+  local job_id="$1"
+  [[ -n "$job_id" ]] || return 1
+  curl -sS --max-time 1 "${BASE_URL}/api/export-jobs/${job_id}" 2>/dev/null || true
+}
+
+_job_field() {
+  local raw="$1" expr="$2"
+  if [[ -z "$raw" ]] || ! command -v jq &>/dev/null; then
+    return 0
+  fi
+  printf '%s' "$raw" | jq -r "$expr // empty" 2>/dev/null || true
+}
+
+_job_log_last_fixed() {
+  local job_start="$1" pattern="$2"
+  [[ -f "$LOG" ]] || return 0
+  tail -n +"$job_start" "$LOG" | grep -aF "$pattern" | tail -n 1 || true
+}
+
+_job_log_last_regex() {
+  local job_start="$1" pattern="$2"
+  [[ -f "$LOG" ]] || return 0
+  tail -n +"$job_start" "$LOG" | grep -aE "$pattern" | tail -n 1 || true
+}
+
+_job_log_has_fixed() {
+  local job_start="$1" pattern="$2"
+  [[ -f "$LOG" ]] || return 1
+  tail -n +"$job_start" "$LOG" | grep -aqF "$pattern"
+}
+
+_job_step_running() {
+  local job_start="$1" name="$2"
+  [[ -f "$LOG" ]] || return 1
+  local s d
+  s="$(tail -n +"$job_start" "$LOG" | grep -anF "[step] $name | start" | tail -n 1 | cut -d: -f1)"
+  d="$(tail -n +"$job_start" "$LOG" | grep -anF "[step] $name | done" | tail -n 1 | cut -d: -f1)"
+  [[ -n "$s" && ( -z "$d" || "$s" -gt "$d" ) ]]
+}
+
+_extract_field() {
+  local line="$1" key="$2"
+  sed -nE "s/.*${key}=([^|]+).*/\\1/p" <<< "$line" | sed 's/[[:space:]]*$//' | head -n 1
+}
+
+_compact_pairs() {
+  local max_items="$1"
+  shift || true
+  local items=("$@")
+  local out="" shown=0 total="${#items[@]}"
+  local item
+  for item in "${items[@]}"; do
+    [[ -n "$item" ]] || continue
+    if [[ $shown -ge $max_items ]]; then
+      break
+    fi
+    [[ -n "$out" ]] && out+=", "
+    out+="$item"
+    shown=$((shown + 1))
+  done
+  if [[ $total -gt $shown ]]; then
+    out+=" +$((total - shown)) more"
+  fi
+  printf '%s' "$out"
+}
+
+_speaker_map_preview() {
+  local line="$1"
+  [[ -n "$line" ]] || return 0
+  local -a raw_pairs pairs
+  mapfile -t raw_pairs < <(grep -oE "SPEAKER_[0-9]+': '[^']+'" <<< "$line" || true)
+  [[ ${#raw_pairs[@]} -gt 0 ]] || return 0
+  local pair
+  for pair in "${raw_pairs[@]}"; do
+    pairs+=("$(sed -E "s/': '/->/; s/'//g" <<< "$pair")")
+  done
+  _compact_pairs 3 "${pairs[@]}"
+}
+
+_workflow_stage() {
+  local name="$1" color="$2" symbol="$3" status="$4" detail="$5"
+  printf "  %-14s %b%s %-12s%b" "$name" "$color" "$symbol " "$status" "$RST"
+  if [[ -n "$detail" ]]; then
+    printf " ${DIM}%s${RST}" "$detail"
+  fi
+  printf "\n"
+}
+
+_workflow_note() {
+  local detail="$1"
+  [[ -n "$detail" ]] || return 0
+  printf "  %-14s ${DIM}%s${RST}\n" "" "$detail"
+}
+
 # ── GPU ───────────────────────────────────────────────────────────────────────
 _gpu() {
   if ! command -v nvidia-smi &>/dev/null; then
@@ -146,7 +241,7 @@ _job() {
     printf "$(_lbl 'Job')${DIM}jq not installed${RST}\n"; return
   fi
 
-  local raw; raw="$(curl -sS --max-time 1 "${BASE_URL}/api/export-jobs/${job_id}" 2>/dev/null || true)"
+  local raw; raw="$(_fetch_job_raw "$job_id")"
   if [[ -z "$raw" ]]; then
     _sep 'LAST EXPORT JOB'
     printf "$(_lbl 'Job')${DIM}%.8s…  server not responding${RST}\n" "$job_id"; return
@@ -198,128 +293,171 @@ _job() {
     local err; err="$(printf '%s' "$raw" | jq -r '.error // ""' 2>/dev/null || true)"
     [[ -n "$err" ]] && printf "$(_lbl 'Error')${RED}%.55s${RST}\n" "$err"
   fi
-
-  [[ -f "$LOG" ]] || return
-  local job_start="${1:-1}"
-  local _log; _log() { tail -n +"$job_start" "$LOG"; }  # helper: log scoped to this job
-
-  # ── Transcription subsection ────────────────────────────────────────────────
-  _subsep 'Transcription'
-  if _step_running "transcription"; then
-    printf "$(_lbl 'Status')${YEL}${BOLD}▶ transcribing...${RST}\n"
-  fi
-  local tx_real tx_any
-  tx_real="$(_log | grep -aF '[step] transcription | done' | \
-    awk -F'elapsed=' 'NF>1 { v=$2+0; if(v>1) print }' | tail -n 1 || true)"
-  tx_any="$(_log | grep -aF '[step] transcription | done' | tail -n 1 || true)"
-  if [[ -n "$tx_real" ]]; then
-    local tx_el tx_ch tx_cps
-    tx_el="$(echo "$tx_real" | grep -oE 'elapsed=[0-9.]+s' | grep -oE '[0-9.]+' || true)"
-    tx_ch="$(echo "$tx_real" | grep -oE 'chars=[0-9]+'     | grep -oE '[0-9.]+'  || true)"
-    if [[ -n "$tx_el" && -n "$tx_ch" && "${tx_el%.*}" -gt 0 ]]; then
-      tx_cps="$(echo "scale=0; $tx_ch / $tx_el" | bc -l 2>/dev/null || echo "?")"
-      printf "$(_lbl 'Duration')${GRN}%ss${RST}  ${DIM}%s chars  (~%s chars/s)${RST}\n" "$tx_el" "$tx_ch" "$tx_cps"
-    else
-      printf "$(_lbl 'Duration')${GRN}%ss${RST}\n" "${tx_el:-?}"
-    fi
-  elif [[ -n "$tx_any" ]]; then
-    # Done step found but elapsed ~0s — transcript was reused from a prior run
-    printf "$(_lbl 'Reused')${DIM}cached from prior run${RST}\n"
-  else
-    printf "$(_lbl 'Duration')${DIM}—${RST}\n"
-  fi
-
-  # ── Diarization subsection ──────────────────────────────────────────────────
-  _subsep 'Diarization'
-  if _step_running "diarization"; then
-    printf "$(_lbl 'Status')${YEL}${BOLD}▶ diarizing...${RST}\n"
-  fi
-  local dz; dz="$(_log | grep -aF '[step] diarization | done' | tail -n 1 || true)"
-  if [[ -n "$dz" ]]; then
-    local dz_el dz_sp
-    dz_el="$(echo "$dz" | grep -oE 'elapsed=[0-9.]+s' | grep -oE '[0-9.]+' || true)"
-    dz_sp="$(echo "$dz" | grep -oE 'spans=[0-9]+'     | grep -oE '[0-9.]+'  || true)"
-    [[ -n "$dz_el" ]] && printf "$(_lbl 'Duration')${GRN}%ss${RST}\n" "$dz_el"
-    [[ -n "$dz_sp" ]] && printf "$(_lbl 'Speakers')${DIM}%s${RST}\n"  "$dz_sp"
-  else
-    printf "$(_lbl 'Duration')${DIM}—${RST}\n"
-  fi
-
-  # ── Summarization subsection ────────────────────────────────────────────────
-  _subsep 'Summarization'
-  if _step_running "summarize_pass1" || _step_running "summarize_pass2"; then
-    printf "$(_lbl 'Status')${YEL}${BOLD}▶ summarizing...${RST}\n"
-  fi
-  local sum_done; sum_done="$(_log | grep -aF '[step] summarization | done' | tail -n 1 || true)"
-  if [[ -n "$sum_done" ]]; then
-    local sum_el
-    sum_el="$(echo "$sum_done" | grep -oE 'elapsed=[0-9.]+s' | grep -oE '[0-9.]+' || true)"
-    [[ -n "$sum_el" ]] && printf "$(_lbl 'Duration')${GRN}%ss${RST}\n" "$sum_el"
-  else
-    printf "$(_lbl 'Duration')${DIM}—${RST}\n"
-  fi
-  local p1 p2 p1_el p2_el
-  p1="$(_log | grep -aF '[step] summarize_pass1 | done' | tail -n 1 || true)"
-  p2="$(_log | grep -aF '[step] summarize_pass2 | done' | tail -n 1 || true)"
-  p1_el="$(echo "$p1" | grep -oE 'elapsed=[0-9.]+s' | grep -oE '[0-9.]+' || true)"
-  p2_el="$(echo "$p2" | grep -oE 'elapsed=[0-9.]+s' | grep -oE '[0-9.]+' || true)"
-  if [[ -n "$p1_el" || -n "$p2_el" ]]; then
-    local passes=""
-    [[ -n "$p1_el" ]] && passes+="pass1 ${p1_el}s"
-    [[ -n "$p1_el" && -n "$p2_el" ]] && passes+="  "
-    [[ -n "$p2_el" ]] && passes+="pass2 ${p2_el}s"
-    printf "$(_lbl 'Passes')${DIM}%s${RST}\n" "$passes"
-  fi
-  local sum_chars; sum_chars="$(echo "$p1" | grep -oE 'chars=[0-9]+' | grep -oE '[0-9.]+' || true)"
-  [[ -n "$sum_chars" ]] && printf "$(_lbl 'Length')${DIM}%s chars${RST}\n" "$sum_chars"
-  local tok_s; tok_s="$(_log | grep -aoE '[0-9.]+ tok/s' | tail -n 1 || true)"
-  [[ -n "$tok_s" ]] && printf "$(_lbl 'Speed')${GRN}${BOLD}%s${RST}\n" "$tok_s"
-  local ctx_mode; ctx_mode="$(_log | grep -aF '[step] summarize_pass1 | start' | \
-    tail -n 1 | grep -oE 'mode=[a-z_]+' | cut -d= -f2 || true)"
-  [[ -n "$ctx_mode" ]] && printf "$(_lbl 'Context')${DIM}%s${RST}\n" "$ctx_mode"
 }
 
-# ── PIPELINE ─────────────────────────────────────────────────────────────────
-_pipeline() {
+# ── WORKFLOW ─────────────────────────────────────────────────────────────────
+_workflow() {
   local job_start="${1:-1}"
-  if [[ ! -f "$LOG" ]]; then printf "$(_lbl 'Status')${DIM}no log${RST}\n"; return; fi
-  local lines; lines="$(tail -n +"$job_start" "$LOG" | grep -aF '[step]' | tail -n 15 || true)"
-  if [[ -z "$lines" ]]; then printf "$(_lbl 'Status')${DIM}no activity${RST}\n"; return; fi
+  if [[ ! -f "$LOG" ]]; then
+    printf "$(_lbl 'Status')${DIM}no log${RST}\n"
+    return
+  fi
 
-  while IFS= read -r raw; do
-    # Strip log prefix (e.g. "INFO:module:"), then the "[step] " tag
-    local line="${raw#*\[step\] }"
+  local job_id="" job_raw="" job_status="" job_stage="" sum_progress=""
+  job_id="$(_find_latest_job_id 2>/dev/null || true)"
+  if [[ -n "$job_id" ]]; then
+    job_raw="$(_fetch_job_raw "$job_id")"
+  fi
+  job_status="$(_job_field "$job_raw" '.status')"
+  job_stage="$(_job_field "$job_raw" '.stage')"
+  sum_progress="$(_job_field "$job_raw" '((.summarization_progress // 0) * 100 | floor | tostring)')"
 
-    # Split on " | " — same logic as cmd_pipeline awk
-    local name status meta rest
-    name="${line%% | *}"
-    rest="${line#*| }"; rest="${rest# }"
-    status="${rest%% | *}"
-    meta="${rest#"$status"}"; meta="${meta# | }"
-
-    local clr sym
-    # Handle "chunk N" status (matches awk: status ~ /^chunk [0-9]/)
-    if [[ "$status" =~ ^chunk\ [0-9] ]]; then
-      clr="$YEL"; sym="·"
-      meta="${status#chunk }"; status="chunk"
+  local tx_done tx_error tx_running tx_elapsed tx_chars tx_note tx_status tx_detail tx_color tx_symbol
+  tx_done="$(_job_log_last_fixed "$job_start" '[step] transcription | done')"
+  tx_error="$(_job_log_last_fixed "$job_start" '[step] transcription | error')"
+  tx_running=0
+  _job_step_running "$job_start" "transcription" && tx_running=1
+  tx_elapsed="$(_extract_field "$tx_done" 'elapsed')"
+  tx_chars="$(_extract_field "$tx_done" 'chars')"
+  tx_note=""
+  if _job_log_has_fixed "$job_start" '[step] transcription | unloaded model to free VRAM'; then
+    tx_note="Whisper unloaded for summarization"
+  fi
+  if [[ -n "$tx_error" ]]; then
+    tx_status="error"; tx_color="$RED"; tx_symbol="✗"; tx_detail="${tx_elapsed:+${tx_elapsed}s}"
+  elif [[ $tx_running -eq 1 ]]; then
+    tx_status="running"; tx_color="$YEL"; tx_symbol="▶"; tx_detail="${tx_chars:+chars=${tx_chars}}"
+  elif [[ -n "$tx_done" ]]; then
+    if [[ -n "$tx_elapsed" && "${tx_elapsed%.*}" -le 1 ]]; then
+      tx_status="reused"; tx_color="$CYN"; tx_symbol="↺"
+      tx_detail="cached transcript${tx_chars:+ | chars=${tx_chars}}"
     else
-      case "$status" in
-        done)  clr="$GRN"; sym="✓" ;;
-        error) clr="$RED"; sym="✗" ;;
-        *)     clr="$CYN"; sym="→" ;;
-      esac
+      tx_status="done"; tx_color="$GRN"; tx_symbol="✓"
+      tx_detail="${tx_elapsed:+${tx_elapsed}s}${tx_chars:+ | chars=${tx_chars}}"
     fi
+  else
+    tx_status="waiting"; tx_color="$CYN"; tx_symbol="·"; tx_detail=""
+  fi
+  _workflow_stage "Transcription" "$tx_color" "$tx_symbol" "$tx_status" "$tx_detail"
+  _workflow_note "$tx_note"
 
-    printf "${clr}  %-24s %s %-7s  %s${RST}\n" "$name" "$sym" "$status" "$meta"
-  done <<< "$lines"
+  local dz_done dz_error dz_warn dz_running dz_elapsed dz_spans dz_limit dz_status dz_detail dz_color dz_symbol
+  dz_done="$(_job_log_last_fixed "$job_start" '[step] diarization | done')"
+  dz_error="$(_job_log_last_fixed "$job_start" '[step] diarization | error')"
+  dz_warn="$(_job_log_last_regex "$job_start" 'Diarization failed')"
+  dz_running=0
+  _job_step_running "$job_start" "diarization" && dz_running=1
+  dz_elapsed="$(_extract_field "$dz_done" 'elapsed')"
+  dz_spans="$(_extract_field "$dz_done" 'spans')"
+  dz_limit="$(_extract_field "$(_job_log_last_fixed "$job_start" '[step] diarization | start')" 'limit')"
+  if [[ -n "$dz_error" || -n "$dz_warn" ]]; then
+    dz_status="error"; dz_color="$RED"; dz_symbol="✗"; dz_detail="${dz_elapsed:+${dz_elapsed}s}"
+  elif [[ $dz_running -eq 1 ]]; then
+    dz_status="running"; dz_color="$YEL"; dz_symbol="▶"; dz_detail="${dz_limit:+limit=${dz_limit}}"
+  elif [[ -n "$dz_done" ]]; then
+    dz_status="done"; dz_color="$GRN"; dz_symbol="✓"
+    dz_detail="${dz_elapsed:+${dz_elapsed}s}${dz_spans:+ | spans=${dz_spans}}"
+  elif [[ -n "$tx_done" || "$job_stage" == "summarizing" || "$job_status" == "completed" || "$job_status" == "failed" ]]; then
+    dz_status="not observed"; dz_color="$CYN"; dz_symbol="·"; dz_detail=""
+  else
+    dz_status="waiting"; dz_color="$CYN"; dz_symbol="·"; dz_detail=""
+  fi
+  _workflow_stage "Diarization" "$dz_color" "$dz_symbol" "$dz_status" "$dz_detail"
+
+  local sp_start sp_done sp_error sp_skipped sp_skip_reason sp_resolved_line sp_map_line sp_attendees sp_skip_attendees sp_resolved sp_running
+  local sp_status sp_detail sp_color sp_symbol sp_preview sp_nulled
+  sp_start="$(_job_log_last_fixed "$job_start" '[step] speaker_prepass | start')"
+  sp_done="$(_job_log_last_fixed "$job_start" '[step] speaker_prepass | done')"
+  sp_error="$(_job_log_last_regex "$job_start" '\\[step\\] speaker_prepass \\| error|speaker_prepass: exception=|speaker_prepass: no JSON found')"
+  sp_skipped="$(_job_log_last_fixed "$job_start" '[step] speaker_prepass | skipped')"
+  sp_skip_reason="$(_extract_field "$sp_skipped" 'reason')"
+  sp_resolved_line="$(_job_log_last_fixed "$job_start" 'speaker_prepass: resolved=')"
+  sp_map_line="$(_job_log_last_fixed "$job_start" 'cohesive: speaker_map=')"
+  sp_attendees="$(_extract_field "$sp_start" 'attendees')"
+  sp_skip_attendees="$(_extract_field "$sp_skipped" 'attendees')"
+  sp_resolved="$(_extract_field "$sp_done" 'resolved')"
+  sp_nulled="$(sed -nE 's/.*nulled=\[([^]]*)\].*/\1/p' <<< "$sp_resolved_line" | sed 's/[[:space:]]*$//' | head -n 1)"
+  sp_preview="$(_speaker_map_preview "$sp_map_line")"
+  sp_running=0
+  _job_step_running "$job_start" "speaker_prepass" && sp_running=1
+  if [[ -n "$sp_error" ]]; then
+    sp_status="error"; sp_color="$RED"; sp_symbol="✗"
+    sp_detail="${sp_attendees:+attendees=${sp_attendees}}"
+  elif [[ $sp_running -eq 1 ]]; then
+    sp_status="running"; sp_color="$YEL"; sp_symbol="▶"
+    sp_detail="${sp_attendees:+attendees=${sp_attendees}}"
+  elif [[ -n "$sp_done" ]]; then
+    if [[ -n "$sp_resolved" && "$sp_resolved" != "0" ]]; then
+      sp_status="resolved"; sp_color="$GRN"; sp_symbol="✓"
+    else
+      sp_status="no matches"; sp_color="$CYN"; sp_symbol="·"
+    fi
+    sp_detail="${sp_attendees:+attendees=${sp_attendees}}${sp_resolved:+ | resolved=${sp_resolved}}"
+  elif [[ "$sp_skip_reason" == "no_attendees" ]]; then
+    sp_status="no attendees"; sp_color="$CYN"; sp_symbol="·"; sp_detail=""
+  elif [[ "$sp_skip_reason" == "no_speaker_labels" ]]; then
+    sp_status="no speaker labels"; sp_color="$CYN"; sp_symbol="·"
+    sp_detail="${sp_skip_attendees:+attendees=${sp_skip_attendees}}"
+  elif [[ -n "$(_job_log_last_fixed "$job_start" '[step] summarization | start')" || -n "$(_job_log_last_fixed "$job_start" '[step] summarize_pass1 | start')" || "$job_stage" == "summarizing" || "$job_status" == "completed" || "$job_status" == "failed" ]]; then
+    sp_status="not triggered"; sp_color="$CYN"; sp_symbol="·"; sp_detail=""
+  else
+    sp_status="waiting"; sp_color="$CYN"; sp_symbol="·"; sp_detail=""
+  fi
+  _workflow_stage "Speaker Names" "$sp_color" "$sp_symbol" "$sp_status" "$sp_detail"
+  if [[ -n "$sp_preview" ]]; then
+    _workflow_note "$sp_preview"
+  elif [[ -n "$sp_nulled" && "$sp_status" != "waiting" ]]; then
+    _workflow_note "unmatched labels: ${sp_nulled}"
+  fi
+
+  local sum_done sum_error sum_running p1 p2 p1_el p2_el ctx_mode tok_s sum_status sum_detail sum_color sum_symbol
+  sum_done="$(_job_log_last_fixed "$job_start" '[step] summarization | done')"
+  sum_error="$(_job_log_last_fixed "$job_start" '[step] summarization | error')"
+  sum_running=0
+  if _job_step_running "$job_start" "summarize_pass1" || _job_step_running "$job_start" "summarize_pass2"; then
+    sum_running=1
+  fi
+  p1="$(_job_log_last_fixed "$job_start" '[step] summarize_pass1 | done')"
+  p2="$(_job_log_last_fixed "$job_start" '[step] summarize_pass2 | done')"
+  p1_el="$(_extract_field "$p1" 'elapsed')"
+  p2_el="$(_extract_field "$p2" 'elapsed')"
+  ctx_mode="$(_extract_field "$(_job_log_last_fixed "$job_start" '[step] summarize_pass1 | start')" 'mode')"
+  tok_s="$(_job_log_last_regex "$job_start" '[0-9.]+ tok/s' | grep -aoE '[0-9.]+ tok/s' | tail -n 1 || true)"
+  if [[ -n "$sum_error" || ( "$job_status" == "failed" && "$job_stage" == "failed" ) ]]; then
+    sum_status="error"; sum_color="$RED"; sum_symbol="✗"
+    sum_detail="${sum_progress:+${sum_progress}%}${ctx_mode:+ | ${ctx_mode}}"
+  elif [[ $sum_running -eq 1 || "$job_stage" == "summarizing" || ( "$job_status" == "running" && -n "$sum_progress" && "$sum_progress" != "0" ) ]]; then
+    sum_status="running"; sum_color="$YEL"; sum_symbol="▶"
+    sum_detail="${sum_progress:+${sum_progress}%}${ctx_mode:+ | ${ctx_mode}}"
+  elif [[ -n "$sum_done" || "$job_status" == "completed" ]]; then
+    sum_status="done"; sum_color="$GRN"; sum_symbol="✓"
+    sum_detail="${sum_progress:+${sum_progress}%}${ctx_mode:+ | ${ctx_mode}}"
+  else
+    sum_status="waiting"; sum_color="$CYN"; sum_symbol="·"; sum_detail=""
+  fi
+  if [[ -n "$p1_el" || -n "$p2_el" ]]; then
+    local pass_detail=""
+    [[ -n "$p1_el" ]] && pass_detail+="pass1 ${p1_el}s"
+    [[ -n "$p1_el" && -n "$p2_el" ]] && pass_detail+=" | "
+    [[ -n "$p2_el" ]] && pass_detail+="pass2 ${p2_el}s"
+    if [[ -n "$sum_detail" ]]; then
+      sum_detail+=" | ${pass_detail}"
+    else
+      sum_detail="$pass_detail"
+    fi
+  fi
+  _workflow_stage "Summary" "$sum_color" "$sum_symbol" "$sum_status" "$sum_detail"
+  if [[ -n "$tok_s" ]]; then
+    _workflow_note "speed ${tok_s}"
+  fi
 }
 
 # ── Poll for keypress (non-blocking) ─────────────────────────────────────────
 _poll_input() {
-  local k
+  local k=""
   # Drain ALL pending input; discard mouse escape sequences
   while IFS= read -r -s -N1 -t0 k 2>/dev/null; do
-    if [[ "$k" == $'\033' ]]; then
+    if [[ "${k:-}" == $'\033' ]]; then
       IFS= read -r -s -N64 -t0.05 _ 2>/dev/null || true
     fi
   done
@@ -329,7 +467,9 @@ _poll_input() {
 _stty_orig=$(stty -g 2>/dev/null || true)
 _cleanup() {
   # Disable mouse tracking + restore screen — must go to /dev/tty directly
-  printf '\033[?1000l\033[?1006l\033[?1049l\033[?25h' > /dev/tty
+  if [[ -t 1 && -w /dev/tty ]]; then
+    printf '\033[?1000l\033[?1006l\033[?1049l\033[?25h' > /dev/tty 2>/dev/null || true
+  fi
   # Drain any mouse events buffered in stdin so they don't leak to the parent shell
   while IFS= read -r -s -N64 -t0.05 _ 2>/dev/null; do :; done
   [[ -n "$_stty_orig" ]] && stty "$_stty_orig" 2>/dev/null || true
@@ -366,7 +506,7 @@ _draw() {
     _sep 'WHISPER'; _whisper;  echo
     _sep 'OLLAMA';  _ollama;   echo
     _job "$job_start";      echo
-    _sep 'PIPELINE'; _pipeline "$job_start"
+    _sep 'WORKFLOW'; _workflow "$job_start"
     _footer
   )"
 }

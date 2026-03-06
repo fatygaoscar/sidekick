@@ -594,8 +594,18 @@ async def generate_cohesive_summary(
 
     # Resolve SPEAKER_XX labels to real names before any summarization pass.
     speaker_map: dict[str, str] = {}
-    if attendees and attendees.strip() and _SPEAKER_LABEL_RE.search(transcript):
-        attendee_count = len([a for a in attendees.split(",") if a.strip()])
+    attendee_count = len([a for a in (attendees or "").split(",") if a.strip()])
+    label_count = len(set(_SPEAKER_LABEL_RE.findall(transcript)))
+    has_attendees = attendee_count > 0
+    has_speaker_labels = label_count > 0
+    if not has_attendees:
+        logger.info("[step] speaker_prepass | skipped | reason=no_attendees | attendees=0")
+    elif not has_speaker_labels:
+        logger.info(
+            "[step] speaker_prepass | skipped | reason=no_speaker_labels | attendees=%d | labels=0",
+            attendee_count,
+        )
+    else:
         with pipeline_step(logger, "speaker_prepass", attendees=attendee_count) as step:
             speaker_map = await _resolve_speaker_map(llm_call, transcript, attendees)
             step["resolved"] = len(speaker_map)
