@@ -1,5 +1,8 @@
 /**
- * Sidekick - Simplified Recording App
+ * Sidekick recording page.
+ *
+ * Recording and upload logic stays here. Post-recording review moves into the
+ * shared RecordingWorkspace controller.
  */
 
 class SidekickApp {
@@ -10,29 +13,19 @@ class SidekickApp {
             lastSessionId: null,
             elapsedSeconds: 0,
             recordingStartTime: null,
-            selectedTemplate: 'meeting',
             livePreviewEnabled: false,
-            promptVisible: false,
-            promptEdited: false,
         };
-
-        this.templates = {};
 
         this.timerInterval = null;
         this.audioCapture = null;
         this.visualizer = null;
         this.ws = null;
-        this.obsidianUri = null;
         this.audioUploadPromise = null;
 
-        // Unique ID for this browser tab - prevents cross-device chunk conflicts
         this.clientId = crypto.randomUUID();
-
-        // Track chunk uploads (parallel, fire-and-forget)
-        this.chunkUploads = new Map();  // chunkIndex -> Promise
-        this.chunkResults = new Map();  // chunkIndex -> {success: bool, error?: string}
+        this.chunkUploads = new Map();
+        this.chunkResults = new Map();
         this.expectedChunkCount = 0;
-
         this.finalizedChunkAudio = false;
         this.captureStoppedPromise = null;
         this.captureStopMeta = null;
@@ -49,57 +42,11 @@ class SidekickApp {
             connectionText: document.getElementById('connection-text'),
             livePreview: document.getElementById('live-preview'),
             livePreviewText: document.getElementById('live-preview-text'),
-
-            // Naming modal
-            namingModal: document.getElementById('naming-modal'),
-            namingClose: document.getElementById('naming-close'),
-            namingCancel: document.getElementById('naming-cancel'),
-            namingSubmit: document.getElementById('naming-submit'),
-            recordingTitle: document.getElementById('recording-title'),
-            templateGrid: document.getElementById('template-grid'),
-            togglePrompt: document.getElementById('toggle-prompt'),
-            promptContainer: document.getElementById('prompt-container'),
-            customPrompt: document.getElementById('custom-prompt'),
-
-            // Confirmation modal
-            confirmationModal: document.getElementById('confirmation-modal'),
-            confirmationClose: document.getElementById('confirmation-close'),
-            confirmationFilename: document.getElementById('confirmation-filename'),
-            confirmationPreview: document.getElementById('confirmation-preview'),
-            newRecordingBtn: document.getElementById('new-recording-btn'),
-            openObsidianBtn: document.getElementById('open-obsidian-btn'),
-
-            // Processing overlay
-            processingOverlay: document.getElementById('processing-overlay'),
-            processingText: document.getElementById('processing-text'),
-            processingStage: document.getElementById('processing-stage'),
-            processingOverall: document.getElementById('processing-overall'),
-            processingTranscriptionText: document.getElementById('processing-transcription-text'),
-            processingSummarizationText: document.getElementById('processing-summarization-text'),
-            processingTranscriptionFill: document.getElementById('processing-transcription-fill'),
-            processingSummarizationFill: document.getElementById('processing-summarization-fill'),
-
-            // Summary review modal
-            reviewModal: document.getElementById('review-modal'),
-            reviewClose: document.getElementById('review-close'),
-            reviewMeta: document.getElementById('review-meta'),
-            reviewSummaryDisplay: document.getElementById('review-summary-display'),
-            reviewSummaryEdit: document.getElementById('review-summary-edit'),
-            reviewRefineSection: document.getElementById('review-refine-section'),
-            reviewRefineInput: document.getElementById('review-refine-input'),
-            reviewRefineCancel: document.getElementById('review-refine-cancel'),
-            reviewRefineSubmit: document.getElementById('review-refine-submit'),
-            reviewEditBtn: document.getElementById('review-edit-btn'),
-            reviewReviseBtn: document.getElementById('review-revise-btn'),
-            reviewUndoBtn: document.getElementById('review-undo-btn'),
-            reviewSaveBtn: document.getElementById('review-save-btn'),
         };
 
-        // Summary review state
-        this._reviewJobId = null;
-        this._summaryHistory = [];  // revision stack for undo
-        this._revisionInstruction = null;  // last AI revision instruction used
-        this._editMode = false;
+        this.workspace = new window.RecordingWorkspace({
+            onClose: () => this._resetAfterWorkspace(),
+        });
 
         this._init();
     }
@@ -111,7 +58,6 @@ class SidekickApp {
         this._initWebSocket();
         this._initAudioCapture();
         this._bindEvents();
-        this._loadTemplates();
     }
 
     _initWebSocket() {
@@ -126,20 +72,18 @@ class SidekickApp {
 
     _initAudioCapture() {
         this.audioCapture = new AudioCapture({
-            sampleRate: 16000, // Target streaming rate
-            captureSampleRate: 48000, // Target recording/playback rate
+            sampleRate: 16000,
+            captureSampleRate: 48000,
             onAudioData: (buffer) => {
                 if (this.state.isRecording) {
                     this.ws.sendAudio(buffer);
                 }
             },
             onEncodedAudio: (blob, mimeType) => {
-                // Keep full blob as fallback - this is authoritative if chunks fail.
                 this.fallbackBlob = blob;
                 this.fallbackMimeType = mimeType;
             },
             onEncodedChunk: (blob, mimeType, chunkIndex) => {
-                // Fire-and-forget parallel upload (best effort)
                 this._uploadChunkBestEffort(blob, mimeType, chunkIndex);
             },
             onCaptureStopped: (meta) => {
@@ -157,66 +101,15 @@ class SidekickApp {
     }
 
     _bindEvents() {
-        // Record button
         this.elements.recordBtn.addEventListener('click', () => this._toggleRecording());
 
-        // Naming modal
-        this.elements.namingClose.addEventListener('click', () => this._closeNamingModal());
-        this.elements.namingCancel.addEventListener('click', () => this._closeNamingModal());
-        this.elements.namingSubmit.addEventListener('click', () => this._processRecording());
-        this.elements.namingModal.addEventListener('click', (e) => {
-            if (e.target === this.elements.namingModal) this._closeNamingModal();
-        });
-
-        // Template buttons are bound dynamically in _renderTemplates
-
-        // Toggle prompt visibility
-        this.elements.togglePrompt.addEventListener('click', () => this._togglePromptVisibility());
-
-        // Track if prompt was edited
-        this.elements.customPrompt.addEventListener('input', () => {
-            this.state.promptEdited = true;
-            this._autoResizePrompt(this.elements.customPrompt);
-        });
-
-        // Confirmation modal
-        this.elements.confirmationClose.addEventListener('click', () => this._closeConfirmationModal());
-        this.elements.newRecordingBtn.addEventListener('click', () => this._closeConfirmationModal());
-        this.elements.openObsidianBtn.addEventListener('click', () => this._openObsidian());
-        this.elements.confirmationModal.addEventListener('click', (e) => {
-            if (e.target === this.elements.confirmationModal) this._closeConfirmationModal();
-        });
-
-        // Enter key in title input
-        this.elements.recordingTitle.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') this._processRecording();
-        });
-
-        // Summary review modal
-        this.elements.reviewClose.addEventListener('click', () => this._closeReviewModal());
-        this.elements.reviewModal.addEventListener('click', (e) => {
-            if (e.target === this.elements.reviewModal) this._closeReviewModal();
-        });
-        this.elements.reviewEditBtn.addEventListener('click', () => this._toggleEditMode());
-        this.elements.reviewReviseBtn.addEventListener('click', () => this._showRefineInput());
-        this.elements.reviewRefineCancel.addEventListener('click', () => this._hideRefineInput());
-        this.elements.reviewRefineSubmit.addEventListener('click', () => this._submitRefine());
-        this.elements.reviewRefineInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') this._submitRefine();
-        });
-        this.elements.reviewUndoBtn.addEventListener('click', () => this._undoRevision());
-        this.elements.reviewSaveBtn.addEventListener('click', () => this._saveToObsidian());
-
-        // Reconnect WebSocket when tab becomes visible (browser may have killed connection)
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible' && !this.ws.isConnected) {
-                console.log('Tab visible, reconnecting WebSocket...');
                 this.ws.connect();
             }
         });
     }
 
-    // Connection handlers
     _onConnected() {
         this.elements.connectionDot.classList.add('connected');
         this.elements.connectionText.textContent = 'Connected';
@@ -232,22 +125,25 @@ class SidekickApp {
         if (state.session) {
             this.state.sessionId = state.session.id;
             this.state.lastSessionId = state.session.id;
-        } else {
+        } else if (!this.state.isRecording) {
             this.state.sessionId = null;
         }
         this._syncLivePreviewVisibility();
     }
 
     _onLiveTranscription(message) {
-        if (!this.state.livePreviewEnabled || !this.state.isRecording) return;
+        if (!this.state.livePreviewEnabled || !this.state.isRecording) {
+            return;
+        }
+
         const text = (message.text || '').trim();
-        if (!text) return;
+        if (!text) {
+            return;
+        }
 
         const current = this.elements.livePreviewText.textContent.trim();
         const appended = current && current !== 'Listening...' ? `${current}\n${text}` : text;
-        // Keep preview concise; export path is authoritative transcript.
-        const maxChars = 1000;
-        this.elements.livePreviewText.textContent = appended.slice(-maxChars);
+        this.elements.livePreviewText.textContent = appended.slice(-1000);
     }
 
     _syncLivePreviewVisibility() {
@@ -258,7 +154,6 @@ class SidekickApp {
         }
     }
 
-    // Recording flow
     async _toggleRecording() {
         if (this.state.isRecording) {
             await this._stopRecording();
@@ -275,19 +170,17 @@ class SidekickApp {
 
             await this.audioCapture.start();
             this.ws.startSession();
+
             const startedSessionId = await this._waitForSessionId(3000);
             if (!startedSessionId) {
                 throw new Error('Failed to start recording session');
             }
+
             this.state.lastSessionId = startedSessionId;
             this.audioUploadPromise = null;
-            this._eagerProcessingPromise = null;
-
-            // Reset chunk tracking for parallel uploads
             this.chunkUploads = new Map();
             this.chunkResults = new Map();
             this.expectedChunkCount = 0;
-
             this.finalizedChunkAudio = false;
             this.captureStopMeta = null;
             this.captureStoppedPromise = null;
@@ -301,7 +194,6 @@ class SidekickApp {
             this.elements.statusText.textContent = 'Recording';
             this._resetLivePreview();
             this._syncLivePreviewVisibility();
-
             this._startTimer();
         } catch (error) {
             console.error('Failed to start recording:', error);
@@ -316,9 +208,11 @@ class SidekickApp {
         if (sessionId) {
             this.state.lastSessionId = sessionId;
         }
+
         this.captureStoppedPromise = new Promise((resolve) => {
             this.resolveCaptureStopped = resolve;
         });
+
         this.audioCapture.stop();
         this.visualizer.clear();
         this.ws.endSession();
@@ -326,18 +220,31 @@ class SidekickApp {
         this.state.isRecording = false;
         this.elements.recordBtn.classList.remove('recording');
         this.elements.recordBtn.textContent = 'Record';
-        this.elements.statusText.textContent = 'Ready';
+        this.elements.statusText.textContent = 'Finalizing recording...';
         this._syncLivePreviewVisibility();
-
         this._stopTimer();
-        this._showNamingModal();
 
         if (!sessionId) {
-            console.warn('No session id available for audio upload');
+            this.elements.statusText.textContent = 'Missing session';
+            return;
+        }
+
+        try {
+            await this._ensureRecordingAudioPersisted(sessionId);
+            this.elements.statusText.textContent = 'Opening workspace...';
+            await this.workspace.open(sessionId, {
+                autoStartTranscription: true,
+                initialTab: 'speakers',
+            });
+            this.elements.statusText.textContent = 'Review recording';
+        } catch (error) {
+            console.error('Failed to prepare recording workspace:', error);
+            this.elements.statusText.textContent = 'Could not open workspace';
+            alert(`Could not open workspace: ${error.message}`);
+            this._resetAfterWorkspace();
         }
     }
 
-    // Timer - uses wall clock to avoid drift when tab is inactive
     _startTimer() {
         this.state.recordingStartTime = Date.now();
         this.state.elapsedSeconds = 0;
@@ -348,7 +255,7 @@ class SidekickApp {
                 this.state.elapsedSeconds = Math.floor((Date.now() - this.state.recordingStartTime) / 1000);
                 this._updateTimerDisplay();
             }
-        }, 250); // Update more frequently for smoother display after tab switch
+        }, 250);
     }
 
     _stopTimer() {
@@ -356,7 +263,6 @@ class SidekickApp {
             clearInterval(this.timerInterval);
             this.timerInterval = null;
         }
-        // Capture final elapsed time from wall clock
         if (this.state.recordingStartTime) {
             this.state.elapsedSeconds = Math.floor((Date.now() - this.state.recordingStartTime) / 1000);
             this._updateTimerDisplay();
@@ -364,285 +270,46 @@ class SidekickApp {
     }
 
     _updateTimerDisplay() {
-        const h = Math.floor(this.state.elapsedSeconds / 3600);
-        const m = Math.floor((this.state.elapsedSeconds % 3600) / 60);
-        const s = this.state.elapsedSeconds % 60;
-        this.elements.timer.textContent =
-            `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        const hours = Math.floor(this.state.elapsedSeconds / 3600);
+        const minutes = Math.floor((this.state.elapsedSeconds % 3600) / 60);
+        const seconds = this.state.elapsedSeconds % 60;
+        this.elements.timer.textContent = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
     }
 
-    // Templates
-    async _loadTemplates() {
-        try {
-            const response = await fetch('/api/templates');
-            if (!response.ok) throw new Error('Failed to load templates');
-            const data = await response.json();
-            this.templates = data.templates;
-            this._renderTemplates();
-        } catch (error) {
-            console.error('Failed to load templates:', error);
-            // Fallback to basic template
-            this.templates = {
-                meeting: { name: 'General Meeting', description: 'General meeting notes', prompt: '' }
-            };
-            this._renderTemplates();
-        }
-    }
-
-    _renderTemplates() {
-        const grid = this.elements.templateGrid;
-        grid.innerHTML = '';
-
-        // Show only primary templates in the requested UX order.
-        const order = ['meeting', 'strategic_review', 'working_session', 'standup', 'one_on_one', 'brainstorm', 'custom'];
-        const sortedKeys = order.filter(k => k in this.templates);
-
-        sortedKeys.forEach(key => {
-            const template = this.templates[key];
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'template-btn';
-            btn.dataset.template = key;
-            btn.textContent = template.name;
-            btn.title = template.description;
-
-            if (key === this.state.selectedTemplate) {
-                btn.classList.add('selected');
-            }
-
-            btn.addEventListener('click', () => this._selectTemplate(key));
-            grid.appendChild(btn);
-        });
-    }
-
-    // Naming modal
-    _showNamingModal() {
-        this.elements.recordingTitle.value = '';
-        const attendeesEl = document.getElementById('attendees');
-        if (attendeesEl) attendeesEl.value = '';
-        this.state.promptEdited = false;
-        this.state.promptVisible = false;
-        this.elements.promptContainer.classList.add('hidden');
-        this.elements.togglePrompt.textContent = 'Show';
-        this.elements.togglePrompt.classList.remove('active');
-        this._selectTemplate('meeting');
-        this.elements.namingModal.classList.remove('hidden');
-        this.elements.recordingTitle.focus();
-        // Start background audio persistence + transcription immediately so the
-        // export job can skip Whisper when the user clicks Process 30–120s later.
-        this._startEagerProcessing();
-    }
-
-    _startEagerProcessing() {
-        const sessionId = this.state.sessionId || this.state.lastSessionId;
-        if (!sessionId) return;
-        if (!this._eagerProcessingPromise) {
-            this._eagerProcessingPromise = (async () => {
-                try {
-                    await this._ensureRecordingAudioPersisted(sessionId);
-                    this._triggerEagerTranscription(sessionId);
-                } catch (e) {
-                    console.warn('Eager processing failed (non-critical):', e);
-                }
-            })();
-        }
-    }
-
-    async _closeNamingModal() {
-        this.elements.namingModal.classList.add('hidden');
-        await this._persistRecordingAudioInBackground();
-        this._resetTimer();
-    }
-
-    async _persistRecordingAudioInBackground() {
-        const sessionId = this.state.sessionId || this.state.lastSessionId;
-        if (!sessionId) return;
-
-        try {
-            await this._ensureRecordingAudioPersisted(sessionId);
-        } catch (error) {
-            console.warn('Best-effort background audio persistence failed:', error);
-        }
-    }
-
-    _selectTemplate(templateKey) {
-        this.state.selectedTemplate = templateKey;
-        this.state.promptEdited = false;
-
-        // Update button states
-        const buttons = this.elements.templateGrid.querySelectorAll('.template-btn');
-        buttons.forEach(btn => {
-            btn.classList.toggle('selected', btn.dataset.template === templateKey);
-        });
-
-        // Load the template prompt
-        const template = this.templates[templateKey];
-        if (template) {
-            this.elements.customPrompt.value = template.prompt || '';
-            this._autoResizePrompt(this.elements.customPrompt);
-        }
-    }
-
-    _togglePromptVisibility() {
-        this.state.promptVisible = !this.state.promptVisible;
-        if (this.state.promptVisible) {
-            this.elements.promptContainer.classList.remove('hidden');
-            this.elements.togglePrompt.textContent = 'Hide';
-            this.elements.togglePrompt.classList.add('active');
-            this._autoResizePrompt(this.elements.customPrompt);
-        } else {
-            this.elements.promptContainer.classList.add('hidden');
-            this.elements.togglePrompt.textContent = 'Show';
-            this.elements.togglePrompt.classList.remove('active');
-        }
-    }
-
-    async _processRecording() {
-        const title = this.elements.recordingTitle.value.trim();
-        if (!title) {
-            this.elements.recordingTitle.focus();
-            return;
-        }
-
-        const exportSessionId = this.state.sessionId || this.state.lastSessionId;
-        if (!exportSessionId) {
-            alert('No recording session found');
-            return;
-        }
-
-        const template = this.state.selectedTemplate;
-        // Send custom_prompt if: it's a custom template OR the user edited the prompt
-        const promptValue = this.elements.customPrompt.value.trim();
-        const customPrompt = (template === 'custom' || this.state.promptEdited) ? promptValue : null;
-
-        this.elements.namingModal.classList.add('hidden');
-        this._setProcessingState({
-            stage: 'queued',
-            message: 'Preparing export...',
-            transcriptionProgress: 0,
-            summarizationProgress: 0,
-            overallProgress: 0,
-        });
-        this.elements.processingOverlay.classList.remove('hidden');
-
-        try {
-            // Await eager processing started in _showNamingModal (likely already done).
-            if (this._eagerProcessingPromise) {
-                try { await this._eagerProcessingPromise; } catch (_) {}
-            } else {
-                await this._ensureRecordingAudioPersisted(exportSessionId);
-                this._triggerEagerTranscription(exportSessionId);
-            }
-
-            const createResponse = await fetch(`/api/recordings/${exportSessionId}/export-obsidian-job`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    title,
-                    template,
-                    custom_prompt: customPrompt,
-                    attendees: document.getElementById('attendees')?.value.trim() || null,
-                }),
-            });
-
-            if (!createResponse.ok) {
-                const error = await createResponse.json();
-                throw new Error(error.detail || 'Export failed');
-            }
-
-            const job = await createResponse.json();
-            await this._waitForExportJob(job.job_id);
-            // Flow continues in _showReviewModal → _saveToObsidian → _showConfirmation
-
-        } catch (error) {
-            console.error('Export failed:', error);
-            this.elements.processingOverlay.classList.add('hidden');
-            alert(`Export failed: ${error.message}`);
-            this._resetTimer();
-        }
-    }
-
-    // Confirmation modal
-    _showConfirmation(result) {
-        this.elements.processingOverlay.classList.add('hidden');
-        this.obsidianUri = result.obsidian_uri;
-
-        this.elements.confirmationFilename.textContent = result.filename;
-        this.elements.confirmationPreview.textContent = result.summary_preview;
-        this.elements.confirmationModal.classList.remove('hidden');
-    }
-
-    _closeConfirmationModal() {
-        this.elements.confirmationModal.classList.add('hidden');
-        this._resetTimer();
-    }
-
-    _openObsidian() {
-        if (this.obsidianUri) {
-            window.open(this.obsidianUri, '_blank');
-        }
-        this._closeConfirmationModal();
-    }
-
-    _resetTimer() {
+    _resetAfterWorkspace() {
         this.state.elapsedSeconds = 0;
         this.state.recordingStartTime = null;
         this._updateTimerDisplay();
         this.state.sessionId = null;
+        this.state.lastSessionId = null;
         this.audioUploadPromise = null;
-
-        // Reset chunk tracking
         this.chunkUploads = new Map();
         this.chunkResults = new Map();
         this.expectedChunkCount = 0;
-
         this.finalizedChunkAudio = false;
         this.captureStoppedPromise = null;
         this.captureStopMeta = null;
         this.resolveCaptureStopped = null;
         this.fallbackBlob = null;
         this.fallbackMimeType = null;
+        this.elements.statusText.textContent = 'Ready';
     }
 
     _resetLivePreview() {
         this.elements.livePreviewText.textContent = 'Listening...';
     }
 
-    _autoResizePrompt(textarea) {
-        if (!textarea) return;
-        textarea.style.height = 'auto';
-        textarea.style.height = `${Math.max(textarea.scrollHeight, 240)}px`;
-    }
-
-    async _uploadSessionAudio(sessionId, blob, mimeType) {
-        const response = await fetch(`/api/recordings/${sessionId}/audio`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': mimeType || 'audio/webm',
-            },
-            body: blob,
-        });
-
-        if (!response.ok) {
-            const payload = await response.json().catch(() => ({}));
-            const error = new Error(payload.detail || 'Audio upload failed');
-            console.error('Failed to upload session audio:', error);
-            throw error;
-        }
-    }
-
     async _waitForSessionId(timeoutMs = 3000) {
         const startedAt = Date.now();
         while (Date.now() - startedAt < timeoutMs) {
-            if (this.state.sessionId) return this.state.sessionId;
-            await new Promise(resolve => setTimeout(resolve, 50));
+            if (this.state.sessionId) {
+                return this.state.sessionId;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
         }
         return null;
     }
 
-    /**
-     * Fire-and-forget parallel chunk upload. Tracks result for later inspection.
-     */
     async _uploadChunkBestEffort(blob, mimeType, chunkIndex) {
         const sessionId = this.state.sessionId || this.state.lastSessionId;
         if (!sessionId) {
@@ -650,40 +317,30 @@ class SidekickApp {
             return;
         }
 
-        // Start the upload and track the promise
         const uploadPromise = this._doChunkUpload(sessionId, blob, mimeType, chunkIndex);
         this.chunkUploads.set(chunkIndex, uploadPromise);
-
-        // Don't await - let it run in parallel
         uploadPromise.then(
             () => {
                 this.chunkResults.set(chunkIndex, { success: true });
             },
             (error) => {
-                console.warn(`Chunk ${chunkIndex} upload failed:`, error.message);
                 this.chunkResults.set(chunkIndex, { success: false, error: error.message });
             }
         );
     }
 
-    /**
-     * Actually perform the chunk upload with retries.
-     */
     async _doChunkUpload(sessionId, blob, mimeType, chunkIndex) {
         const maxAttempts = 3;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             try {
-                const response = await fetch(
-                    `/api/recordings/${sessionId}/audio/chunks/${chunkIndex}`,
-                    {
-                        method: 'PUT',
-                        headers: {
-                            'Content-Type': mimeType || 'audio/webm',
-                            'X-Client-ID': this.clientId,
-                        },
-                        body: blob,
-                    }
-                );
+                const response = await fetch(`/api/recordings/${sessionId}/audio/chunks/${chunkIndex}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': mimeType || 'audio/webm',
+                        'X-Client-ID': this.clientId,
+                    },
+                    body: blob,
+                });
 
                 if (response.ok) {
                     return;
@@ -695,39 +352,25 @@ class SidekickApp {
                 if (attempt === maxAttempts) {
                     throw error;
                 }
-                // Brief backoff before retry
-                await new Promise(resolve => setTimeout(resolve, 100 * attempt));
+                await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
             }
         }
     }
 
-    /**
-     * Wait for all in-flight chunk uploads to settle (success or failure).
-     */
     async _waitForChunkUploadsToSettle(timeoutMs = 30000) {
-        const startedAt = Date.now();
         const promises = Array.from(this.chunkUploads.values());
-
-        // Wait for all uploads to complete (don't throw on individual failures)
         await Promise.race([
             Promise.allSettled(promises),
-            new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Chunk upload timeout')), timeoutMs)
-            ),
-        ]).catch(() => {
-            // Timeout - some uploads may still be pending
-            console.warn('Some chunk uploads may have timed out');
-        });
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Chunk upload timeout')), timeoutMs)),
+        ]).catch(() => {});
     }
 
-    /**
-     * Check if all expected chunks were uploaded successfully.
-     */
     _allChunksSucceeded() {
-        if (this.expectedChunkCount === 0) return false;
-
-        for (let i = 0; i < this.expectedChunkCount; i++) {
-            const result = this.chunkResults.get(i);
+        if (this.expectedChunkCount === 0) {
+            return false;
+        }
+        for (let index = 0; index < this.expectedChunkCount; index += 1) {
+            const result = this.chunkResults.get(index);
             if (!result || !result.success) {
                 return false;
             }
@@ -735,49 +378,29 @@ class SidekickApp {
         return true;
     }
 
-    /**
-     * Ensure recording audio is persisted to the server.
-     *
-     * Strategy:
-     * 1. Wait for MediaRecorder to finish (produces fallbackBlob)
-     * 2. Wait for all in-flight chunk uploads to settle
-     * 3. If ALL chunks uploaded successfully: try to finalize
-     * 4. If finalize fails OR any chunks missing: upload full blob as fallback
-     *
-     * The full blob upload is the guaranteed recovery path.
-     */
     async _ensureRecordingAudioPersisted(sessionId) {
         if (!sessionId) {
             throw new Error('No recording session found');
         }
 
-        // Wait for MediaRecorder to finish and produce the fallback blob
         if (this.captureStoppedPromise) {
             await this.captureStoppedPromise;
         }
 
-        // Wait for all chunk uploads to settle (success or failure)
         await this._waitForChunkUploadsToSettle();
-
-        // Check if we should try chunk-based finalization
         const allChunksOk = this._allChunksSucceeded();
 
         if (allChunksOk && this.expectedChunkCount > 0 && !this.finalizedChunkAudio) {
-            // Try to finalize from chunks
             try {
                 await this._finalizeChunkedAudio(sessionId);
                 this.finalizedChunkAudio = true;
-                return; // Success - chunks assembled
+                return;
             } catch (error) {
                 console.warn('Chunk finalization failed, falling back to full blob:', error.message);
-                // Fall through to blob upload
             }
         }
 
-        // Fallback: upload the complete blob
-        // This handles: chunk failures, partial uploads, finalize failures, etc.
         if (this.fallbackBlob) {
-            console.log('Using fallback blob upload');
             this.audioUploadPromise = this._uploadSessionAudio(
                 sessionId,
                 this.fallbackBlob,
@@ -785,7 +408,7 @@ class SidekickApp {
             );
             await this.audioUploadPromise;
         } else if (!this.finalizedChunkAudio) {
-            throw new Error('No audio data available (no chunks and no fallback blob)');
+            throw new Error('No audio data available');
         }
     }
 
@@ -804,280 +427,26 @@ class SidekickApp {
 
         if (!response.ok) {
             const payload = await response.json().catch(() => ({}));
-            const error = new Error(payload.detail || 'Failed to finalize recording audio');
-            console.error('Failed to finalize chunked audio:', error);
-            throw error;
+            throw new Error(payload.detail || 'Failed to finalize recording audio');
         }
     }
 
-    async _waitForExportJob(jobId) {
-        while (true) {
-            const response = await fetch(`/api/export-jobs/${jobId}`);
-            if (!response.ok) {
-                const error = await response.json().catch(() => ({}));
-                throw new Error(error.detail || 'Failed to read export status');
-            }
+    async _uploadSessionAudio(sessionId, blob, mimeType) {
+        const response = await fetch(`/api/recordings/${sessionId}/audio`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': mimeType || 'audio/webm',
+            },
+            body: blob,
+        });
 
-            const job = await response.json();
-            this._setProcessingState({
-                stage: job.stage,
-                message: job.message,
-                transcriptionProgress: Number(job.transcription_progress || 0),
-                summarizationProgress: Number(job.summarization_progress || 0),
-                overallProgress: Number(job.overall_progress || 0),
-            });
-
-            if (job.status === 'ready') {
-                if (job.result) {
-                    this.elements.processingOverlay.classList.add('hidden');
-                    this._showReviewModal(job.result, jobId);
-                    return;
-                }
-                throw new Error('Export ready but no result payload');
-            }
-
-            if (job.status === 'completed') {
-                if (job.result) return job.result;
-                throw new Error('Export completed without a result payload');
-            }
-
-            if (job.status === 'failed') {
-                throw new Error(job.error || 'Export job failed');
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 900));
-        }
-    }
-
-    _setProcessingState({
-        stage,
-        message,
-        transcriptionProgress,
-        summarizationProgress,
-        overallProgress,
-    }) {
-        if (!this.elements.processingOverlay) return;
-
-        const txPct = Math.max(0, Math.min(100, Math.round(transcriptionProgress * 100)));
-        const sumPct = Math.max(0, Math.min(100, Math.round(summarizationProgress * 100)));
-        const overallPct = Math.max(0, Math.min(100, Math.round(overallProgress * 100)));
-
-        if (this.elements.processingStage) {
-            this.elements.processingStage.textContent = this._formatStage(stage);
-        }
-        if (this.elements.processingText) {
-            this.elements.processingText.textContent = message || 'Processing...';
-        }
-        if (this.elements.processingOverall) {
-            this.elements.processingOverall.textContent = `${overallPct}%`;
-        }
-        if (this.elements.processingTranscriptionText) {
-            this.elements.processingTranscriptionText.textContent = `${txPct}%`;
-        }
-        if (this.elements.processingSummarizationText) {
-            this.elements.processingSummarizationText.textContent = `${sumPct}%`;
-        }
-        if (this.elements.processingTranscriptionFill) {
-            this.elements.processingTranscriptionFill.style.width = `${txPct}%`;
-            this.elements.processingTranscriptionFill.classList.remove('indeterminate');
-        }
-        if (this.elements.processingSummarizationFill) {
-            this.elements.processingSummarizationFill.classList.remove('indeterminate');
-            this.elements.processingSummarizationFill.style.width = `${sumPct}%`;
-        }
-    }
-
-    _formatStage(stage) {
-        const map = {
-            queued: 'Queued',
-            transcribing: 'Transcribing Audio',
-            summarizing: 'Generating Summary',
-            writing: 'Writing Note',
-            ready: 'Ready for Review',
-            completed: 'Completed',
-            failed: 'Failed',
-        };
-        return map[stage] || 'Processing';
-    }
-
-    // Eager transcription: fire-and-forget after audio is persisted.
-    // Export pipeline skips Whisper if transcript already exists.
-    _triggerEagerTranscription(sessionId) {
-        fetch(`/api/recordings/${sessionId}/transcription-job`, { method: 'POST' })
-            .then(r => r.json())
-            .then(job => console.debug(`Eager transcription started: ${job.job_id}`))
-            .catch(e => console.debug('Eager transcription not started (non-critical):', e));
-    }
-
-    // Summary review modal
-    _showReviewModal(result, jobId) {
-        this._reviewJobId = jobId;
-        this._summaryHistory = [result.summary_content || ''];
-        this._revisionInstruction = null;
-        this._editMode = false;
-
-        const summary = result.summary_content || '';
-        this._renderSummaryDisplay(summary);
-        this.elements.reviewSummaryEdit.value = summary;
-        this.elements.reviewSummaryEdit.classList.add('hidden');
-        this.elements.reviewSummaryDisplay.classList.remove('hidden');
-        this.elements.reviewRefineSection.classList.add('hidden');
-        this.elements.reviewEditBtn.textContent = 'Edit';
-        this.elements.reviewUndoBtn.classList.add('hidden');
-
-        this.elements.reviewMeta.textContent = result.filename || '';
-        this.elements.reviewModal.classList.remove('hidden');
-    }
-
-    _renderSummaryDisplay(markdown) {
-        if (typeof marked !== 'undefined') {
-            this.elements.reviewSummaryDisplay.innerHTML = marked.parse(markdown);
-        } else {
-            // Fallback: plain text
-            this.elements.reviewSummaryDisplay.textContent = markdown;
-        }
-    }
-
-    _closeReviewModal() {
-        this.elements.reviewModal.classList.add('hidden');
-        this._reviewJobId = null;
-        this._summaryHistory = [];
-        this._editMode = false;
-        this._resetTimer();
-    }
-
-    _toggleEditMode() {
-        this._editMode = !this._editMode;
-        if (this._editMode) {
-            // Switch to textarea
-            const current = this._summaryHistory[this._summaryHistory.length - 1] || '';
-            this.elements.reviewSummaryEdit.value = current;
-            this.elements.reviewSummaryEdit.classList.remove('hidden');
-            this.elements.reviewSummaryDisplay.classList.add('hidden');
-            this.elements.reviewEditBtn.textContent = 'Done Editing';
-            
-            // Auto-resize textarea to fit content
-            this.elements.reviewSummaryEdit.style.height = 'auto';
-            this.elements.reviewSummaryEdit.style.height = (this.elements.reviewSummaryEdit.scrollHeight + 2) + 'px';
-        } else {
-            // Apply edits and switch back to rendered view
-            const edited = this.elements.reviewSummaryEdit.value;
-            if (edited !== this._summaryHistory[this._summaryHistory.length - 1]) {
-                this._summaryHistory.push(edited);
-                this.elements.reviewUndoBtn.classList.remove('hidden');
-            }
-            this._renderSummaryDisplay(edited);
-            this.elements.reviewSummaryEdit.classList.add('hidden');
-            this.elements.reviewSummaryDisplay.classList.remove('hidden');
-            this.elements.reviewEditBtn.textContent = 'Edit';
-        }
-    }
-
-    _showRefineInput() {
-        this.elements.reviewRefineSection.classList.remove('hidden');
-        this.elements.reviewRefineInput.value = '';
-        this.elements.reviewRefineInput.focus();
-    }
-
-    _hideRefineInput() {
-        this.elements.reviewRefineSection.classList.add('hidden');
-    }
-
-    async _submitRefine() {
-        const instruction = this.elements.reviewRefineInput.value.trim();
-        if (!instruction) {
-            this.elements.reviewRefineInput.focus();
-            return;
-        }
-
-        if (!this._reviewJobId) return;
-
-        const currentSummary = this._summaryHistory[this._summaryHistory.length - 1] || '';
-
-        this.elements.reviewRefineSubmit.disabled = true;
-        this.elements.reviewRefineSubmit.textContent = 'Revising...';
-
-        try {
-            const response = await fetch(`/api/export-jobs/${this._reviewJobId}/refine`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ instruction, current_summary: currentSummary }),
-            });
-
-            if (!response.ok) {
-                const err = await response.json().catch(() => ({}));
-                throw new Error(err.detail || 'Refinement failed');
-            }
-
-            const data = await response.json();
-            const revised = data.revised_summary || '';
-
-            this._revisionInstruction = instruction;
-            this._summaryHistory.push(revised);
-            this._renderSummaryDisplay(revised);
-            this.elements.reviewSummaryEdit.value = revised;
-            this.elements.reviewUndoBtn.classList.remove('hidden');
-            this._hideRefineInput();
-
-        } catch (error) {
-            alert(`Revision failed: ${error.message}`);
-        } finally {
-            this.elements.reviewRefineSubmit.disabled = false;
-            this.elements.reviewRefineSubmit.textContent = 'Revise';
-        }
-    }
-
-    _undoRevision() {
-        if (this._summaryHistory.length <= 1) return;
-        this._summaryHistory.pop();
-        const previous = this._summaryHistory[this._summaryHistory.length - 1] || '';
-        this._renderSummaryDisplay(previous);
-        this.elements.reviewSummaryEdit.value = previous;
-        if (this._summaryHistory.length <= 1) {
-            this.elements.reviewUndoBtn.classList.add('hidden');
-            this._revisionInstruction = null;
-        }
-    }
-
-    async _saveToObsidian() {
-        if (!this._reviewJobId) return;
-
-        const current = this._summaryHistory[this._summaryHistory.length - 1] || '';
-        const original = this._summaryHistory[0] || '';
-        const editedSummary = current !== original ? current : null;
-
-        this.elements.reviewSaveBtn.disabled = true;
-        this.elements.reviewSaveBtn.textContent = 'Saving...';
-
-        try {
-            const response = await fetch(`/api/export-jobs/${this._reviewJobId}/save`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    edited_summary: editedSummary,
-                    revision_instruction: this._revisionInstruction,
-                }),
-            });
-
-            if (!response.ok) {
-                const err = await response.json().catch(() => ({}));
-                throw new Error(err.detail || 'Save failed');
-            }
-
-            const result = await response.json();
-            this.elements.reviewModal.classList.add('hidden');
-            this._showConfirmation(result);
-
-        } catch (error) {
-            alert(`Save failed: ${error.message}`);
-        } finally {
-            this.elements.reviewSaveBtn.disabled = false;
-            this.elements.reviewSaveBtn.textContent = 'Save to Obsidian';
+        if (!response.ok) {
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload.detail || 'Audio upload failed');
         }
     }
 }
 
-// Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     window.app = new SidekickApp();
 });

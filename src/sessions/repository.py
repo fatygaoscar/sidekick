@@ -1,14 +1,17 @@
 """Database operations for sessions, meetings, and transcripts."""
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from sqlalchemy import select, text, update
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
 
 from .models import Base, ImportantMarker, Meeting, Session, StructuredItem, Summary, TranscriptSegment
 from src.core.datetime_utils import to_utc_iso
+
+
+UNSET = object()
 
 
 class Repository:
@@ -26,9 +29,12 @@ class Repository:
             await conn.run_sync(Base.metadata.create_all)
             await self._ensure_session_timezone_columns(conn)
             await self._ensure_session_transcription_column(conn)
+            await self._ensure_meeting_workflow_columns(conn)
             await self._ensure_transcript_speaker_column(conn)
+            await self._ensure_transcript_speaker_cluster_column(conn)
             await self._ensure_summary_duration_column(conn)
             await self._ensure_summary_template_column(conn)
+            await self._ensure_summary_workflow_columns(conn)
 
     async def close(self) -> None:
         """Close database connection."""
@@ -60,7 +66,10 @@ class Repository:
         async with self._session_factory() as db:
             result = await db.execute(
                 select(Session)
-                .options(selectinload(Session.meetings), selectinload(Session.segments))
+                .options(
+                    selectinload(Session.meetings).selectinload(Meeting.summaries),
+                    selectinload(Session.segments),
+                )
                 .where(Session.id == session_id)
             )
             return result.scalar_one_or_none()
@@ -89,8 +98,6 @@ class Repository:
 
     async def delete_session(self, session_id: str) -> None:
         """Delete a session and all associated data."""
-        from sqlalchemy import delete
-
         async with self._session_factory() as db:
             # Delete summaries for meetings in this session
             meetings = await db.execute(
@@ -146,7 +153,7 @@ class Repository:
     ) -> Meeting:
         """Create a new meeting (Key Start)."""
         async with self._session_factory() as db:
-            meeting = Meeting(session_id=session_id, title=title)
+            meeting = Meeting(session_id=session_id, title=title, template_key="meeting")
             db.add(meeting)
             await db.commit()
             await db.refresh(meeting)
@@ -192,6 +199,56 @@ class Repository:
             await db.commit()
             return await self.get_meeting(meeting_id)
 
+    async def get_primary_meeting(
+        self,
+        session_id: str,
+        create_if_missing: bool = False,
+        title: str | None = None,
+    ) -> Meeting | None:
+        """Get the earliest meeting for a session, optionally creating one."""
+        session = await self.get_session(session_id)
+        if not session:
+            return None
+        meetings = sorted(session.meetings, key=lambda m: m.key_start) if session.meetings else []
+        if meetings:
+            return meetings[0]
+        if not create_if_missing:
+            return None
+        return await self.create_meeting(session_id=session_id, title=title)
+
+    async def update_meeting_settings(
+        self,
+        meeting_id: str,
+        *,
+        title: str | object = UNSET,
+        template_key: str | None | object = UNSET,
+        custom_prompt: str | None | object = UNSET,
+        attendees: str | None | object = UNSET,
+        speaker_review_required: bool | object = UNSET,
+        speaker_review_completed_at: datetime | None | object = UNSET,
+    ) -> Meeting | None:
+        """Update workflow-related settings for a meeting."""
+        values: dict[str, Any] = {}
+        if title is not UNSET:
+            values["title"] = title
+        if template_key is not UNSET:
+            values["template_key"] = template_key
+        if custom_prompt is not UNSET:
+            values["custom_prompt"] = custom_prompt
+        if attendees is not UNSET:
+            values["attendees"] = attendees
+        if speaker_review_required is not UNSET:
+            values["speaker_review_required"] = bool(speaker_review_required)
+        if speaker_review_completed_at is not UNSET:
+            values["speaker_review_completed_at"] = speaker_review_completed_at
+        if not values:
+            return await self.get_meeting(meeting_id)
+
+        async with self._session_factory() as db:
+            await db.execute(update(Meeting).where(Meeting.id == meeting_id).values(**values))
+            await db.commit()
+        return await self.get_meeting(meeting_id)
+
     # Transcript segment operations
     async def add_segment(
         self,
@@ -203,6 +260,7 @@ class Repository:
         is_important: bool = False,
         confidence: float | None = None,
         speaker: str | None = None,
+        speaker_cluster: str | None = None,
     ) -> TranscriptSegment:
         """Add a transcript segment."""
         async with self._session_factory() as db:
@@ -215,6 +273,7 @@ class Repository:
                 is_important=is_important,
                 confidence=confidence,
                 speaker=speaker,
+                speaker_cluster=speaker_cluster,
             )
             db.add(segment)
             await db.commit()
@@ -255,14 +314,33 @@ class Repository:
 
     async def update_segments_speakers(self, updates: dict[str, str | None]) -> None:
         """Bulk update speaker labels. updates maps segment_id → speaker label."""
-        from sqlalchemy import update
-
         async with self._session_factory() as db:
             for segment_id, speaker in updates.items():
                 await db.execute(
                     update(TranscriptSegment)
                     .where(TranscriptSegment.id == segment_id)
                     .values(speaker=speaker)
+                )
+            await db.commit()
+
+    async def update_segments_speaker_metadata(
+        self,
+        updates: dict[str, dict[str, str | None]],
+    ) -> None:
+        """Bulk update speaker display labels and/or immutable speaker clusters."""
+        async with self._session_factory() as db:
+            for segment_id, payload in updates.items():
+                values: dict[str, str | None] = {}
+                if "speaker" in payload:
+                    values["speaker"] = payload["speaker"]
+                if "speaker_cluster" in payload:
+                    values["speaker_cluster"] = payload["speaker_cluster"]
+                if not values:
+                    continue
+                await db.execute(
+                    update(TranscriptSegment)
+                    .where(TranscriptSegment.id == segment_id)
+                    .values(**values)
                 )
             await db.commit()
 
@@ -331,6 +409,14 @@ class Repository:
         completion_tokens: int | None = None,
         processing_duration_seconds: float | None = None,
         template: str | None = None,
+        status: str = "saved",
+        source_type: str = "generated",
+        parent_summary_id: str | None = None,
+        template_key: str | None = None,
+        custom_prompt: str | None = None,
+        attendees_snapshot: str | None = None,
+        saved_to_obsidian_at: datetime | None = None,
+        obsidian_relative_path: str | None = None,
     ) -> Summary:
         """Add a summary for a meeting."""
         async with self._session_factory() as db:
@@ -343,21 +429,189 @@ class Repository:
                 completion_tokens=completion_tokens,
                 processing_duration_seconds=processing_duration_seconds,
                 template=template,
+                status=status,
+                source_type=source_type,
+                parent_summary_id=parent_summary_id,
+                template_key=template_key,
+                custom_prompt=custom_prompt,
+                attendees_snapshot=attendees_snapshot,
+                saved_to_obsidian_at=saved_to_obsidian_at,
+                obsidian_relative_path=obsidian_relative_path,
             )
             db.add(summary)
             await db.commit()
             await db.refresh(summary)
             return summary
 
-    async def get_summaries(self, meeting_id: str) -> list[Summary]:
+    async def get_summaries(self, meeting_id: str, status: str | None = None) -> list[Summary]:
         """Get summaries for a meeting."""
         async with self._session_factory() as db:
-            result = await db.execute(
-                select(Summary)
-                .where(Summary.meeting_id == meeting_id)
-                .order_by(Summary.created_at.desc())
-            )
+            query = select(Summary).where(Summary.meeting_id == meeting_id)
+            if status:
+                query = query.where(Summary.status == status)
+            result = await db.execute(query.order_by(Summary.created_at.desc()))
             return list(result.scalars().all())
+
+    async def get_summary(self, summary_id: str) -> Summary | None:
+        """Get a summary by ID."""
+        async with self._session_factory() as db:
+            result = await db.execute(select(Summary).where(Summary.id == summary_id))
+            return result.scalar_one_or_none()
+
+    async def get_latest_summary(
+        self,
+        meeting_id: str,
+        status: str | None = None,
+    ) -> Summary | None:
+        """Get the newest summary for a meeting, optionally filtered by status."""
+        summaries = await self.get_summaries(meeting_id, status=status)
+        return summaries[0] if summaries else None
+
+    async def get_draft_summary(self, meeting_id: str) -> Summary | None:
+        """Get the active draft summary for a meeting."""
+        return await self.get_latest_summary(meeting_id, status="draft")
+
+    async def delete_summary(self, summary_id: str) -> None:
+        """Delete a summary by ID."""
+        async with self._session_factory() as db:
+            await db.execute(delete(Summary).where(Summary.id == summary_id))
+            await db.commit()
+
+    async def delete_draft_summaries(self, meeting_id: str) -> int:
+        """Delete all draft summaries for a meeting."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                delete(Summary).where(Summary.meeting_id == meeting_id, Summary.status == "draft")
+            )
+            await db.commit()
+            return result.rowcount or 0
+
+    async def replace_draft_summary(
+        self,
+        meeting_id: str,
+        *,
+        content: str,
+        backend: str,
+        model: str,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        processing_duration_seconds: float | None = None,
+        template: str | None = None,
+        source_type: str = "generated",
+        parent_summary_id: str | None = None,
+        template_key: str | None = None,
+        custom_prompt: str | None = None,
+        attendees_snapshot: str | None = None,
+    ) -> Summary:
+        """Replace the active draft summary for a meeting."""
+        await self.delete_draft_summaries(meeting_id)
+        return await self.add_summary(
+            meeting_id=meeting_id,
+            content=content,
+            backend=backend,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            processing_duration_seconds=processing_duration_seconds,
+            template=template,
+            status="draft",
+            source_type=source_type,
+            parent_summary_id=parent_summary_id,
+            template_key=template_key,
+            custom_prompt=custom_prompt,
+            attendees_snapshot=attendees_snapshot,
+        )
+
+    async def update_summary(
+        self,
+        summary_id: str,
+        *,
+        content: str | object = UNSET,
+        source_type: str | object = UNSET,
+        parent_summary_id: str | None | object = UNSET,
+        saved_to_obsidian_at: datetime | None | object = UNSET,
+        obsidian_relative_path: str | None | object = UNSET,
+    ) -> Summary | None:
+        """Update mutable summary fields."""
+        values: dict[str, Any] = {}
+        if content is not UNSET:
+            values["content"] = content
+        if source_type is not UNSET:
+            values["source_type"] = source_type
+        if parent_summary_id is not UNSET:
+            values["parent_summary_id"] = parent_summary_id
+        if saved_to_obsidian_at is not UNSET:
+            values["saved_to_obsidian_at"] = saved_to_obsidian_at
+        if obsidian_relative_path is not UNSET:
+            values["obsidian_relative_path"] = obsidian_relative_path
+        if not values:
+            return await self.get_summary(summary_id)
+
+        async with self._session_factory() as db:
+            await db.execute(update(Summary).where(Summary.id == summary_id).values(**values))
+            await db.commit()
+        return await self.get_summary(summary_id)
+
+    async def create_draft_from_summary(
+        self,
+        source_summary_id: str,
+        *,
+        source_type: str,
+    ) -> Summary:
+        """Clone any summary into the meeting's active draft slot."""
+        source = await self.get_summary(source_summary_id)
+        if not source:
+            raise ValueError("Source summary not found")
+        return await self.replace_draft_summary(
+            meeting_id=source.meeting_id,
+            content=source.content,
+            backend=source.backend,
+            model=source.model,
+            prompt_tokens=source.prompt_tokens,
+            completion_tokens=source.completion_tokens,
+            processing_duration_seconds=source.processing_duration_seconds,
+            template=source.template,
+            source_type=source_type,
+            parent_summary_id=source.id,
+            template_key=source.template_key,
+            custom_prompt=source.custom_prompt,
+            attendees_snapshot=source.attendees_snapshot,
+        )
+
+    async def save_draft_summary(
+        self,
+        draft_id: str,
+        *,
+        saved_to_obsidian_at: datetime | None = None,
+        obsidian_relative_path: str | None = None,
+    ) -> Summary:
+        """Persist a draft as an immutable saved summary and clear active drafts."""
+        draft = await self.get_summary(draft_id)
+        if not draft:
+            raise ValueError("Draft summary not found")
+        if draft.status != "draft":
+            return draft
+
+        saved = await self.add_summary(
+            meeting_id=draft.meeting_id,
+            content=draft.content,
+            backend=draft.backend,
+            model=draft.model,
+            prompt_tokens=draft.prompt_tokens,
+            completion_tokens=draft.completion_tokens,
+            processing_duration_seconds=draft.processing_duration_seconds,
+            template=draft.template,
+            status="saved",
+            source_type=draft.source_type,
+            parent_summary_id=draft.parent_summary_id,
+            template_key=draft.template_key,
+            custom_prompt=draft.custom_prompt,
+            attendees_snapshot=draft.attendees_snapshot,
+            saved_to_obsidian_at=saved_to_obsidian_at,
+            obsidian_relative_path=obsidian_relative_path,
+        )
+        await self.delete_draft_summaries(draft.meeting_id)
+        return saved
 
     async def get_sessions_list(
         self, limit: int = 50, offset: int = 0
@@ -394,17 +648,23 @@ class Repository:
 
                 # Check if any meeting has summaries
                 has_summary = False
+                has_draft = False
+                needs_speaker_review = False
                 title = None
                 meetings = sorted(session.meetings, key=lambda m: m.key_start)
                 for meeting in meetings:
                     if not title and meeting.title:
                         title = meeting.title
-                    sum_result = await db.execute(
-                        select(Summary).where(Summary.meeting_id == meeting.id).limit(1)
+                    if meeting.speaker_review_required and meeting.speaker_review_completed_at is None:
+                        needs_speaker_review = True
+                    meeting_summaries = await db.execute(
+                        select(Summary).where(Summary.meeting_id == meeting.id)
                     )
-                    if sum_result.scalar_one_or_none():
+                    summaries = list(meeting_summaries.scalars().all())
+                    if any(summary.status == "saved" for summary in summaries):
                         has_summary = True
-                        break
+                    if any(summary.status == "draft" for summary in summaries):
+                        has_draft = True
 
                 recordings.append({
                     "id": session.id,
@@ -417,6 +677,8 @@ class Repository:
                     "duration_seconds": duration_seconds,
                     "segment_count": len(segments),
                     "has_summary": has_summary,
+                    "has_draft": has_draft,
+                    "needs_speaker_review": needs_speaker_review,
                 })
 
             return recordings
@@ -446,6 +708,25 @@ class Repository:
         if "speaker" not in column_names:
             await conn.execute(text("ALTER TABLE transcript_segments ADD COLUMN speaker VARCHAR(64)"))
 
+    async def _ensure_transcript_speaker_cluster_column(self, conn) -> None:
+        """Backfill schema for immutable diarization speaker clusters."""
+        result = await conn.execute(text("PRAGMA table_info(transcript_segments)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "speaker_cluster" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE transcript_segments ADD COLUMN speaker_cluster VARCHAR(64)")
+            )
+        await conn.execute(
+            text(
+                """
+                UPDATE transcript_segments
+                SET speaker_cluster = speaker
+                WHERE speaker_cluster IS NULL
+                  AND speaker LIKE 'SPEAKER_%'
+                """
+            )
+        )
+
     async def _ensure_summary_duration_column(self, conn) -> None:
         """Backfill schema for processing duration on existing SQLite DBs."""
         result = await conn.execute(text("PRAGMA table_info(summaries)"))
@@ -459,6 +740,77 @@ class Repository:
         column_names = {row[1] for row in result.fetchall()}
         if "template" not in column_names:
             await conn.execute(text("ALTER TABLE summaries ADD COLUMN template VARCHAR(100)"))
+
+    async def _ensure_meeting_workflow_columns(self, conn) -> None:
+        """Backfill schema for recording-level workflow settings."""
+        result = await conn.execute(text("PRAGMA table_info(meetings)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "template_key" not in column_names:
+            await conn.execute(text("ALTER TABLE meetings ADD COLUMN template_key VARCHAR(100)"))
+        if "custom_prompt" not in column_names:
+            await conn.execute(text("ALTER TABLE meetings ADD COLUMN custom_prompt TEXT"))
+        if "attendees" not in column_names:
+            await conn.execute(text("ALTER TABLE meetings ADD COLUMN attendees TEXT"))
+        if "speaker_review_required" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE meetings ADD COLUMN speaker_review_required BOOLEAN DEFAULT 0")
+            )
+        if "speaker_review_completed_at" not in column_names:
+            await conn.execute(text("ALTER TABLE meetings ADD COLUMN speaker_review_completed_at DATETIME"))
+        await conn.execute(
+            text(
+                """
+                UPDATE meetings
+                SET template_key = 'meeting'
+                WHERE template_key IS NULL OR template_key = ''
+                """
+            )
+        )
+
+    async def _ensure_summary_workflow_columns(self, conn) -> None:
+        """Backfill schema for draft/saved summary workflow metadata."""
+        result = await conn.execute(text("PRAGMA table_info(summaries)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "status" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN status VARCHAR(20) DEFAULT 'saved'"))
+        if "source_type" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE summaries ADD COLUMN source_type VARCHAR(32) DEFAULT 'generated'")
+            )
+        if "parent_summary_id" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN parent_summary_id VARCHAR(36)"))
+        if "template_key" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN template_key VARCHAR(100)"))
+        if "custom_prompt" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN custom_prompt TEXT"))
+        if "attendees_snapshot" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN attendees_snapshot TEXT"))
+        if "saved_to_obsidian_at" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN saved_to_obsidian_at DATETIME"))
+        if "obsidian_relative_path" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN obsidian_relative_path TEXT"))
+
+        await conn.execute(
+            text(
+                """
+                UPDATE summaries
+                SET status = 'saved'
+                WHERE status IS NULL OR status = ''
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                UPDATE summaries
+                SET source_type = CASE
+                    WHEN backend = 'manual' THEN 'manual_edit'
+                    ELSE 'generated'
+                END
+                WHERE source_type IS NULL OR source_type = ''
+                """
+            )
+        )
 
     # Structured item operations
     async def add_structured_item(

@@ -35,7 +35,7 @@ from src.audio.storage import (
     write_chunk,
 )
 from src.sessions.manager import SessionManager
-from src.sessions.repository import Repository
+from src.sessions.repository import Repository, UNSET
 from src.summarization.manager import SummarizationManager
 
 
@@ -142,6 +142,158 @@ def get_summarization_manager(request: Request) -> SummarizationManager:
 def get_repository(request: Request) -> Repository:
     """Dependency to get repository."""
     return request.app.state.repository
+
+
+def _normalize_optional_text(value: str | None) -> str:
+    return (value or "").strip()
+
+
+def _can_resolve_speakers_from_attendees(meeting) -> bool:
+    return bool(
+        meeting
+        and meeting.speaker_review_required
+        and meeting.speaker_review_completed_at is None
+        and _normalize_optional_text(getattr(meeting, "attendees", None))
+    )
+
+
+def _is_generic_speaker(label: str | None) -> bool:
+    return bool(label and label.startswith("SPEAKER_"))
+
+
+def _transcript_requires_speaker_review(segments: list) -> bool:
+    raw_speakers = {
+        getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+        for segment in segments
+    }
+    unresolved = {speaker for speaker in raw_speakers if _is_generic_speaker(speaker)}
+    return len(unresolved) > 1
+
+
+def _serialize_summary(summary) -> dict:
+    return {
+        "id": str(summary.id),
+        "meeting_id": str(summary.meeting_id),
+        "content": summary.content,
+        "backend": summary.backend,
+        "model": summary.model,
+        "created_at": to_utc_iso(summary.created_at),
+        "processing_duration_seconds": summary.processing_duration_seconds,
+        "template": summary.template,
+        "template_key": summary.template_key,
+        "status": summary.status,
+        "source_type": summary.source_type,
+        "saved_to_obsidian_at": to_utc_iso(summary.saved_to_obsidian_at),
+        "obsidian_relative_path": summary.obsidian_relative_path,
+    }
+
+
+def _serialize_transcript_segments(segments: list) -> list[dict]:
+    transcript_lines = []
+    for segment in segments:
+        mins = int(segment.start_time // 60)
+        secs = int(segment.start_time % 60)
+        transcript_lines.append(
+            {
+                "id": str(segment.id),
+                "timestamp": f"[{mins:02d}:{secs:02d}]",
+                "text": segment.text,
+                "speaker": getattr(segment, "speaker", None),
+                "speaker_cluster": getattr(segment, "speaker_cluster", None),
+                "is_important": segment.is_important,
+                "start_time": segment.start_time,
+                "end_time": segment.end_time,
+            }
+        )
+    return transcript_lines
+
+
+def _build_speaker_cards(segments: list, session_id: str) -> list[dict]:
+    grouped: dict[str, list] = {}
+    for segment in segments:
+        speaker_cluster = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+        if not speaker_cluster:
+            continue
+        grouped.setdefault(speaker_cluster, []).append(segment)
+
+    cards: list[dict] = []
+    for speaker_cluster, speaker_segments in sorted(grouped.items(), key=lambda item: item[0]):
+        speaker_segments.sort(key=lambda segment: segment.start_time)
+        first = speaker_segments[0]
+        display_name = getattr(first, "speaker", None)
+        clip_duration = min(5.0, max(0.5, float(first.end_time) - float(first.start_time)))
+        cards.append(
+            {
+                "speaker_cluster": speaker_cluster,
+                "display_name": None if display_name == speaker_cluster else display_name,
+                "raw_label": speaker_cluster,
+                "preview_text": first.text[:160],
+                "clip_start": float(first.start_time),
+                "clip_end": float(first.start_time) + clip_duration,
+                "audio_url": f"/api/recordings/{session_id}/audio",
+                "needs_name": _is_generic_speaker(speaker_cluster)
+                and (not display_name or display_name == speaker_cluster),
+            }
+        )
+    return cards
+
+
+def _summary_is_out_of_date(meeting, summary) -> bool:
+    if not summary:
+        return False
+    if (
+        meeting.speaker_review_required
+        and meeting.speaker_review_completed_at
+        and summary.created_at < meeting.speaker_review_completed_at
+    ):
+        return True
+    meeting_template_key = meeting.template_key or "meeting"
+    if summary.template_key:
+        if summary.template_key != meeting_template_key:
+            return True
+    elif meeting_template_key != "meeting":
+        return True
+    summary_prompt = _normalize_optional_text(summary.custom_prompt)
+    meeting_prompt = _normalize_optional_text(meeting.custom_prompt)
+    if (summary_prompt or meeting_prompt) and summary_prompt != meeting_prompt:
+        return True
+    summary_attendees = _normalize_optional_text(summary.attendees_snapshot)
+    meeting_attendees = _normalize_optional_text(meeting.attendees)
+    if (summary_attendees or meeting_attendees) and summary_attendees != meeting_attendees:
+        return True
+    return False
+
+
+def _build_recording_workspace_state(
+    session,
+    meeting,
+    segments: list,
+    saved_summaries: list,
+    draft_summary,
+    latest_saved_summary,
+) -> dict:
+    current_summary = draft_summary or latest_saved_summary
+    can_resolve_speakers_from_attendees = _can_resolve_speakers_from_attendees(meeting)
+    return {
+        "has_transcription": bool(session.has_transcription),
+        "requires_speaker_review": bool(
+            meeting and meeting.speaker_review_required and meeting.speaker_review_completed_at is None
+        ),
+        "can_resolve_speakers_from_attendees": can_resolve_speakers_from_attendees,
+        "can_generate_summary": bool(
+            session.has_transcription
+            and (
+                not meeting
+                or not meeting.speaker_review_required
+                or meeting.speaker_review_completed_at is not None
+                or can_resolve_speakers_from_attendees
+            )
+        ),
+        "has_unsaved_draft": draft_summary is not None,
+        "summary_out_of_date": _summary_is_out_of_date(meeting, current_summary) if meeting else False,
+        "transcript_segment_count": len(segments),
+        "saved_summary_count": len(saved_summaries),
+    }
 
 
 # Request/Response models
@@ -485,10 +637,23 @@ class RecordingResponse(BaseModel):
     segment_count: int
     has_transcription: bool
     has_summary: bool
+    has_draft: bool = False
+    needs_speaker_review: bool = False
     has_audio: bool
 
     class Config:
         from_attributes = True
+
+
+class UpdateRecordingSettingsRequest(BaseModel):
+    title: Optional[str] = None
+    template_key: Optional[str] = None
+    custom_prompt: Optional[str] = None
+    attendees: Optional[str] = None
+
+
+class UpdateSpeakerAssignmentsRequest(BaseModel):
+    assignments: dict[str, str]
 
 
 @router.get("/recordings", response_model=List[RecordingResponse])
@@ -528,6 +693,248 @@ async def list_recordings(
     return sessions
 
 
+@router.get("/recordings/{session_id}/workspace")
+async def get_recording_workspace(
+    session_id: str,
+    repository: Repository = Depends(get_repository),
+):
+    """Return the unified recording workspace state for new and past recordings."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    meeting = await repository.get_primary_meeting(session_id, create_if_missing=True)
+    if not meeting:
+        raise HTTPException(status_code=400, detail="No meeting found for this recording")
+
+    segments = await repository.get_segments(session_id=session_id)
+    if session.has_transcription and segments:
+        inferred_requires_review = _transcript_requires_speaker_review(segments)
+        if inferred_requires_review and not meeting.speaker_review_required:
+            meeting = await repository.update_meeting_settings(
+                meeting.id,
+                speaker_review_required=True,
+            )
+    saved_summaries = await repository.get_summaries(meeting.id, status="saved")
+    draft_summary = await repository.get_draft_summary(meeting.id)
+    latest_saved_summary = saved_summaries[0] if saved_summaries else None
+
+    duration_seconds = 0
+    if segments:
+        duration_seconds = int(max(segment.end_time for segment in segments))
+    elif session.ended_at:
+        elapsed = (session.ended_at - session.started_at).total_seconds()
+        duration_seconds = max(0, int(elapsed))
+
+    if session.timezone_name is not None or session.timezone_offset_minutes is not None:
+        date_label, time_label, tz_label = _build_recorded_labels(
+            session.started_at,
+            session.timezone_name,
+            session.timezone_offset_minutes,
+        )
+    else:
+        date_label, time_label, tz_label = None, None, None
+
+    audio_path = get_session_audio_path(session.id)
+    if not audio_path and session.ended_at:
+        audio_path = ensure_session_audio_path(session.id)
+
+    settings = get_settings()
+    vault_name = (
+        os.path.basename(settings.obsidian_vault_path.rstrip("/"))
+        if settings.obsidian_vault_path
+        else ""
+    )
+    open_in_obsidian_uri = None
+    if latest_saved_summary and latest_saved_summary.obsidian_relative_path and vault_name:
+        open_in_obsidian_uri = (
+            f"obsidian://open?"
+            f"vault={urllib.parse.quote(vault_name)}&"
+            f"file={urllib.parse.quote(latest_saved_summary.obsidian_relative_path)}"
+        )
+    elif latest_saved_summary:
+        search_query = _build_formatted_title(
+            session.started_at,
+            meeting.title,
+            timezone_name=session.timezone_name,
+            timezone_offset_minutes=session.timezone_offset_minutes,
+        )
+        exported_note_filename = _find_exported_note_filename(
+            settings.obsidian_vault_path,
+            session.started_at,
+            meeting.title,
+            session.timezone_name,
+            session.timezone_offset_minutes,
+        )
+        if vault_name and exported_note_filename:
+            open_in_obsidian_uri = (
+                f"obsidian://open?"
+                f"vault={urllib.parse.quote(vault_name)}&"
+                f"file={urllib.parse.quote(exported_note_filename)}"
+            )
+        elif vault_name:
+            open_in_obsidian_uri = (
+                f"obsidian://search?"
+                f"vault={urllib.parse.quote(vault_name)}&"
+                f"query={urllib.parse.quote(search_query)}"
+            )
+
+    speaker_cards = _build_speaker_cards(segments, session_id) if session.has_transcription else []
+
+    return {
+        "recording": {
+            "id": session.id,
+            "meeting_id": meeting.id,
+            "title": meeting.title,
+            "formatted_title": _build_formatted_title(
+                session.started_at,
+                meeting.title,
+                timezone_name=session.timezone_name,
+                timezone_offset_minutes=session.timezone_offset_minutes,
+            ),
+            "timezone_name": session.timezone_name,
+            "timezone_offset_minutes": session.timezone_offset_minutes,
+            "recorded_date_label": date_label,
+            "recorded_time_label": time_label,
+            "recorded_timezone_label": tz_label,
+            "started_at": to_utc_iso(session.started_at),
+            "ended_at": to_utc_iso(session.ended_at),
+            "duration_seconds": duration_seconds,
+            "segment_count": len(segments),
+            "has_transcription": bool(session.has_transcription),
+            "has_audio": audio_path is not None,
+            "audio_url": f"/api/recordings/{session.id}/audio" if audio_path else None,
+            "audio_download_url": (
+                f"/api/recordings/{session.id}/audio?download=true" if audio_path else None
+            ),
+        },
+        "settings": {
+            "title": meeting.title,
+            "template_key": meeting.template_key or "meeting",
+            "custom_prompt": meeting.custom_prompt,
+            "attendees": meeting.attendees,
+        },
+        "speaker_review": {
+            "required": bool(meeting.speaker_review_required),
+            "completed": (not meeting.speaker_review_required)
+            or meeting.speaker_review_completed_at is not None,
+            "completed_at": to_utc_iso(meeting.speaker_review_completed_at),
+            "speakers": speaker_cards,
+        },
+        "transcript": _serialize_transcript_segments(segments) if session.has_transcription else [],
+        "draft_summary": _serialize_summary(draft_summary) if draft_summary else None,
+        "saved_summaries": [_serialize_summary(summary) for summary in saved_summaries],
+        "active_summary": _serialize_summary(draft_summary or latest_saved_summary)
+        if (draft_summary or latest_saved_summary)
+        else None,
+        "obsidian": {
+            "open_uri": open_in_obsidian_uri,
+            "latest_relative_path": latest_saved_summary.obsidian_relative_path
+            if latest_saved_summary
+            else None,
+        },
+        "state": _build_recording_workspace_state(
+            session,
+            meeting,
+            segments,
+            saved_summaries,
+            draft_summary,
+            latest_saved_summary,
+        ),
+    }
+
+
+@router.patch("/recordings/{session_id}/settings")
+async def update_recording_settings(
+    session_id: str,
+    request: UpdateRecordingSettingsRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Persist workspace settings inline without blocking processing."""
+    meeting = await repository.get_primary_meeting(session_id, create_if_missing=True)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    normalized_title = UNSET
+    if request.title is not None:
+        normalized_title = request.title.strip() or None
+    normalized_template_key = request.template_key if request.template_key is not None else UNSET
+    normalized_custom_prompt = UNSET
+    if request.custom_prompt is not None:
+        normalized_custom_prompt = request.custom_prompt.strip() or None
+    normalized_attendees = UNSET
+    if request.attendees is not None:
+        normalized_attendees = request.attendees.strip() or None
+
+    updated = await repository.update_meeting_settings(
+        meeting.id,
+        title=normalized_title,
+        template_key=normalized_template_key,
+        custom_prompt=normalized_custom_prompt,
+        attendees=normalized_attendees,
+    )
+    return {
+        "success": True,
+        "meeting_id": updated.id,
+        "title": updated.title,
+        "template_key": updated.template_key,
+        "custom_prompt": updated.custom_prompt,
+        "attendees": updated.attendees,
+    }
+
+
+@router.get("/recordings/{session_id}/speakers")
+async def get_recording_speakers(
+    session_id: str,
+    repository: Repository = Depends(get_repository),
+):
+    """Return speaker cards for the workspace speaker-review step."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    segments = await repository.get_segments(session_id=session_id)
+    return {
+        "audio_url": f"/api/recordings/{session_id}/audio",
+        "speakers": _build_speaker_cards(segments, session_id),
+    }
+
+
+@router.put("/recordings/{session_id}/speakers")
+async def update_recording_speakers(
+    session_id: str,
+    request: UpdateSpeakerAssignmentsRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Save speaker assignments and mark summary freshness stale."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    meeting = await repository.get_primary_meeting(session_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    segments = await repository.get_segments(session_id=session_id)
+    updates: dict[str, str | None] = {}
+    for segment in segments:
+        speaker_cluster = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+        if not speaker_cluster:
+            continue
+        mapped_name = request.assignments.get(speaker_cluster)
+        if mapped_name and mapped_name.strip():
+            updates[segment.id] = mapped_name.strip()
+
+    if updates:
+        await repository.update_segments_speakers(updates)
+
+    await repository.update_meeting_settings(
+        meeting.id,
+        speaker_review_required=_transcript_requires_speaker_review(segments),
+        speaker_review_completed_at=datetime.utcnow(),
+    )
+    return {"success": True, "updated": len(updates)}
+
+
 class SaveSummaryRequest(BaseModel):
     content: str
     revision_instruction: Optional[str] = None
@@ -554,7 +961,7 @@ async def save_recording_summary(
     primary_meeting = next((m for m in meetings if m.id == target_meeting_id), meetings[0])
     
     # Get original summary to copy metadata if possible
-    existing_summaries = await repository.get_summaries(primary_meeting.id)
+    existing_summaries = await repository.get_summaries(primary_meeting.id, status="saved")
     original_summary = existing_summaries[0] if existing_summaries else None
     
     # Save to DB (always committed; vault write is best-effort below)
@@ -565,6 +972,11 @@ async def save_recording_summary(
         model="user-refined",
         template=original_summary.template if original_summary else None,
         processing_duration_seconds=original_summary.processing_duration_seconds if original_summary else None,
+        status="saved",
+        source_type="manual_edit",
+        template_key=primary_meeting.template_key,
+        custom_prompt=primary_meeting.custom_prompt,
+        attendees_snapshot=primary_meeting.attendees,
     )
 
     # Best-effort vault write
@@ -627,6 +1039,11 @@ async def save_recording_summary(
             from src.api.routes.export import _write_obsidian_file
             _, obsidian_uri = await _write_obsidian_file(
                 markdown_content, relative_path, settings.obsidian_vault_path
+            )
+            await repository.update_summary(
+                summary.id,
+                saved_to_obsidian_at=datetime.utcnow(),
+                obsidian_relative_path=relative_path,
             )
         except Exception as e:
             logger.warning("save_recording_summary: vault write failed (non-fatal): %s", e)
@@ -1132,16 +1549,24 @@ async def set_speaker_mapping(
     if not segments:
         raise HTTPException(status_code=404, detail="No transcript segments found")
 
+    meeting = await repository.get_primary_meeting(session_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
     # Update each segment's speaker
     updates = {}
     for seg in segments:
-        old_speaker = getattr(seg, "speaker", None)
-        if old_speaker and old_speaker in request.mapping:
-            new_name = request.mapping[old_speaker]
+        speaker_key = getattr(seg, "speaker_cluster", None) or getattr(seg, "speaker", None)
+        if speaker_key and speaker_key in request.mapping:
+            new_name = request.mapping[speaker_key]
             updates[seg.id] = new_name
 
     if updates:
         await repository.update_segments_speakers(updates)
+        await repository.update_meeting_settings(
+            meeting.id,
+            speaker_review_completed_at=datetime.utcnow(),
+        )
 
     logger.info("speaker_mapping: updated %d segments for session %s", len(updates), session_id)
 

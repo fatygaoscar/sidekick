@@ -232,11 +232,14 @@ Default template: `meeting`
 - **Force Re-diarize**: When attendees are provided, diarization always runs (even if speakers already exist in DB)
 - **Min/Max Speakers**: diarize.py accepts `min_speakers` and `max_speakers` params to constrain pyannote
 
-**Handoff Notes (2026-03-05, latest)**:
+**Handoff Notes (2026-03-06, latest)**:
 - **Model**: `qwen3:8b` (5.2GB, 100% GPU). `OLLAMA_NUM_GPU=99` forces all layers to GPU. `temperature=0.3` added to all calls.
 - **Speaker Resolution**: Two methods:
   1. **LLM-based**: `_resolve_speaker_map()` uses first 5000 chars + attendee name lines from full transcript. Requires names to be spoken in recording.
   2. **Manual**: Users listen to clips and enter names manually. Much more reliable when names aren't spoken.
+- **Workspace Summary Gate**: Pending speaker review no longer blocks summary generation when `meeting.attendees` is filled in. The attendee pre-pass gets the first attempt to resolve `SPEAKER_XX` labels before manual review is required.
+- **Resolved Speaker Persistence**: When the attendee pre-pass resolves every generic speaker label, those names are written back to transcript segments and the workspace marks speaker review complete so the draft can be saved normally.
+- **Workspace State Isolation**: Opening a different recording clears unsaved speaker assignments from the previous workspace, and closing the workspace flushes pending settings edits before dismissing the modal.
 - **Pipeline Optimizations**:
   - Speech-Aware Diarization: stops at last Whisper timestamp + 5s.
   - Dynamic Context: `num_ctx` calculated from input size.

@@ -50,6 +50,11 @@ class Meeting(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), nullable=False)
     title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    template_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    custom_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attendees: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    speaker_review_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    speaker_review_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     key_start: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     key_stop: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -78,6 +83,7 @@ class TranscriptSegment(Base):
     is_important: Mapped[bool] = mapped_column(Boolean, default=False)
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     speaker: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    speaker_cluster: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
     # Relationships
     session: Mapped["Session"] = relationship("Session", back_populates="segments")
@@ -116,6 +122,16 @@ class Summary(Base):
     completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     processing_duration_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     template: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="saved")
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="generated")
+    parent_summary_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("summaries.id"), nullable=True
+    )
+    template_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    custom_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attendees_snapshot: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    saved_to_obsidian_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    obsidian_relative_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Relationships
     meeting: Mapped["Meeting"] = relationship("Meeting", back_populates="summaries")

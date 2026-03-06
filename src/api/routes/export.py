@@ -100,6 +100,19 @@ class RefineRequest(BaseModel):
     current_summary: str
 
 
+class DraftUpdateRequest(BaseModel):
+    content: str
+
+
+class DraftReviseRequest(BaseModel):
+    instruction: str
+
+
+class CreateDraftRequest(BaseModel):
+    source_summary_id: Optional[str] = None
+    source_type: str = "manual_edit"
+
+
 class TranscriptionJobCreateResponse(BaseModel):
     job_id: str
     status: str
@@ -119,6 +132,33 @@ class TranscriptionJobStatus(BaseModel):
     error: Optional[str] = None
 
 
+class SummaryJobCreateResponse(BaseModel):
+    job_id: str
+    status: str
+    poll_url: str
+
+
+class SummaryJobResult(BaseModel):
+    draft_summary_id: str
+    summary_preview: str
+    summary_content: str
+
+
+class SummaryJobStatus(BaseModel):
+    job_id: str
+    session_id: str
+    status: str
+    stage: str
+    message: str
+    transcription_progress: float
+    summarization_progress: float
+    overall_progress: float
+    created_at: str
+    updated_at: str
+    result: Optional[SummaryJobResult] = None
+    error: Optional[str] = None
+
+
 ProgressCallback = Callable[[str, str, Optional[float], Optional[float]], Awaitable[None] | None]
 TranscriptionProgressCallback = Callable[[str, str, Optional[float]], Awaitable[None] | None]
 
@@ -126,6 +166,8 @@ _EXPORT_JOBS: dict[str, dict] = {}
 _EXPORT_TASKS: dict[str, asyncio.Task] = {}
 _TRANSCRIPTION_JOBS: dict[str, dict] = {}
 _TRANSCRIPTION_TASKS: dict[str, asyncio.Task] = {}
+_SUMMARY_JOBS: dict[str, dict] = {}
+_SUMMARY_TASKS: dict[str, asyncio.Task] = {}
 
 
 @router.get("/templates")
@@ -183,6 +225,80 @@ def _compute_transcription_job_progress(stage: str, transcription_progress: floa
     return max(0.0, min(transcription_progress, 1.0))
 
 
+def _speaker_identity(segment) -> str | None:
+    return getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+
+
+def _speaker_review_required(segments: list) -> bool:
+    raw_clusters = {
+        identity
+        for identity in (_speaker_identity(segment) for segment in segments)
+        if identity and str(identity).startswith("SPEAKER_")
+    }
+    return len(raw_clusters) > 1
+
+
+def _meeting_has_attendees(meeting) -> bool:
+    return bool(meeting and str(getattr(meeting, "attendees", "") or "").strip())
+
+
+def _speaker_review_blocks_summary(meeting) -> bool:
+    return bool(
+        meeting
+        and meeting.speaker_review_required
+        and meeting.speaker_review_completed_at is None
+        and not _meeting_has_attendees(meeting)
+    )
+
+
+async def _update_meeting_speaker_review_state(
+    repository: Repository,
+    meeting_id: str,
+    segments: list,
+) -> None:
+    required = _speaker_review_required(segments)
+    completed_at = None if required else datetime.utcnow()
+    await repository.update_meeting_settings(
+        meeting_id,
+        speaker_review_required=required,
+        speaker_review_completed_at=completed_at,
+    )
+
+
+async def _persist_resolved_speaker_map(
+    repository: Repository,
+    meeting,
+    segments: list,
+    speaker_map: dict[str, str],
+) -> None:
+    if not speaker_map or not meeting:
+        return
+
+    updates = {}
+    unresolved_clusters = {
+        identity
+        for identity in (_speaker_identity(segment) for segment in segments)
+        if identity and str(identity).startswith("SPEAKER_")
+    }
+
+    for segment in segments:
+        identity = _speaker_identity(segment)
+        if identity in speaker_map:
+            updates[segment.id] = speaker_map[identity]
+
+    if not updates:
+        return
+
+    await repository.update_segments_speakers(updates)
+
+    if unresolved_clusters and unresolved_clusters.issubset(set(speaker_map)):
+        await repository.update_meeting_settings(
+            meeting.id,
+            speaker_review_required=True,
+            speaker_review_completed_at=datetime.utcnow(),
+        )
+
+
 def _create_export_job(session_id: str) -> dict:
     job_id = str(uuid.uuid4())
     now = _utc_now_iso()
@@ -223,6 +339,27 @@ def _create_transcription_job(session_id: str) -> dict:
     return payload
 
 
+def _create_summary_job(session_id: str) -> dict:
+    job_id = str(uuid.uuid4())
+    now = _utc_now_iso()
+    payload = {
+        "job_id": job_id,
+        "session_id": session_id,
+        "status": "queued",
+        "stage": "queued",
+        "message": "Queued",
+        "transcription_progress": 0.0,
+        "summarization_progress": 0.0,
+        "overall_progress": 0.0,
+        "result": None,
+        "error": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    _SUMMARY_JOBS[job_id] = payload
+    return payload
+
+
 def _update_export_job(job_id: str, **fields) -> None:
     job = _EXPORT_JOBS.get(job_id)
     if not job:
@@ -248,6 +385,23 @@ def _update_transcription_job(job_id: str, **fields) -> None:
     stage = str(job.get("stage", "queued"))
     transcription_progress = float(job.get("transcription_progress", 0.0))
     job["overall_progress"] = _compute_transcription_job_progress(stage, transcription_progress)
+    job["updated_at"] = _utc_now_iso()
+
+
+def _update_summary_job(job_id: str, **fields) -> None:
+    job = _SUMMARY_JOBS.get(job_id)
+    if not job:
+        return
+
+    job.update(fields)
+    stage = str(job.get("stage", "queued"))
+    transcription_progress = float(job.get("transcription_progress", 0.0))
+    summarization_progress = float(job.get("summarization_progress", 0.0))
+    job["overall_progress"] = _compute_overall_progress(
+        stage,
+        transcription_progress,
+        summarization_progress,
+    )
     job["updated_at"] = _utc_now_iso()
 
 
@@ -393,6 +547,9 @@ async def _transcribe_and_persist_session(
                             end_time=end,
                             confidence=transcription_result.confidence,
                             speaker=assign_speaker(start, end, diarization_spans) if diarization_spans else None,
+                            speaker_cluster=(
+                                assign_speaker(start, end, diarization_spans) if diarization_spans else None
+                            ),
                         )
                         segment_count += 1
                     buffer_words = []
@@ -408,6 +565,7 @@ async def _transcribe_and_persist_session(
                     end_time=end,
                     confidence=transcription_result.confidence,
                     speaker=assign_speaker(start, end, diarization_spans) if diarization_spans else None,
+                    speaker_cluster=assign_speaker(start, end, diarization_spans) if diarization_spans else None,
                 )
                 segment_count += 1
         else:
@@ -419,6 +577,11 @@ async def _transcribe_and_persist_session(
                 end_time=audio_duration_seconds,
                 confidence=transcription_result.confidence,
                 speaker=assign_speaker(0.0, audio_duration_seconds, diarization_spans) if diarization_spans else None,
+                speaker_cluster=(
+                    assign_speaker(0.0, audio_duration_seconds, diarization_spans)
+                    if diarization_spans
+                    else None
+                ),
             )
             segment_count = 1
 
@@ -428,6 +591,7 @@ async def _transcribe_and_persist_session(
     segments = await repository.get_segments(session_id=session_id)
     if not segments:
         raise HTTPException(status_code=500, detail="Failed to build transcript segments from recording audio")
+    await _update_meeting_speaker_review_state(repository, primary_meeting_id, segments)
 
     transcript, _ = _segments_to_transcript(segments)
 
@@ -506,15 +670,27 @@ async def _run_export_pipeline(
 
     # Persist the user-provided title for history/recordings pages.
     meetings = sorted(session.meetings, key=lambda m: m.key_start) if session.meetings else []
+    primary_meeting = None
     primary_meeting_id = None
     if meetings:
         primary_meeting = meetings[0]
         primary_meeting_id = primary_meeting.id
-        if primary_meeting.title != request_payload.title:
-            await repository.update_meeting_title(primary_meeting.id, request_payload.title)
+        await repository.update_meeting_settings(
+            primary_meeting.id,
+            title=request_payload.title,
+            template_key=request_payload.template,
+            custom_prompt=request_payload.custom_prompt,
+            attendees=request_payload.attendees,
+        )
     else:
-        meeting = await repository.create_meeting(session_id=session.id, title=request_payload.title)
-        primary_meeting_id = meeting.id
+        primary_meeting = await repository.create_meeting(session_id=session.id, title=request_payload.title)
+        primary_meeting_id = primary_meeting.id
+        await repository.update_meeting_settings(
+            primary_meeting_id,
+            template_key=request_payload.template,
+            custom_prompt=request_payload.custom_prompt,
+            attendees=request_payload.attendees,
+        )
 
     # Reuse existing transcript when authoritative transcription exists and segments are present.
     existing_segments = await repository.get_segments(session_id=session_id) if session.has_transcription else []
@@ -526,13 +702,13 @@ async def _run_export_pipeline(
         # Run diarization on existing segments if enabled and not yet applied.
         # Always re-diarize if attendees are provided to ensure accurate speaker assignment
         _settings = get_settings()
-        has_speakers = any(getattr(seg, "speaker", None) for seg in existing_segments)
+        has_speaker_clusters = any(_speaker_identity(seg) for seg in existing_segments)
         should_diarize = _settings.diarization_enabled and _settings.hf_token
-        # Force re-diarization when attendees are provided, otherwise only if no speakers yet
-        if request_payload.attendees:
-            should_diarize = should_diarize and True
+        # Do not overwrite reviewed speaker assignments during re-summarization.
+        if primary_meeting and primary_meeting.speaker_review_completed_at:
+            should_diarize = False
         else:
-            should_diarize = should_diarize and not has_speakers
+            should_diarize = should_diarize and not has_speaker_clusters
         
         if should_diarize:
             audio_path = get_session_audio_path(session_id)
@@ -570,11 +746,23 @@ async def _run_export_pipeline(
                         step["spans"] = len(diarization_spans)
 
                     speaker_updates = {
-                        seg.id: assign_speaker(seg.start_time, seg.end_time, diarization_spans)
+                        seg.id: {
+                            "speaker": assign_speaker(seg.start_time, seg.end_time, diarization_spans),
+                            "speaker_cluster": assign_speaker(
+                                seg.start_time,
+                                seg.end_time,
+                                diarization_spans,
+                            ),
+                        }
                         for seg in existing_segments
                     }
-                    await repository.update_segments_speakers(speaker_updates)
+                    await repository.update_segments_speaker_metadata(speaker_updates)
                     existing_segments = await repository.get_segments(session_id=session_id)
+                    await _update_meeting_speaker_review_state(
+                        repository,
+                        primary_meeting_id,
+                        existing_segments,
+                    )
                 except Exception as exc:
                     logger.warning(f"Diarization failed on existing segments, continuing: {exc}")
 
@@ -625,25 +813,22 @@ async def _run_export_pipeline(
         logger.warning("[step] summarization | error | elapsed=%.1fs", time.monotonic() - _sum_t0)
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
 
+    if primary_meeting:
+        segments = await repository.get_segments(session_id=session_id)
+        await _persist_resolved_speaker_map(
+            repository=repository,
+            meeting=primary_meeting,
+            segments=segments,
+            speaker_map=summary_result.speaker_map,
+        )
+
     summarization_duration = time.monotonic() - _sum_t0
     logger.info("[step] summarization | done | elapsed=%.1fs", summarization_duration)
     await _emit_progress(progress_callback, "summarizing", "Summary complete", 1.0, 1.0)
 
-    # Persist resolved speaker names back to DB so the transcript UI shows real names
-    if summary_result.speaker_map:
-        segs = await repository.get_segments(session_id=session_id)
-        speaker_updates = {
-            seg.id: summary_result.speaker_map[seg.speaker]
-            for seg in segs
-            if getattr(seg, "speaker", None) in summary_result.speaker_map
-        }
-        if speaker_updates:
-            await repository.update_segments_speakers(speaker_updates)
-            logger.info(f"Resolved speaker labels for {len(speaker_updates)} segments: {summary_result.speaker_map}")
-
     template_label = TEMPLATE_INFO.get(template, {}).get("name", template.title())
-
-    await repository.add_summary(
+    latest_saved = await repository.get_latest_summary(primary_meeting_id, status="saved")
+    draft_summary = await repository.replace_draft_summary(
         meeting_id=primary_meeting_id,
         content=summary_result.content,
         backend=summary_result.backend,
@@ -652,6 +837,11 @@ async def _run_export_pipeline(
         completion_tokens=summary_result.completion_tokens,
         processing_duration_seconds=summarization_duration,
         template=template_label,
+        source_type="generated",
+        parent_summary_id=latest_saved.id if latest_saved else None,
+        template_key=template,
+        custom_prompt=request_payload.custom_prompt,
+        attendees_snapshot=request_payload.attendees,
     )
 
     summary_content = summary_result.content
@@ -670,10 +860,10 @@ async def _run_export_pipeline(
     base_filename = f"{local_started_at.day:02d} {dow} {time_hhmm} - {safe_title}"
     
     # Check for existing summaries to determine version
-    existing_summaries = await repository.get_summaries(primary_meeting_id)
+    existing_summaries = await repository.get_summaries(primary_meeting_id, status="saved")
     version_suffix = ""
-    if len(existing_summaries) > 1:
-        version_suffix = f" (v{len(existing_summaries)})"
+    if existing_summaries:
+        version_suffix = f" (v{len(existing_summaries) + 1})"
     
     filename = f"{base_filename}{version_suffix}.md"
     week_folder_name = week_folder(local_started_at)
@@ -696,6 +886,11 @@ async def _run_export_pipeline(
         "processing_time_str": processing_time_str,
         "filename": filename,
         "relative_path": relative_path,
+        "draft_summary_id": draft_summary.id,
+        "meeting_id": primary_meeting_id,
+        "template_key": template,
+        "custom_prompt": request_payload.custom_prompt,
+        "attendees": request_payload.attendees,
     }
 
     preview = summary_content[:200] + "..." if len(summary_content) > 200 else summary_content
@@ -851,6 +1046,179 @@ async def _run_transcription_job(
         )
 
 
+async def _build_summary_save_params(
+    repository: Repository,
+    session,
+    meeting,
+    *,
+    summary_content: str,
+    template_label: str,
+    processing_duration_seconds: float | None,
+) -> dict:
+    """Assemble markdown and path metadata for saving a summary draft."""
+    segments = await repository.get_segments(session_id=session.id)
+    transcript, audio_duration_seconds = _segments_to_transcript(segments)
+
+    local_started_at = localize_datetime(
+        session.started_at,
+        session.timezone_name,
+        session.timezone_offset_minutes,
+    )
+    tz_label = timezone_label(session.timezone_name, session.timezone_offset_minutes)
+    safe_title = re.sub(r'[<>:"/\\|?*]', "", (meeting.title or "Untitled Recording").strip())
+    dow = local_started_at.strftime("%a")
+    time_hhmm = local_started_at.strftime("%H%M")
+    base_filename = f"{local_started_at.day:02d} {dow} {time_hhmm} - {safe_title or 'Untitled Recording'}"
+    existing_summaries = await repository.get_summaries(meeting.id, status="saved")
+    version_suffix = f" (v{len(existing_summaries) + 1})" if existing_summaries else ""
+    filename = f"{base_filename}{version_suffix}.md"
+    week_folder_name = week_folder(local_started_at)
+    relative_path = f"Meetings/{week_folder_name}/{filename}"
+    recorded_at = format_datetime_human(local_started_at, tz_label)
+    processing_time_str = (
+        format_processing_time(processing_duration_seconds)
+        if processing_duration_seconds
+        else ""
+    )
+    duration_str = format_duration_human(int(audio_duration_seconds))
+
+    return {
+        "summary_content": summary_content,
+        "template_label": template_label,
+        "transcript": transcript,
+        "recorded_at": recorded_at,
+        "tz_label": tz_label,
+        "session_timezone_name": session.timezone_name,
+        "session_timezone_offset_minutes": session.timezone_offset_minutes,
+        "duration_str": duration_str,
+        "processing_time_str": processing_time_str,
+        "filename": filename,
+        "relative_path": relative_path,
+    }
+
+
+async def _run_summary_job(
+    job_id: str,
+    session_id: str,
+    summarization_manager: SummarizationManager,
+    repository: Repository,
+) -> None:
+    """Generate or regenerate a draft summary from an existing reviewed transcript."""
+
+    def update_progress(
+        stage: str,
+        message: str,
+        transcription_progress: Optional[float],
+        summarization_progress: Optional[float],
+    ) -> None:
+        updates = {
+            "status": "running",
+            "stage": stage,
+            "message": message,
+        }
+        if transcription_progress is not None:
+            updates["transcription_progress"] = max(0.0, min(1.0, transcription_progress))
+        if summarization_progress is not None:
+            updates["summarization_progress"] = max(0.0, min(1.0, summarization_progress))
+        _update_summary_job(job_id, **updates)
+
+    try:
+        session = await repository.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        meeting = await repository.get_primary_meeting(session_id)
+        if not meeting:
+            raise HTTPException(status_code=400, detail="No meeting found for this recording")
+
+        segments = await repository.get_segments(session_id=session_id)
+        if not session.has_transcription or not segments:
+            raise HTTPException(
+                status_code=409,
+                detail="Transcription must complete before generating a summary",
+            )
+        if _speaker_review_blocks_summary(meeting):
+            raise HTTPException(
+                status_code=409,
+                detail="Speaker review is required before generating a summary",
+            )
+
+        transcript, _ = _build_transcript_from_segments(segments)
+        template_key = meeting.template_key or "meeting"
+        await _emit_progress(update_progress, "summarizing", "Generating summary", 1.0, 0.02)
+        started_at = time.monotonic()
+
+        def on_progress(progress: float) -> None:
+            update_progress("summarizing", "Generating summary", 1.0, min(progress, 0.99))
+
+        summary_result = await summarization_manager.summarize(
+            transcript=transcript,
+            prompt_type=template_key,
+            custom_instructions=meeting.custom_prompt,
+            attendees=meeting.attendees,
+            progress_callback=on_progress,
+        )
+        await _persist_resolved_speaker_map(
+            repository=repository,
+            meeting=meeting,
+            segments=segments,
+            speaker_map=summary_result.speaker_map,
+        )
+        processing_duration = time.monotonic() - started_at
+        template_label = TEMPLATE_INFO.get(template_key, {}).get("name", template_key.title())
+        latest_saved = await repository.get_latest_summary(meeting.id, status="saved")
+        draft = await repository.replace_draft_summary(
+            meeting_id=meeting.id,
+            content=summary_result.content,
+            backend=summary_result.backend,
+            model=summary_result.model,
+            prompt_tokens=summary_result.prompt_tokens,
+            completion_tokens=summary_result.completion_tokens,
+            processing_duration_seconds=processing_duration,
+            template=template_label,
+            source_type="resummarized" if latest_saved else "generated",
+            parent_summary_id=latest_saved.id if latest_saved else None,
+            template_key=template_key,
+            custom_prompt=meeting.custom_prompt,
+            attendees_snapshot=meeting.attendees,
+        )
+        preview = (
+            summary_result.content[:200] + "..."
+            if len(summary_result.content) > 200
+            else summary_result.content
+        )
+        _update_summary_job(
+            job_id,
+            status="completed",
+            stage="completed",
+            message="Summary draft ready",
+            transcription_progress=1.0,
+            summarization_progress=1.0,
+            result={
+                "draft_summary_id": draft.id,
+                "summary_preview": preview,
+                "summary_content": summary_result.content,
+            },
+            error=None,
+        )
+    except HTTPException as exc:
+        _update_summary_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            message="Summary generation failed",
+            error=str(exc.detail),
+        )
+    except Exception as exc:
+        _update_summary_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            message="Summary generation failed",
+            error=str(exc),
+        )
+
+
 @router.post("/recordings/{session_id}/export-obsidian", response_model=ExportResponse)
 async def export_to_obsidian(
     session_id: str,
@@ -924,6 +1292,39 @@ async def start_transcription_job(
     )
 
 
+@router.post("/recordings/{session_id}/summary-job", response_model=SummaryJobCreateResponse)
+async def start_summary_job(
+    session_id: str,
+    repository: Repository = Depends(get_repository),
+    summarization_manager: SummarizationManager = Depends(get_summarization_manager),
+):
+    """Generate a draft summary from the current recording workspace settings."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    job = _create_summary_job(session_id)
+    job_id = str(job["job_id"])
+    _update_summary_job(job_id, message="Starting summary generation")
+
+    task = asyncio.create_task(
+        _run_summary_job(
+            job_id=job_id,
+            session_id=session_id,
+            summarization_manager=summarization_manager,
+            repository=repository,
+        )
+    )
+    _SUMMARY_TASKS[job_id] = task
+    task.add_done_callback(lambda _t: _SUMMARY_TASKS.pop(job_id, None))
+
+    return SummaryJobCreateResponse(
+        job_id=job_id,
+        status="queued",
+        poll_url=f"/api/summary-jobs/{job_id}",
+    )
+
+
 @router.post("/recordings/{session_id}/export-obsidian-job", response_model=ExportJobCreateResponse)
 async def export_to_obsidian_job(
     session_id: str,
@@ -962,6 +1363,15 @@ async def export_to_obsidian_job(
     )
 
 
+@router.get("/summary-jobs/{job_id}", response_model=SummaryJobStatus)
+async def get_summary_job(job_id: str):
+    """Get async summary-draft generation status."""
+    job = _SUMMARY_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Summary job not found")
+    return SummaryJobStatus(**job)
+
+
 @router.get("/export-jobs/{job_id}", response_model=ExportJobStatus)
 async def get_export_job(job_id: str):
     """Get asynchronous export job status."""
@@ -972,7 +1382,11 @@ async def get_export_job(job_id: str):
 
 
 @router.post("/export-jobs/{job_id}/save")
-async def save_export_job(job_id: str, request: SaveRequest):
+async def save_export_job(
+    job_id: str,
+    request: SaveRequest,
+    repository: Repository = Depends(get_repository),
+):
     """Assemble final markdown and write to Obsidian vault."""
     job = _EXPORT_JOBS.get(job_id)
     if not job:
@@ -993,7 +1407,11 @@ async def save_export_job(job_id: str, request: SaveRequest):
     )
     exported_at = format_datetime_human(local_exported_at, bp["tz_label"])
 
-    summary = request.edited_summary.strip() if request.edited_summary and request.edited_summary.strip() else bp["summary_content"]
+    summary = (
+        request.edited_summary.strip()
+        if request.edited_summary and request.edited_summary.strip()
+        else bp["summary_content"]
+    )
 
     markdown_content = build_obsidian_markdown(
         content=summary,
@@ -1010,6 +1428,22 @@ async def save_export_job(job_id: str, request: SaveRequest):
     with pipeline_step(logger, "vault_write", path=bp["relative_path"]):
         filepath, obsidian_uri = await _write_obsidian_file(
             markdown_content, bp["relative_path"], settings.obsidian_vault_path
+        )
+
+    draft_id = bp.get("draft_summary_id")
+    saved_at = datetime.utcnow()
+    if draft_id:
+        if request.edited_summary and request.edited_summary.strip():
+            source_type = "ai_revised" if request.revision_instruction else "manual_edit"
+            await repository.update_summary(
+                draft_id,
+                content=summary,
+                source_type=source_type,
+            )
+        await repository.save_draft_summary(
+            draft_id,
+            saved_to_obsidian_at=saved_at,
+            obsidian_relative_path=bp["relative_path"],
         )
 
     _update_export_job(job_id, status="completed", stage="completed", message="Saved to Obsidian")
@@ -1061,6 +1495,155 @@ async def refine_summary(
         return {"revised_summary": revised}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Refinement failed: {str(e)}")
+
+
+@router.post("/recordings/{session_id}/summary-draft")
+async def create_summary_draft(
+    session_id: str,
+    request: CreateDraftRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Create an editable draft from the latest saved summary when needed."""
+    meeting = await repository.get_primary_meeting(session_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    existing_draft = await repository.get_draft_summary(meeting.id)
+    if existing_draft:
+        return {"draft_summary_id": existing_draft.id}
+
+    source_summary_id = request.source_summary_id
+    if not source_summary_id:
+        latest_saved = await repository.get_latest_summary(meeting.id, status="saved")
+        if not latest_saved:
+            raise HTTPException(status_code=404, detail="No saved summary available to revise")
+        source_summary_id = latest_saved.id
+
+    try:
+        draft = await repository.create_draft_from_summary(
+            source_summary_id,
+            source_type=request.source_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return {"draft_summary_id": draft.id}
+
+
+@router.patch("/summary-drafts/{summary_id}")
+async def update_summary_draft(
+    summary_id: str,
+    request: DraftUpdateRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Update draft content after manual edits."""
+    draft = await repository.get_summary(summary_id)
+    if not draft or draft.status != "draft":
+        raise HTTPException(status_code=404, detail="Draft summary not found")
+
+    updated = await repository.update_summary(
+        summary_id,
+        content=request.content,
+        source_type="manual_edit",
+    )
+    return {"draft_summary_id": updated.id, "content": updated.content}
+
+
+@router.post("/summary-drafts/{summary_id}/revise")
+async def revise_summary_draft(
+    summary_id: str,
+    request: DraftReviseRequest,
+    repository: Repository = Depends(get_repository),
+    summarization_manager: SummarizationManager = Depends(get_summarization_manager),
+):
+    """Apply a single AI revision pass to a saved draft."""
+    draft = await repository.get_summary(summary_id)
+    if not draft or draft.status != "draft":
+        raise HTTPException(status_code=404, detail="Draft summary not found")
+
+    try:
+        revised = await summarization_manager.refine_summary(
+            instruction=request.instruction,
+            current_summary=draft.content,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Refinement failed: {str(exc)}")
+
+    updated = await repository.update_summary(
+        summary_id,
+        content=revised,
+        source_type="ai_revised",
+    )
+    return {"draft_summary_id": updated.id, "content": updated.content}
+
+
+@router.post("/summary-drafts/{summary_id}/save")
+async def save_summary_draft(
+    summary_id: str,
+    repository: Repository = Depends(get_repository),
+):
+    """Commit a draft summary as a saved version and write the Obsidian note."""
+    draft = await repository.get_summary(summary_id)
+    if not draft or draft.status != "draft":
+        raise HTTPException(status_code=404, detail="Draft summary not found")
+
+    meeting = await repository.get_meeting(draft.meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    session = await repository.get_session(meeting.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    params = await _build_summary_save_params(
+        repository,
+        session,
+        meeting,
+        summary_content=draft.content,
+        template_label=draft.template or TEMPLATE_INFO.get(
+            draft.template_key or meeting.template_key or "meeting",
+            {},
+        ).get("name", "Meeting"),
+        processing_duration_seconds=draft.processing_duration_seconds,
+    )
+
+    obsidian_uri = None
+    settings = get_settings()
+    if settings.obsidian_vault_path:
+        local_exported_at = localize_datetime(
+            datetime.now(timezone.utc),
+            params.get("session_timezone_name"),
+            params.get("session_timezone_offset_minutes"),
+        )
+        exported_at = format_datetime_human(local_exported_at, params["tz_label"])
+        markdown_content = build_obsidian_markdown(
+            content=params["summary_content"],
+            template_label=params["template_label"],
+            recorded_at=params["recorded_at"],
+            exported_at=exported_at,
+            duration_str=params["duration_str"],
+            processing_time_str=params["processing_time_str"],
+            transcript=params["transcript"],
+        )
+        _, obsidian_uri = await _write_obsidian_file(
+            markdown_content,
+            params["relative_path"],
+            settings.obsidian_vault_path,
+        )
+
+    saved_summary = await repository.save_draft_summary(
+        summary_id,
+        saved_to_obsidian_at=datetime.utcnow(),
+        obsidian_relative_path=params["relative_path"] if settings.obsidian_vault_path else None,
+    )
+
+    return {
+        "success": True,
+        "summary_id": saved_summary.id,
+        "filename": params["filename"],
+        "obsidian_uri": obsidian_uri,
+        "relative_path": params["relative_path"],
+    }
 
 
 @router.get("/transcription-jobs/{job_id}", response_model=TranscriptionJobStatus)
