@@ -26,7 +26,7 @@
 
     <!-- View Recording Modal -->
     <div id="view-modal" class="modal hidden">
-        <div class="modal-content" style="max-width: 640px;">
+        <div class="modal-content view-modal-content">
             <div class="modal-header">
                 <h2 class="modal-title" id="view-title">Recording</h2>
                 <button class="modal-close" id="view-close">&times;</button>
@@ -83,6 +83,7 @@
             </div>
             <div class="modal-footer">
                 <button class="btn" id="resummarize-btn">Re-summarize</button>
+                <button class="btn" id="resolve-speakers-btn">Resolve Speakers</button>
                 <button class="btn btn-primary" id="view-open-obsidian-btn">Open in Obsidian</button>
             </div>
         </div>
@@ -146,6 +147,24 @@
             <div class="modal-footer">
                 <button class="btn" id="back-to-list-btn">Back to List</button>
                 <button class="btn btn-primary" id="open-obsidian-btn">Open in Obsidian</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Resolve Speakers Modal -->
+    <div id="resolve-speakers-modal" class="modal hidden">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h2 class="modal-title">Resolve Speakers</h2>
+                <button class="modal-close" id="resolve-speakers-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="form-hint">Click play on each clip to hear the speaker, then enter their name.</p>
+                <div id="resolve-speakers-clips"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" id="resolve-speakers-cancel">Cancel</button>
+                <button class="btn btn-primary" id="resolve-speakers-submit">Apply & Re-summarize</button>
             </div>
         </div>
     </div>
@@ -215,6 +234,6 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="/static/js/recordings.js?v=20260210h"></script>
+    <script src="/static/js/recordings.js?v=20260305d"></script>
 </body>
 </html>

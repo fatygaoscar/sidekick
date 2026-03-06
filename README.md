@@ -8,6 +8,8 @@ Browser-based meeting recorder that transcribes audio, identifies speakers, and 
 - **Local transcription** via faster-whisper large-v3 (CUDA)
 - **Speaker diarization** via pyannote.audio 3.1 — speech-aware optimization skips silent ends
 - **Speaker name resolution** — provide attendee names and the LLM maps labels to real people before summarizing
+- **Manual speaker identification** — if LLM resolution fails (names not spoken), listen to audio clips and manually identify speakers
+- **Force re-diarize** — when attendees are provided, diarization always re-runs to improve speaker accuracy
 - **Eager background processing** — transcription starts in the background as soon as recording stops, so export skips Whisper when you click Process
 - **Inline rename** — hover a recording card and click the pencil icon to rename without opening the view modal
 - **History Summary View** — view and refine processed summaries directly in the recordings history
@@ -300,6 +302,8 @@ All templates are editable before export (click "Show" to view and modify the pr
 | `PUT /api/recordings/{id}/audio` | Upload full audio blob (fallback) |
 | `PUT /api/recordings/{id}/audio/chunks/{n}` | Upload chunk (needs `X-Client-ID`) |
 | `POST /api/recordings/{id}/audio/finalize` | Finalize chunks (needs `X-Client-ID`) |
+| `GET /api/recordings/{id}/speaker-clips` | Get audio clips for manual speaker resolution |
+| `POST /api/recordings/{id}/speaker-mapping` | Save manual speaker name mapping |
 | `WS /ws/audio` | Live audio stream |
 
 ## Debugging
@@ -342,8 +346,9 @@ All templates are editable before export (click "Show" to view and modify the pr
 - **`qwen3` vs `qwen3.5` thinking**: `qwen3:8b` properly respects `OLLAMA_THINK=false`. `qwen3.5` models always generate internal thinking tokens regardless of this setting — not suppressable.
 - **`OLLAMA_NUM_GPU=99`**: required to prevent Ollama's conservative auto-estimate from offloading layers to CPU.
 - Pipeline package (`src/summarization/pipeline/`) exists in codebase but is **not called from export**
-- Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist; diarization also skips if speakers already saved
+- Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist; diarization runs again if attendees are provided (force re-diarize)
 - Speaker name resolution requires the **Attendees field** at export time. Resolved names are written back to DB segments so the transcript view shows real names.
+- **Manual speaker resolution**: If LLM-based resolution fails (names not spoken in recording), use "Resolve Speakers" button in View modal to manually identify speakers by listening to audio clips
 - `start.sh` port check uses `connect()` (not `bind()`) to avoid false positives in WSL mirrored mode
 - Ollama runs on **Windows host**, Sidekick runs in **WSL** — mirrored networking makes `127.0.0.1:11434` work
 - Context budget: `OLLAMA_CONTEXT_LENGTH=32768` suits `qwen3:8b` (5.2 GB model). Fits 100% in 16 GB VRAM. Supports ~2.5+ hours of speech.

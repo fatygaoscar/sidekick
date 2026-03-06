@@ -1041,3 +1041,108 @@ async def get_recording_audio(
         )
 
     return FileResponse(path=audio_path, media_type=media_type)
+
+
+class SpeakerClip(BaseModel):
+    speaker: str
+    start_time: float
+    end_time: float
+    text: str
+
+
+class SpeakerClipsResponse(BaseModel):
+    clips: list[SpeakerClip]
+    audio_url: str
+
+
+@router.get("/recordings/{session_id}/speaker-clips", response_model=SpeakerClipsResponse)
+async def get_speaker_clips(
+    session_id: str,
+    repository: Repository = Depends(get_repository),
+):
+    """Get audio clips for each unique speaker in the recording."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    audio_path = get_session_audio_path(session_id)
+    if not audio_path and session.ended_at:
+        audio_path = ensure_session_audio_path(session_id)
+    if not audio_path:
+        raise HTTPException(status_code=404, detail="Recording audio not found")
+
+    segments = await repository.get_segments(session_id=session_id)
+    if not segments:
+        raise HTTPException(status_code=404, detail="No transcript segments found")
+
+    # Group segments by speaker
+    speaker_segments: dict[str, list] = {}
+    for seg in segments:
+        spk = getattr(seg, "speaker", None)
+        if spk:
+            if spk not in speaker_segments:
+                speaker_segments[spk] = []
+            speaker_segments[spk].append(seg)
+
+    if not speaker_segments:
+        raise HTTPException(status_code=400, detail="No speakers found in transcript. Run diarization first.")
+
+    # Build clips - first utterance from each speaker
+    clips = []
+    for speaker, segs in sorted(speaker_segments.items()):
+        # Sort by start time and get first segment
+        sorted_segs = sorted(segs, key=lambda s: s.start_time)
+        first_seg = sorted_segs[0]
+        
+        # Use 5 seconds of audio starting from segment start
+        clip_duration = min(5.0, float(first_seg.end_time) - float(first_seg.start_time))
+        if clip_duration < 0.5:
+            clip_duration = min(5.0, float(first_seg.end_time))
+        
+        clip = SpeakerClip(
+            speaker=speaker,
+            start_time=float(first_seg.start_time),
+            end_time=float(first_seg.start_time) + clip_duration,
+            text=first_seg.text[:100],
+        )
+        clips.append(clip)
+
+    return SpeakerClipsResponse(
+        clips=clips,
+        audio_url=f"/api/recordings/{session_id}/audio",
+    )
+
+
+class SpeakerMappingRequest(BaseModel):
+    mapping: dict[str, str]
+
+
+@router.post("/recordings/{session_id}/speaker-mapping")
+async def set_speaker_mapping(
+    session_id: str,
+    request: SpeakerMappingRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Update speaker labels for all segments based on user-provided mapping."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    segments = await repository.get_segments(session_id=session_id)
+    if not segments:
+        raise HTTPException(status_code=404, detail="No transcript segments found")
+
+    # Update each segment's speaker
+    updates = {}
+    for seg in segments:
+        old_speaker = getattr(seg, "speaker", None)
+        if old_speaker and old_speaker in request.mapping:
+            new_name = request.mapping[old_speaker]
+            updates[seg.id] = new_name
+
+    if updates:
+        await repository.update_segments_speakers(updates)
+
+    logger.info("speaker_mapping: updated %d segments for session %s", len(updates), session_id)
+
+    return {"success": True, "updated": len(updates), "mapping": request.mapping}

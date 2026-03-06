@@ -286,6 +286,7 @@ async def _transcribe_and_persist_session(
     repository: Repository,
     transcription_manager: TranscriptionManager,
     primary_meeting_id: str,
+    attendees: str | None = None,
     progress_callback: Optional[TranscriptionProgressCallback] = None,
 ) -> tuple[str, float]:
     audio_path = get_session_audio_path(session_id)
@@ -320,10 +321,28 @@ async def _transcribe_and_persist_session(
     from src.transcription.diarize import assign_speaker, diarize
     diarization_spans: list[tuple[float, float, str]] = []
     _settings = get_settings()
+    
+    # Calculate speaker constraints from attendee count
+    min_speakers = None
+    max_speakers = None
+    if attendees:
+        attendee_names = [a.strip() for a in attendees.split(",") if a.strip()]
+        if attendee_names:
+            count = len(attendee_names)
+            min_speakers = count
+            max_speakers = count
+            logger.info("diarization: using %d speakers from attendees field", count)
+    
     if _settings.diarization_enabled and _settings.hf_token:
         try:
             with pipeline_step(logger, "diarization") as step:
-                diarization_spans = await asyncio.to_thread(diarize, str(audio_path), _settings.hf_token)
+                diarization_spans = await asyncio.to_thread(
+                    diarize,
+                    str(audio_path),
+                    _settings.hf_token,
+                    min_speakers=min_speakers,
+                    max_speakers=max_speakers,
+                )
                 step["spans"] = len(diarization_spans)
         except Exception as exc:
             logger.warning(f"Diarization failed, continuing without speaker labels: {exc}")
@@ -505,9 +524,17 @@ async def _run_export_pipeline(
         _tx_t0 = time.monotonic()
 
         # Run diarization on existing segments if enabled and not yet applied.
+        # Always re-diarize if attendees are provided to ensure accurate speaker assignment
         _settings = get_settings()
         has_speakers = any(getattr(seg, "speaker", None) for seg in existing_segments)
-        if _settings.diarization_enabled and _settings.hf_token and not has_speakers:
+        should_diarize = _settings.diarization_enabled and _settings.hf_token
+        # Force re-diarization when attendees are provided, otherwise only if no speakers yet
+        if request_payload.attendees:
+            should_diarize = should_diarize and True
+        else:
+            should_diarize = should_diarize and not has_speakers
+        
+        if should_diarize:
             audio_path = get_session_audio_path(session_id)
             if not audio_path and session.ended_at:
                 audio_path = ensure_session_audio_path(session_id)
@@ -518,11 +545,27 @@ async def _run_export_pipeline(
                     speech_end_time = max((seg.end_time for seg in existing_segments), default=None)
                     diarization_limit = speech_end_time + 5.0 if speech_end_time else None
 
+                    # Calculate speaker constraints from attendee count
+                    min_speakers = None
+                    max_speakers = None
+                    if request_payload.attendees:
+                        attendee_names = [a.strip() for a in request_payload.attendees.split(",") if a.strip()]
+                        if attendee_names:
+                            count = len(attendee_names)
+                            min_speakers = count
+                            max_speakers = count
+                            logger.info("diarization: using %d speakers from attendees field", count)
+
                     from src.transcription.diarize import assign_speaker, diarize
                     limit_str = f"{diarization_limit:.1f}s" if diarization_limit else "none"
                     with pipeline_step(logger, "diarization", limit=limit_str) as step:
                         diarization_spans = await asyncio.to_thread(
-                            diarize, str(audio_path), _settings.hf_token, duration_limit=diarization_limit
+                            diarize,
+                            str(audio_path),
+                            _settings.hf_token,
+                            duration_limit=diarization_limit,
+                            min_speakers=min_speakers,
+                            max_speakers=max_speakers,
                         )
                         step["spans"] = len(diarization_spans)
 
@@ -546,6 +589,7 @@ async def _run_export_pipeline(
                 repository=repository,
                 transcription_manager=transcription_manager,
                 primary_meeting_id=primary_meeting_id,
+                attendees=request_payload.attendees,
                 progress_callback=(
                     lambda stage, message, progress: (
                         progress_callback(stage, message, progress, 0.0) if progress_callback else None

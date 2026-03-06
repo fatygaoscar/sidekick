@@ -215,15 +215,28 @@ Default template: `meeting`
 | `GET /api/export-jobs/{job_id}` | Poll export job |
 | `POST /api/recordings/{id}/transcription-job` | Transcription only |
 | `PUT /api/recordings/{id}/audio` | Upload audio |
+| `GET /api/recordings/{id}/speaker-clips` | Get audio clips for each speaker (for manual resolution) |
+| `POST /api/recordings/{id}/speaker-mapping` | Save manual speaker name mapping |
 | `WS /ws/audio` | Live audio stream |
 
 ## Speaker Diarization
 
 **Status**: Live and enabled.
 
-**Handoff Notes (2026-03-03, latest)**:
+**Features**:
+- **Manual Speaker Resolution**: Users can manually identify speakers by listening to audio clips:
+  1. Click "Resolve Speakers" in the View modal
+  2. See audio clips for each detected speaker (first 5 seconds of their first utterance)
+  3. Enter names in text fields
+  4. Click "Apply & Re-summarize" to save mapping and regenerate summary
+- **Force Re-diarize**: When attendees are provided, diarization always runs (even if speakers already exist in DB)
+- **Min/Max Speakers**: diarize.py accepts `min_speakers` and `max_speakers` params to constrain pyannote
+
+**Handoff Notes (2026-03-05, latest)**:
 - **Model**: `qwen3:8b` (5.2GB, 100% GPU). `OLLAMA_NUM_GPU=99` forces all layers to GPU. `temperature=0.3` added to all calls.
-- **Speaker Resolution**: `_resolve_speaker_map()` uses first 5000 chars + attendee name lines from full transcript. Prompt clarifies "addressing vs. being" speaker distinction. Resolved `speaker_map` returned from `generate_cohesive_summary()` as 5th element and persisted to DB segments after export.
+- **Speaker Resolution**: Two methods:
+  1. **LLM-based**: `_resolve_speaker_map()` uses first 5000 chars + attendee name lines from full transcript. Requires names to be spoken in recording.
+  2. **Manual**: Users listen to clips and enter names manually. Much more reliable when names aren't spoken.
 - **Pipeline Optimizations**:
   - Speech-Aware Diarization: stops at last Whisper timestamp + 5s.
   - Dynamic Context: `num_ctx` calculated from input size.
@@ -238,6 +251,7 @@ Default template: `meeting`
 - Audio loaded via **PyAV** — no system `ffmpeg` needed.
 - pyannote 4.x returns `DiarizeOutput`.
 - Speaker name resolution pre-pass LLM call if `attendees` provided. Results persisted to DB.
+- Manual resolution endpoint returns clip timestamps; frontend uses HTML5 audio seek to play.
 
 ## Gotchas
 

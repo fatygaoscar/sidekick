@@ -64,6 +64,14 @@ class RecordingsPage {
             backToListBtn: document.getElementById('back-to-list-btn'),
             openObsidianBtn: document.getElementById('open-obsidian-btn'),
 
+            // Resolve speakers modal
+            resolveSpeakersBtn: document.getElementById('resolve-speakers-btn'),
+            resolveSpeakersModal: document.getElementById('resolve-speakers-modal'),
+            resolveSpeakersClose: document.getElementById('resolve-speakers-close'),
+            resolveSpeakersCancel: document.getElementById('resolve-speakers-cancel'),
+            resolveSpeakersSubmit: document.getElementById('resolve-speakers-submit'),
+            resolveSpeakersClips: document.getElementById('resolve-speakers-clips'),
+
             // Processing
             processingOverlay: document.getElementById('processing-overlay'),
             processingText: document.getElementById('processing-text'),
@@ -146,6 +154,15 @@ class RecordingsPage {
         this.elements.openObsidianBtn.addEventListener('click', () => this._openObsidian());
         this.elements.confirmationModal.addEventListener('click', (e) => {
             if (e.target === this.elements.confirmationModal) this._closeConfirmationModal();
+        });
+
+        // Resolve speakers modal
+        this.elements.resolveSpeakersBtn.addEventListener('click', () => this._showResolveSpeakersModal());
+        this.elements.resolveSpeakersClose.addEventListener('click', () => this._closeResolveSpeakersModal());
+        this.elements.resolveSpeakersCancel.addEventListener('click', () => this._closeResolveSpeakersModal());
+        this.elements.resolveSpeakersSubmit.addEventListener('click', () => this._submitSpeakerMapping());
+        this.elements.resolveSpeakersModal.addEventListener('click', (e) => {
+            if (e.target === this.elements.resolveSpeakersModal) this._closeResolveSpeakersModal();
         });
 
         // Summary review modal
@@ -587,6 +604,164 @@ class RecordingsPage {
         const hasSummary = !!rec?.has_summary;
         this.elements.resummarizeBtn.disabled = !canResummarize;
         this.elements.viewOpenObsidianBtn.disabled = !hasSummary || !rec?.open_in_obsidian_uri;
+        
+        // Show resolve speakers only if there's a transcript with speakers
+        const hasSpeakers = rec?.transcript?.some(seg => seg.speaker);
+        this.elements.resolveSpeakersBtn.disabled = !canResummarize || !hasSpeakers;
+    }
+
+    async _showResolveSpeakersModal() {
+        if (!this.currentRecording?.id) return;
+
+        try {
+            const response = await fetch(`/api/recordings/${this.currentRecording.id}/speaker-clips`);
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(err.detail || 'Failed to load speaker clips');
+            }
+
+            const data = await response.json();
+            this._speakerClipsData = data;
+
+            // Render speaker inputs with audio player per speaker
+            this.elements.resolveSpeakersClips.innerHTML = data.clips.map((clip, idx) => `
+                <div class="speaker-clip-row">
+                    <div class="speaker-clip-header">
+                        <strong>${this._escapeHtml(clip.speaker)}</strong>
+                        <span class="speaker-clip-text">${this._escapeHtml(clip.text || '')}</span>
+                    </div>
+                    <div class="speaker-clip-audio-row">
+                        <audio id="speaker-audio-${idx}" preload="none">
+                            <source src="${data.audio_url}" type="audio/webm">
+                        </audio>
+                        <button type="button" class="speaker-play-btn" data-audio-id="speaker-audio-${idx}" data-start="${clip.start_time}" data-end="${clip.end_time}">▶ Play</button>
+                    </div>
+                    <input type="text" 
+                           class="form-input speaker-name-input" 
+                           data-speaker="${this._escapeHtml(clip.speaker)}"
+                           placeholder="Enter name...">
+                </div>
+            `).join('');
+
+            // Set up play buttons
+            this.elements.resolveSpeakersClips.querySelectorAll('.speaker-play-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const audioId = btn.dataset.audioId;
+                    const audio = document.getElementById(audioId);
+                    const startTime = parseFloat(btn.dataset.start);
+                    const endTime = parseFloat(btn.dataset.end);
+                    
+                    // Stop any other playing audio
+                    this.elements.resolveSpeakersClips.querySelectorAll('audio').forEach(a => {
+                        if (a !== audio) {
+                            a.pause();
+                            a.currentTime = 0;
+                        }
+                    });
+                    
+                    // Reset all buttons
+                    this.elements.resolveSpeakersClips.querySelectorAll('.speaker-play-btn').forEach(b => {
+                        if (b !== btn) b.textContent = '▶ Play';
+                    });
+                    
+                    // If same button clicked and audio playing, stop it
+                    if (!audio.paused && audio.currentTime >= startTime) {
+                        audio.pause();
+                        audio.currentTime = 0;
+                        btn.textContent = '▶ Play';
+                        return;
+                    }
+                    
+                    audio.currentTime = startTime;
+                    audio.play();
+                    btn.textContent = '⏹ Stop';
+                    
+                    // Stop at end time
+                    const stopHandler = () => {
+                        btn.textContent = '▶ Play';
+                        audio.removeEventListener('pause', stopHandler);
+                    };
+                    audio.addEventListener('pause', stopHandler);
+                });
+            });
+
+            this.elements.resolveSpeakersModal.classList.remove('hidden');
+
+        } catch (error) {
+            console.error('Failed to load speaker clips:', error);
+            alert(`Failed to load speaker clips: ${error.message}`);
+        }
+    }
+
+    _closeResolveSpeakersModal() {
+        // Stop all audio
+        this.elements.resolveSpeakersClips.querySelectorAll('audio').forEach(a => {
+            a.pause();
+            a.currentTime = 0;
+        });
+        this.elements.resolveSpeakersModal.classList.add('hidden');
+        this._speakerClipsData = null;
+    }
+
+    async _submitSpeakerMapping() {
+        if (!this._speakerClipsData || !this.currentRecording?.id) return;
+
+        // Collect mapping from inputs
+        const mapping = {};
+        const inputs = this.elements.resolveSpeakersClips.querySelectorAll('.speaker-name-input');
+        let hasAnyInput = false;
+        inputs.forEach(input => {
+            const speaker = input.dataset.speaker;
+            const name = input.value.trim();
+            if (name) {
+                mapping[speaker] = name;
+                hasAnyInput = true;
+            }
+        });
+
+        if (!hasAnyInput) {
+            alert('Please enter at least one speaker name.');
+            return;
+        }
+
+        this.elements.resolveSpeakersSubmit.disabled = true;
+        this.elements.resolveSpeakersSubmit.textContent = 'Applying...';
+
+        try {
+            // Submit mapping
+            const response = await fetch(`/api/recordings/${this.currentRecording.id}/speaker-mapping`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mapping }),
+            });
+
+            if (!response.ok) {
+                const err = await response.json().catch(() => ({}));
+                throw new Error(err.detail || 'Failed to apply speaker mapping');
+            }
+
+            // Close modal and trigger re-summarize
+            this._closeResolveSpeakersModal();
+            
+            // Close view modal
+            this.elements.viewModal.classList.add('hidden');
+            
+            // Show resummarize modal first (this sets up the form)
+            this._showResummarizeModal();
+            
+            // THEN populate attendees from mapping values (after modal is shown)
+            const attendees = Object.values(mapping).join(', ');
+            const attendeesEl = document.getElementById('resummarize-attendees');
+            if (attendeesEl) attendeesEl.value = attendees;
+
+        } catch (error) {
+            console.error('Failed to apply speaker mapping:', error);
+            alert(`Failed to apply speaker mapping: ${error.message}`);
+        } finally {
+            this.elements.resolveSpeakersSubmit.disabled = false;
+            this.elements.resolveSpeakersSubmit.textContent = 'Apply & Re-summarize';
+        }
     }
 
     _renderViewSummaryDisplay(markdown) {
