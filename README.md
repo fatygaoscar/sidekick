@@ -236,14 +236,37 @@ OBSIDIAN_VAULT_PATH=/path/to/your/vault
 
 **`OLLAMA_NUM_GPU=99`**: Ollama's auto-estimate conservatively offloads some layers to CPU. Setting `num_gpu=99` forces all layers to GPU and roughly doubles throughput.
 
-### WSL + Host Ollama
+### Ollama Runtime
 
-Sidekick runs in WSL; Ollama runs on Windows host. With WSL mirrored networking mode, `127.0.0.1:11434` works directly — no special host address needed.
+Sidekick supports both:
+
+- WSL-local Ollama
+- Windows-host Ollama
+
+Use whichever is stable enough on your machine. Windows host was previously preferred for better RAM headroom, but WSL-local Ollama is acceptable if performance is good enough.
+
+Important:
+
+- Sidekick only uses `OLLAMA_HOST`
+- `OLLAMA_HOST=http://127.0.0.1:11434` is ambiguous in WSL
+- that address may hit either a WSL Ollama daemon or the Windows host runtime, depending on which process owns the port
+
+Use these commands to verify which runtime is active:
 
 ```bash
-# .env
-OLLAMA_HOST=http://127.0.0.1:11434
+# WSL daemon + loaded models
+ps -ef | rg '[o]llama'
+ollama ps
+
+# Windows host daemon + loaded models
+powershell.exe -NoProfile -Command "Get-Process ollama -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,Path"
+powershell.exe -NoProfile -Command "ollama ps"
 ```
+
+Detailed runtime guidance:
+
+- [Ollama Runtime Modes](/home/ozzfa/sidekick/docs/OLLAMA_RUNTIME_MODES.md)
+- [Host Ollama Setup](/home/ozzfa/sidekick/docs/HOST_OLLAMA_SETUP.md)
 
 ### Speaker Diarization Setup
 
@@ -345,11 +368,13 @@ All templates are editable before export (click "Show" to view and modify the pr
 - `get_settings()` is LRU-cached — restart required to pick up `.env` changes
 - **`qwen3` vs `qwen3.5` thinking**: `qwen3:8b` properly respects `OLLAMA_THINK=false`. `qwen3.5` models always generate internal thinking tokens regardless of this setting — not suppressable.
 - **`OLLAMA_NUM_GPU=99`**: required to prevent Ollama's conservative auto-estimate from offloading layers to CPU.
+- `SUMMARIZATION_TIMEOUT_SECONDS` is only a per-call timeout. It does not control model unloading.
+- Summarization calls now send Ollama `keep_alive=0`, so the summarization model unloads immediately after each call finishes.
 - Pipeline package (`src/summarization/pipeline/`) exists in codebase but is **not called from export**
 - Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist; diarization runs again if attendees are provided (force re-diarize)
 - Speaker name resolution requires the **Attendees field** at export time. Resolved names are written back to DB segments so the transcript view shows real names.
 - **Manual speaker resolution**: If LLM-based resolution fails (names not spoken in recording), use "Resolve Speakers" button in View modal to manually identify speakers by listening to audio clips
 - `start.sh` port check uses `connect()` (not `bind()`) to avoid false positives in WSL mirrored mode
-- Ollama runs on **Windows host**, Sidekick runs in **WSL** — mirrored networking makes `127.0.0.1:11434` work
+- `OLLAMA_HOST=http://127.0.0.1:11434` does not prove you are using Windows host Ollama. In WSL it may also point at a WSL-local Ollama daemon.
 - Context budget: `OLLAMA_CONTEXT_LENGTH=32768` suits `qwen3:8b` (5.2 GB model). Fits 100% in 16 GB VRAM. Supports ~2.5+ hours of speech.
-- Pull Ollama models from Windows: `powershell.exe -Command "ollama pull qwen3:8b"`
+- If you intentionally use Windows-host Ollama, pull models from Windows: `powershell.exe -Command "ollama pull qwen3:8b"`

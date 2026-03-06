@@ -80,6 +80,11 @@ class WhisperLocalEngine(TranscriptionEngine):
             compute_type=compute_type,
         )
 
+    async def unload(self) -> None:
+        """Unload the model from VRAM to free memory for other models."""
+        self._model = None
+        self._initialized = False
+
     async def shutdown(self) -> None:
         """Shutdown the engine."""
         self._model = None

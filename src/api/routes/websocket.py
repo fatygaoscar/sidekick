@@ -120,6 +120,8 @@ class AudioWebSocketHandler:
                 submode = data.get("submode")
                 timezone_name = data.get("timezone_name")
                 timezone_offset_minutes = data.get("timezone_offset_minutes")
+                # Pre-load Whisper asynchronously (no blocking)
+                asyncio.create_task(self._transcription_manager.initialize())
                 await self._session_manager.start_session(
                     mode=mode,
                     submode=submode,

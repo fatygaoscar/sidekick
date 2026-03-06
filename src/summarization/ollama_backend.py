@@ -94,6 +94,7 @@ class OllamaBackend(SummarizationBackend):
                 {"role": "user", "content": user},
             ],
             options=options,
+            keep_alive=0,
         )
 
         content = response["message"]["content"]

@@ -74,6 +74,11 @@ class TranscriptionManager:
         self._active_engine = None
         self._initialized = False
 
+    async def unload(self) -> None:
+        """Unload the active engine's model from VRAM to free memory."""
+        if self._active_engine:
+            await self._active_engine.unload()
+
     async def switch_backend(self, backend: TranscriptionBackend) -> TranscriptionEngine:
         """
         Switch to a different transcription backend.

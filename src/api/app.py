@@ -52,15 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.transcription_manager = TranscriptionManager(settings)
     app.state.summarization_manager = SummarizationManager(settings)
 
-    # Pre-initialize transcription manager to load model at startup
-    print(f"[Startup] Initializing transcription manager (backend={settings.transcription_backend.value})...")
-    try:
-        await app.state.transcription_manager.initialize()
-        print("[Startup] Transcription manager initialized successfully")
-    except Exception as e:
-        print(f"[Startup] WARNING: Failed to initialize transcription manager: {e}")
-        import traceback
-        traceback.print_exc()
+    # Transcription model loads on-demand when recording starts (no pre-load)
 
     # Try to restore last session
     await app.state.session_manager.restore_session()

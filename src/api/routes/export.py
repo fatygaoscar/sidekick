@@ -598,6 +598,10 @@ async def _run_export_pipeline(
             )
             step["chars"] = len(full_transcript)
 
+    # Unload Whisper to free VRAM for summarization model
+    await transcription_manager.unload()
+    logger.info("[step] transcription | unloaded model to free VRAM")
+
     # Generate summary
     template = request_payload.template
 
