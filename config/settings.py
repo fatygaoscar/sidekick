@@ -56,9 +56,14 @@ class Settings(BaseSettings):
     # Ollama settings
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.2"
-    ollama_context_length: int = 8192
+    ollama_context_length: int = 32768
     ollama_think: bool = False  # Set true to enable thinking mode for qwen3 models (slower, better for complex tasks)
     ollama_num_gpu: int = 99  # Layers to load on GPU; 99 = force all (overrides Ollama's conservative auto-estimate)
+    ollama_temperature: float = 0.1
+    ollama_top_p: float = 0.9
+    ollama_top_k: int = 20
+    ollama_repeat_penalty: float = 1.05
+    ollama_seed: int | None = None
 
     # OpenAI summarization
     openai_summarization_model: str = "gpt-4o-mini"

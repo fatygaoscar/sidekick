@@ -19,6 +19,10 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from scripts.benchmark_utils import estimate_tokens, ollama_options, ollama_run_config
+
 
 EXTRACTION_SYSTEM_PROMPT = """You are an expert meeting analyst.
 Extract actions, decisions, risks, questions, and follow-ups.
@@ -95,7 +99,7 @@ def _run_model_once(
             {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
-        "options": {"num_ctx": context_length, "think": False, "num_gpu": 99, "temperature": 0.3},
+        "options": ollama_options(model, num_ctx=context_length),
     }
     t0 = time.perf_counter()
     response = _http_json("POST", f"{ollama_url}/api/chat", payload=payload, timeout_seconds=timeout_seconds)
@@ -112,6 +116,7 @@ def _run_model_once(
     tok_s = eval_count / (eval_duration_ns / 1e9) if eval_duration_ns > 0 else 0
 
     return {
+        "run_config": ollama_run_config(model, num_ctx=context_length),
         "elapsed_seconds": elapsed,
         "response_chars": len(content),
         "tok_s": tok_s,
@@ -120,6 +125,7 @@ def _run_model_once(
         "prompt_eval_count": response.get("prompt_eval_count"),
         "eval_count": eval_count,
         "done_reason": response.get("done_reason"),
+        "estimated_input_tokens": estimate_tokens(EXTRACTION_SYSTEM_PROMPT) + estimate_tokens(user_prompt),
     }
 
 
@@ -182,6 +188,19 @@ def main() -> int:
     for model in models:
         model_runs: list[dict[str, Any]] = []
         print(f"Model: {model}")
+        cfg = ollama_run_config(model, num_ctx=args.context_length)
+        print(
+            "  "
+            f"model_name={cfg['model_name']} "
+            f"model_tag={cfg['model_tag'] or '-'} "
+            f"runtime={cfg['runtime']} "
+            f"num_ctx={cfg['num_ctx']} "
+            f"temperature={cfg['temperature']} "
+            f"top_p={cfg['top_p']} "
+            f"top_k={cfg['top_k']} "
+            f"repeat_penalty={cfg['repeat_penalty']} "
+            f"seed={cfg['seed'] if cfg['seed'] is not None else 'none'}"
+        )
         for run_idx in range(1, args.runs + 1):
             try:
                 result = _run_model_once(

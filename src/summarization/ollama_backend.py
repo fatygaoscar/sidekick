@@ -38,6 +38,11 @@ class OllamaBackend(SummarizationBackend):
         self._context_length = settings.ollama_context_length
         self._think = settings.ollama_think
         self._num_gpu = settings.ollama_num_gpu
+        self._temperature = settings.ollama_temperature
+        self._top_p = settings.ollama_top_p
+        self._top_k = settings.ollama_top_k
+        self._repeat_penalty = settings.ollama_repeat_penalty
+        self._seed = settings.ollama_seed
         self._client: Any = None
         self._initialized = False
 
@@ -83,7 +88,16 @@ class OllamaBackend(SummarizationBackend):
         user = user_prompt or USER_PROMPT_TEMPLATE.format(transcript=transcript)
 
         ctx_len = num_ctx or self._context_length
-        options: dict[str, Any] = {"num_ctx": ctx_len, "num_gpu": self._num_gpu, "temperature": 0.3}
+        options: dict[str, Any] = {
+            "num_ctx": ctx_len,
+            "num_gpu": self._num_gpu,
+            "temperature": self._temperature,
+            "top_p": self._top_p,
+            "top_k": self._top_k,
+            "repeat_penalty": self._repeat_penalty,
+        }
+        if self._seed is not None:
+            options["seed"] = self._seed
         if not self._think:
             options["think"] = False
 

@@ -38,6 +38,7 @@ from typing import Any
 # Allow project imports when run from repo root or scripts/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from scripts.benchmark_utils import estimate_tokens, ollama_options, ollama_run_config  # noqa: E402
 from src.summarization.cohesive import generate_cohesive_summary  # noqa: E402
 from src.summarization.prompts import get_template_content  # noqa: E402
 
@@ -131,6 +132,7 @@ async def _run_config(
 
     client = ollama.AsyncClient(host=ollama_url)
     call_log: list[dict[str, Any]] = []
+    run_config = ollama_run_config(model, num_ctx=context_length)
 
     async def llm_call(sys_prompt: str, usr_prompt: str) -> str:
         call_idx = len(call_log) + 1
@@ -143,7 +145,7 @@ async def _run_config(
                         {"role": "system", "content": sys_prompt},
                         {"role": "user", "content": usr_prompt},
                     ],
-                    options={"num_ctx": context_length, "think": False, "num_gpu": 99, "temperature": 0.3},
+                    options=ollama_options(model, num_ctx=context_length),
                 ),
                 timeout=timeout,
             )
@@ -165,6 +167,7 @@ async def _run_config(
             "prompt_tokens": prompt_tokens,
             "output_tokens": eval_count,
             "tok_s": round(tok_s, 1),
+            "estimated_input_tokens": estimate_tokens(sys_prompt) + estimate_tokens(usr_prompt),
         })
         print(
             f"    call {call_idx}: {elapsed:.1f}s  {tok_s:.0f} tok/s"
@@ -192,6 +195,7 @@ async def _run_config(
     return {
         "model": model,
         "context_length": context_length,
+        "run_config": run_config,
         "total_elapsed_s": round(total_elapsed, 2),
         "context_mode": context_mode,
         "passes_used": passes_used,
@@ -320,6 +324,19 @@ async def main() -> int:
         results.append(result)
 
         if "error" not in result:
+            cfg = result["run_config"]
+            print(
+                "    "
+                f"model_name={cfg['model_name']} "
+                f"model_tag={cfg['model_tag'] or '-'} "
+                f"runtime={cfg['runtime']} "
+                f"num_ctx={cfg['num_ctx']} "
+                f"temperature={cfg['temperature']} "
+                f"top_p={cfg['top_p']} "
+                f"top_k={cfg['top_k']} "
+                f"repeat_penalty={cfg['repeat_penalty']} "
+                f"seed={cfg['seed'] if cfg['seed'] is not None else 'none'}"
+            )
             q = result["quality"]
             print(
                 f"    total: {result['total_elapsed_s']:.1f}s  "
