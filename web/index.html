@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Sidekick</title>
-    <link rel="stylesheet" href="/static/css/styles.css?v=20260307ab9">
+    <link rel="stylesheet" href="/static/css/styles.css?v=20260307ad2">
 </head>
-<body>
+<body class="main-page">
     <div class="app">
         <!-- Header -->
         <header class="header">
@@ -18,11 +18,13 @@
 
         <!-- Main Content -->
         <main class="main-content">
-            <div class="record-section">
+            <div class="record-hero">
                 <button id="record-btn" class="record-btn" aria-pressed="false">
                     Record
                 </button>
+            </div>
 
+            <div class="record-support">
                 <div class="visualizer-section">
                     <canvas id="audio-canvas" width="400" height="60"></canvas>
                 </div>
@@ -36,6 +38,10 @@
             </div>
         </main>
 
+        <div class="mobile-history-bar">
+            <a href="/static/recordings.html" class="btn mobile-history-link">History</a>
+        </div>
+
         <!-- Status Bar -->
         <footer class="status-bar">
             <div class="status-left" id="status-text">Ready</div>
@@ -47,9 +53,9 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="/static/js/audio.js?v=20260210h"></script>
+    <script src="/static/js/audio.js?v=20260307l"></script>
     <script src="/static/js/websocket.js?v=20260210h"></script>
-    <script src="/static/js/recording-workspace.js?v=20260307bs"></script>
-    <script src="/static/js/app.js?v=20260306b"></script>
+    <script src="/static/js/recording-workspace.js?v=20260307bt"></script>
+    <script src="/static/js/app.js?v=20260307a"></script>
 </body>
 </html>

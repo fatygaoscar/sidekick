@@ -75,7 +75,7 @@ def _build_recorded_labels(
 ) -> tuple[str, str, str]:
     local_started_at = localize_datetime(started_at, timezone_name, timezone_offset_minutes)
     date_label = local_started_at.strftime("%b %d, %Y")
-    time_label = local_started_at.strftime("%I:%M %p").lstrip("0")
+    time_label = local_started_at.strftime("%I:%M%p").lstrip("0")
     tz_label = timezone_label(timezone_name, timezone_offset_minutes)
     return date_label, time_label, tz_label
 
@@ -1048,6 +1048,10 @@ async def save_recording_summary(
             duration_str=duration_str,
             processing_time_str=processing_time_str,
             transcript=full_transcript,
+            pass1_system_prompt=original_summary.pass1_system_prompt if original_summary else None,
+            pass1_user_prompt=original_summary.pass1_user_prompt if original_summary else None,
+            pass2_system_prompt=original_summary.pass2_system_prompt if original_summary else None,
+            pass2_user_prompt=original_summary.pass2_user_prompt if original_summary else None,
             revision_instruction=request.revision_instruction,
         )
 

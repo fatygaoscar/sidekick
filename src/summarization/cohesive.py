@@ -410,6 +410,20 @@ def _build_pass1_prompt(
     custom_instructions: Optional[str],
     include_structured_tables: bool = False,
 ) -> str:
+    if template == "custom":
+        return f"""## Style Contract
+{template_contract}
+
+## Source Context ({context_mode})
+{context_text}
+
+Follow the Style Contract above exactly.
+Do not add sections, tables, or formatting requirements that are not explicitly requested in the Style Contract.
+If the Style Contract asks for concise or simple output, keep it concise and simple.
+Use concrete names, dates, numbers, and owners only when they materially support the requested output.
+Extract only what the Style Contract asks for. Omit filler, pleasantries, and side chatter.
+"""
+
     custom_block = ""
     if custom_instructions and custom_instructions.strip():
         custom_block = f"\n## Additional User Instructions\n{custom_instructions.strip()}\n"
@@ -447,6 +461,21 @@ Omit filler, pleasantries, and off-topic chatter.{synthesis_note}{extra_tables_b
 
 
 def _build_pass2_prompt(template: str, draft: str) -> str:
+    if template == "custom":
+        return f"""You are editing a custom meeting summary draft for clarity and accuracy.
+
+Requirements:
+- Preserve the exact section structure already present in the draft.
+- Do not add new sections, tables, or extra structure unless they already exist in the draft.
+- Preserve the draft's requested level of detail. If it is concise, keep it concise.
+- Improve wording, scannability, and consistency without broadening the scope.
+- Preserve all concrete names, dates, numbers, and decisions already present.
+
+Draft:
+{draft}
+
+Return ONLY the final edited output."""
+
     return f"""You are editing a meeting summary draft for clarity, scannability, and Obsidian compatibility.
 
 Requirements:
@@ -487,11 +516,11 @@ async def generate_cohesive_summary(
     chunk_chars: int = DEFAULT_CHUNK_CHARS,
     overlap_chars: int | None = None,
     debug_info: Optional[dict[str, Any]] = None,
-) -> tuple[str, str, int, str, dict[str, str]]:
+) -> tuple[str, str, int, str, dict[str, str], dict[str, str]]:
     """Generate summary with mandatory two-pass flow.
 
     Returns:
-        (final_summary, context_mode, passes_used, style_profile, speaker_map)
+        (final_summary, context_mode, passes_used, style_profile, speaker_map, prompt_audit)
     """
     def _emit(p: float) -> None:
         if progress_callback:
@@ -584,16 +613,25 @@ async def generate_cohesive_summary(
         draft = await llm_call(pass1_system, pass1_user)
     _emit(0.65)
 
+    prompt_audit = {
+        "pass1_system_prompt": pass1_system,
+        "pass1_user_prompt": pass1_user,
+        "pass2_system_prompt": "",
+        "pass2_user_prompt": "",
+    }
+
     # Skip Pass 2 (editorial polish) for very short transcripts to significantly speed up processing.
     # The first pass is usually high quality for short inputs.
     if len(transcript) < 3000 and not _needs_retry(draft, structured_items):
         _emit(0.90)
-        return draft.strip(), context_mode, 1, "narrative_first_v1", speaker_map
+        return draft.strip(), context_mode, 1, "narrative_first_v1", speaker_map, prompt_audit
 
     pass2_system = (
         f"{pass1_system}\n\nYou are now in editorial rewrite mode. Output polished final content."
     )
     pass2_user = _build_pass2_prompt(template, draft)
+    prompt_audit["pass2_system_prompt"] = pass2_system
+    prompt_audit["pass2_user_prompt"] = pass2_user
     if debug_info is not None:
         debug_info["pass2_prompt_estimated_tokens"] = (
             _estimate_tokens(pass2_system) + _estimate_tokens(pass2_user)
@@ -615,4 +653,4 @@ async def generate_cohesive_summary(
         passes_used = 3
         _emit(0.95)
 
-    return final.strip(), context_mode, passes_used, "narrative_first_v1", speaker_map
+    return final.strip(), context_mode, passes_used, "narrative_first_v1", speaker_map, prompt_audit

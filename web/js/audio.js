@@ -56,7 +56,10 @@ class AudioCapture {
 
             // Create analyser for visualization
             this.analyser = this.audioContext.createAnalyser();
-            this.analyser.fftSize = 256;
+            this.analyser.fftSize = 4096;
+            this.analyser.minDecibels = -96;
+            this.analyser.maxDecibels = -18;
+            this.analyser.smoothingTimeConstant = 0.6;
             source.connect(this.analyser);
 
             // Setup audio processing for streaming
@@ -171,22 +174,25 @@ class AudioCapture {
     _startLevelMonitoring() {
         if (!this.analyser) return;
 
-        const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+        const frequencyData = new Float32Array(this.analyser.frequencyBinCount);
+        const timeDomainData = new Uint8Array(this.analyser.fftSize);
 
         const updateLevel = () => {
             if (!this.isCapturing) return;
 
-            this.analyser.getByteFrequencyData(dataArray);
+            this.analyser.getFloatFrequencyData(frequencyData);
+            this.analyser.getByteTimeDomainData(timeDomainData);
 
             // Calculate RMS level
             let sum = 0;
-            for (let i = 0; i < dataArray.length; i++) {
-                sum += dataArray[i] * dataArray[i];
+            for (let i = 0; i < timeDomainData.length; i++) {
+                const centered = (timeDomainData[i] - 128) / 128;
+                sum += centered * centered;
             }
-            const rms = Math.sqrt(sum / dataArray.length);
-            const level = Math.min(1, rms / 128);
+            const rms = Math.sqrt(sum / timeDomainData.length);
+            const level = Math.min(1, rms * 1.6);
 
-            this.onLevelUpdate(level, dataArray);
+            this.onLevelUpdate(level, frequencyData, this.audioContext?.sampleRate || this.captureSampleRate);
             requestAnimationFrame(updateLevel);
         };
 
@@ -290,14 +296,47 @@ class AudioVisualizer {
     constructor(canvas) {
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
-        this.width = canvas.width;
-        this.height = canvas.height;
+        this.sampleRate = 48000;
+        this.dpr = Math.max(1, window.devicePixelRatio || 1);
+        this.width = 0;
+        this.height = 0;
+        this.bandLevels = new Float32Array(40);
+
+        this._resizeCanvas = this._resizeCanvas.bind(this);
+        this._resizeCanvas();
+        window.addEventListener('resize', this._resizeCanvas, { passive: true });
     }
 
-    draw(level, frequencyData) {
+    _resizeCanvas() {
+        const rect = this.canvas.getBoundingClientRect();
+        const width = Math.max(1, Math.round(rect.width || this.canvas.width || 400));
+        const height = Math.max(1, Math.round(rect.height || this.canvas.height || 60));
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+
+        if (
+            width === this.width &&
+            height === this.height &&
+            dpr === this.dpr
+        ) {
+            return;
+        }
+
+        this.width = width;
+        this.height = height;
+        this.dpr = dpr;
+        this.canvas.width = Math.round(width * dpr);
+        this.canvas.height = Math.round(height * dpr);
+        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        this.ctx.imageSmoothingEnabled = false;
+    }
+
+    draw(level, frequencyData, sampleRate = this.sampleRate) {
+        this._resizeCanvas();
+
         const ctx = this.ctx;
         const width = this.width;
         const height = this.height;
+        this.sampleRate = sampleRate || this.sampleRate;
 
         // Clear with dark background
         ctx.fillStyle = '#0a0a0a';
@@ -308,22 +347,62 @@ class AudioVisualizer {
             return;
         }
 
-        // Draw frequency bars - minimal aesthetic
+        // Draw frequency bars - full-range, log-spaced analyzer
         const barCount = 40;
         const barWidth = 4;
-        const gap = (width - (barCount * barWidth)) / (barCount - 1);
+        const gap = Math.max(1, Math.floor((width - (barCount * barWidth)) / (barCount - 1)));
+        const totalWidth = (barCount * barWidth) + ((barCount - 1) * gap);
+        const startX = Math.floor((width - totalWidth) / 2);
+        const nyquist = this.sampleRate / 2;
+        const minFrequency = 20;
+        const maxFrequency = Math.min(20000, nyquist);
+        const minLog = Math.log10(minFrequency);
+        const maxLog = Math.log10(maxFrequency);
+        const minDb = -96;
+        const maxDb = -18;
 
         for (let i = 0; i < barCount; i++) {
-            const dataIndex = Math.floor(i * frequencyData.length / barCount);
-            const value = frequencyData[dataIndex] / 255;
-            const barHeight = Math.max(2, value * height * 0.85);
+            const startRatio = i / barCount;
+            const endRatio = (i + 1) / barCount;
+            const startFrequency = 10 ** (minLog + ((maxLog - minLog) * startRatio));
+            const endFrequency = 10 ** (minLog + ((maxLog - minLog) * endRatio));
+            const startIndex = Math.max(0, Math.floor((startFrequency / nyquist) * frequencyData.length));
+            const endIndex = Math.min(
+                frequencyData.length - 1,
+                Math.max(startIndex, Math.ceil((endFrequency / nyquist) * frequencyData.length))
+            );
 
-            const x = i * (barWidth + gap);
-            const y = (height - barHeight) / 2;
+            let powerSum = 0;
+            let sampleCount = 0;
+            for (let dataIndex = startIndex; dataIndex <= endIndex; dataIndex++) {
+                const db = frequencyData[dataIndex];
+                if (!Number.isFinite(db)) {
+                    continue;
+                }
+                powerSum += 10 ** (db / 10);
+                sampleCount += 1;
+            }
 
-            // White bars with opacity based on level
-            const opacity = 0.3 + (value * 0.7);
-            ctx.fillStyle = `rgba(224, 224, 224, ${opacity})`;
+            let averageDb = minDb;
+            if (sampleCount > 0 && powerSum > 0) {
+                averageDb = 10 * Math.log10(powerSum / sampleCount);
+            }
+
+            const normalized = Math.max(0, Math.min(1, (averageDb - minDb) / (maxDb - minDb)));
+            const previous = this.bandLevels[i] || 0;
+            const smoothed = normalized >= previous
+                ? (previous * 0.45) + (normalized * 0.55)
+                : (previous * 0.82) + (normalized * 0.18);
+
+            this.bandLevels[i] = smoothed;
+
+            const barHeight = Math.max(2, Math.round(smoothed * height * 0.85));
+
+            const x = startX + (i * (barWidth + gap));
+            const y = Math.floor((height - barHeight) / 2);
+
+            // Flat light-gray bars for a simpler display
+            ctx.fillStyle = '#cfcfcf';
             ctx.fillRect(x, y, barWidth, barHeight);
         }
     }
@@ -335,10 +414,11 @@ class AudioVisualizer {
 
         // Draw subtle center line
         ctx.fillStyle = '#2a2a2a';
-        ctx.fillRect(0, height / 2 - 1, width, 2);
+        ctx.fillRect(0, Math.floor(height / 2) - 1, width, 2);
     }
 
     clear() {
+        this.bandLevels.fill(0);
         this.ctx.fillStyle = '#0a0a0a';
         this.ctx.fillRect(0, 0, this.width, this.height);
         this._drawIdle();

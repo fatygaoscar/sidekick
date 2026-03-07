@@ -64,12 +64,12 @@ sidekick/
 │
 ├── web/
 │   ├── index.html                    # Main recording UI
-│   ├── recordings.html               # History / re-summarize UI (unified View modal)
+│   ├── recordings.html               # History UI (opens the shared workspace)
 │   ├── css/styles.css                # Mobile-optimized (13px text, no double scroll)
 │   └── js/
-│       ├── app.js                    # Recording + export flow (Review modal has Undo)
-│       ├── recordings.js             # History + re-summarize flow (View modal has Refine)
-│       ├── audio.js                  # AudioCapture, visualizer
+│       ├── app.js                    # Recording + export flow + main-page navigation guards
+│       ├── recordings.js             # History cards + workspace launch
+│       ├── audio.js                  # AudioCapture + DAW-style spectrum analyzer
 │       └── websocket.js              # WebSocket client, 25s keepalive ping
 │
 ├── data/                             # Runtime data (gitignored)
@@ -188,19 +188,21 @@ Default template: `meeting`
 ## UX Conventions
 
 - One primary action per step; no duplicate entry points.
-- Recording list cards: `View` and `Delete` only.
-- Export / re-summarize initiated from the view modal, not from cards.
-- **Unified Modals:** History "View" matches post-recording "Review". Both support AI Refine, Manual Edit, and Undo.
+- Recording list cards: `Open` and `Delete` only.
+- Export / re-summarize initiated from the workspace, not from cards.
+- **Unified Workspace:** History `Open` matches post-recording review. Both support AI Refine, Manual Edit, and Undo.
 - **View Modal Title:** Plain meeting title. Date/time is in the Details section.
-- **Rename flow:** Rename from the editable workspace title after opening the recording. History cards stay `View` / `Delete` only.
+- **Rename flow:** Rename from the editable workspace title after opening the recording. History cards stay `Open` / `Delete` only.
 - **Workspace header metadata:** Simplified to date and time under the title.
 - **Details Section:** Two-column grid — Template (if stored), Recorded, Exported, Length, Processing Time. Updates on version change.
 - **Summary Version label:** "Summary Version" (not "Summary") in view modal.
-- **Summary Version labels:** `Draft`, `Latest`, then descending `vN`.
+- **Summary Version labels:** `vN (Draft)`, `vN (Latest)`, then descending `vN-1 ... v1`.
 - **Audio player** is at the bottom of the view modal.
 - **Card titles:** Plain meeting title (no date prefix); date shown separately.
 - **Mobile optimization:** `13px` text, `1.7` line height, single-unit scroll, Details grid uses `word-break` to prevent horizontal overflow.
 - **Workspace tab motion:** Desktop uses the polished hide/reveal motion. Mobile uses a simpler direct-tracking path to avoid touch-scroll jank.
+- **Main page guards:** The recording page disables page scroll / pull-to-refresh and blocks in-app navigation while recording.
+- **Recording CTA layout:** Main page has a single centered record button; mobile uses easy bottom CTAs for `History` and `Record`.
 - Template chooser shows 4 templates in the order above.
 - `General Meeting` is default unless explicitly changed.
 
@@ -241,12 +243,14 @@ Default template: `meeting`
 - **Workspace Summary Gate**: Pending speaker review does not block summary generation. Users can summarize before naming every speaker.
 - **Settings Tab**: Summary-only. The workspace no longer shows a `People` or attendees field.
 - **Settings / Summary coupling**: The Settings tab reflects the selected summary version by default. `Reset` restores that version's template/prompt baseline.
+- **Obsidian audit trail**: Exported notes include `Pass 1: System Prompt`, `Pass 1: User Prompt`, `Pass 2: System Prompt`, `Pass 2: User Prompt`, plus a collapsed `Transcript` section.
 - **Workspace State Isolation**: Opening a different recording clears unsaved speaker assignments from the previous workspace, and closing the workspace flushes pending settings edits before dismissing the modal.
 - **Pipeline Optimizations**:
   - Speech-Aware Diarization: stops at last Whisper timestamp + 5s.
   - Dynamic Context: `num_ctx` calculated from input size.
   - Single-Pass Early Exit: short transcripts (< 3000 chars) skip polish pass.
 - **Audio Quality**: Captures and saves at 48kHz; downsampled to 16kHz for AI.
+- **Live analyzer**: The recording page uses a higher-resolution log-spaced spectrum analyzer, not the saved file waveform.
 - **Unified View & Refinement:** functionally identical review/view modals.
 - **Obsidian Versioning:** exports append `(v2)`, `(v3)`, etc.
 - **Markdown Logic:** Consolidated into `src/core/markdown_utils.py`.

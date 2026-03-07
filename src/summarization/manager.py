@@ -210,7 +210,7 @@ class SummarizationManager:
                     else get_template_content(prompt_type)
                 )
 
-                cohesive_text, _, _, _, speaker_map = await generate_cohesive_summary(
+                cohesive_text, _, _, _, speaker_map, prompt_audit = await generate_cohesive_summary(
                     llm_call=llm_call,
                     transcript=transcript,
                     template=prompt_type,
@@ -228,6 +228,7 @@ class SummarizationManager:
                     backend=self._active_backend.name,
                     model=self._active_backend.model,
                     speaker_map=speaker_map,
+                    prompt_audit=prompt_audit,
                 )
 
             # Emit completion event

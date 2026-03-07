@@ -8,6 +8,7 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **Local AI Integrity:** Ensure all AI operations (transcription, diarization, summarization) remain compatible with local backends (faster-whisper, pyannote, Ollama).
 - **Mobile optimization:** Maintain the iPhone-friendly UI. Do not re-introduce internal scrollbars or oversized text. Modals must expand and scroll as a single unit.
 - **Workspace Motion Split:** Keep the current device-specific tab-row behavior: polished hide/reveal on desktop, simpler direct tracking on mobile for touch-scroll stability.
+- **Main Recording Guardrails:** Keep the main page non-scrollable, resistant to pull-to-refresh, and guarded against navigation while recording.
 - **Transactional DB:** Ensure all database updates (segments, summaries, items) are performed within transactions.
 - **Versioning:** Never overwrite existing Obsidian notes. Always append ` (v2)`, ` (v3)`, etc., if a summary already exists.
 
@@ -27,6 +28,7 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **temperature=0.3:** Always pass `temperature: 0.3` to Ollama for consistent, factual summarization output.
 - **Speaker Labels:** Manual speaker mapping in the workspace is the source of truth. User-facing transcript and summary output must never expose raw `SPEAKER_XX`; use fallback labels like `Attendee`, `Attendee A`, `Attendee B` when unresolved.
 - **Rename Flow:** Recording rename lives in the workspace title after opening a recording; do not reintroduce card-level rename controls.
+- **Card Actions:** Recording cards use `Open` and `Delete`, with `Open` as the primary action.
 - **Database Migrations:** Use the `init_db` pattern in `src/sessions/repository.py` to automatically backfill schema changes for existing users.
 
 ## Project Context
@@ -34,3 +36,4 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **Environment:** Sidekick runs in WSL (Ubuntu) with mirrored networking to a Windows host running Ollama.
 - **Audio Loading:** Uses PyAV (bundled FFmpeg) for diarization. No system `ffmpeg` install is required.
 - **Markdown Core:** All Obsidian note assembly must go through `src/core/markdown_utils.py`.
+- **Prompt Audit Export:** Obsidian exports include the exact Pass 1 / Pass 2 prompt blocks and a collapsed `Transcript` section.

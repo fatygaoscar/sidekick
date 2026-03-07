@@ -81,14 +81,14 @@ Legacy templates (constants kept for backward compat, not in UI): `one_on_one`, 
 ## UX Conventions
 
 - Keep one primary action per step; avoid duplicate entry points.
-- Recording list cards: `View` and `Delete` only.
-- Re-summarize/export initiated from the recording view modal, not cards.
-- **Unified Modals:** Both History "View" and post-recording "Review" modals support identical features: AI refinement, manual editing, and undo history.
+- Recording list cards: `Open` and `Delete` only.
+- Re-summarize/export initiated from the shared workspace, not cards.
+- **Unified Workspace:** Both History `Open` and post-recording review support identical features: AI refinement, manual editing, and undo history.
 - **View Modal Title:** Shows plain meeting title (no date prefix). Date/time is in the Details section.
 - **Rename flow:** Rename from the editable workspace title after opening a recording. Do not reintroduce card-level rename controls.
 - **Details Section:** Two-column grid (label + value) — Template, Recorded, Exported, Length, Processing Time. Template omitted for old summaries (null). Updates when switching summary versions.
 - **Summary label:** "Summary Version" (not "Summary") in the view modal.
-- **Summary versions:** `Draft`, `Latest`, then descending `vN`.
+- **Summary versions:** `vN (Draft)`, `vN (Latest)`, then descending `vN-1 ... v1`.
 - **Metadata Visibility:** Details section mirrors Obsidian markdown header fields. Template is stored per-summary in DB (`summaries.template`).
 - **Obsidian Save:** "Save to Obsidian" button available in history view to create versioned copies or re-export.
 - **Audio player** is positioned at the bottom of the modal (below summary, above Downloads).
@@ -100,6 +100,8 @@ Legacy templates (constants kept for backward compat, not in UI): `one_on_one`, 
 - Summary generation is allowed before speaker review is complete.
 - Settings is summary-only and follows the currently selected summary version by default.
 - Workspace tab hide/reveal motion is device-specific: polished on desktop, simpler direct tracking on mobile.
+- Main page locks scroll / pull-to-refresh and guards against leaving while recording.
+- Recording page visualizer is a minimalist log-spaced spectrum analyzer, not a waveform.
 
 ## Key Config (Current)
 
@@ -138,7 +140,8 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - Metadata block: Template, Recorded date, Exported date, Duration, Processing Time
 - Summary body follows template section structure
 - **Markdown Standard:** Strict bullet-point-first structure with nested indentation (2 spaces) and blank lines between sections for Obsidian scannability.
-- Collapsible full transcript (with resolved names or fallback labels like `Attendee A`)
+- Prompt audit blocks: `Pass 1: System Prompt`, `Pass 1: User Prompt`, `Pass 2: System Prompt`, `Pass 2: User Prompt`
+- Collapsible `Transcript` section (with resolved names or fallback labels like `Attendee A`)
 
 ## Data Locations
 

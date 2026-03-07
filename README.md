@@ -11,8 +11,10 @@ Browser-based meeting recorder that transcribes audio, identifies speakers, and 
 - **Readable unresolved speakers** — transcript and summary views use `Attendee`, `Attendee A`, `Attendee B`, etc. instead of raw `SPEAKER_XX`
 - **Eager background processing** — transcription starts in the background as soon as recording stops, so export skips Whisper when you click Process
 - **Workspace-first rename** — open a recording and click the workspace title to rename it
-- **History Summary View** — view and refine processed summaries directly in the recordings history
+- **History Workspace** — open past recordings from history and use the same workspace for summary review, transcript, speakers, and settings
 - **Unified Review/View** — functionally identical modals for new and past recordings (Refine, Edit, Undo)
+- **Prompt Audit Export** — Obsidian exports include the exact Pass 1 / Pass 2 prompts used plus a collapsed transcript section
+- **DAW-style analyzer** — the live recording visualizer uses a higher-resolution log-spaced spectrum analyzer while keeping the same minimal style
 - **Obsidian-Optimized Formatting** — summaries use nested bullet points and clean spacing for maximum scannability
 - **Smart Versioning** — Obsidian exports append `(v2)`, `(v3)`, etc., to prevent overwriting existing notes
 - **Performance Optimizations** — dynamic context sizing and single-pass early exit for ultra-fast short meeting processing
@@ -112,7 +114,9 @@ Browser
                                 │
                     Build Obsidian markdown:
                     YYYY-MM-DD-HHMM - [Title] [Template].md
-                    Metadata block + summary + collapsible transcript
+                    Metadata block + summary
+                    + Pass 1 / Pass 2 prompt code blocks
+                    + collapsible transcript
                                 │
                     Write to OBSIDIAN_VAULT_PATH
                                 │
@@ -305,10 +309,12 @@ All templates are editable before export from the workspace Settings tab.
 
 ## Workspace UX
 
-- Recording cards stay simple: `View` and `Delete` only.
+- Recording cards stay simple: `Open` and `Delete` only.
+- Main page uses a single centered `Record` action; mobile surfaces easy bottom CTAs for `History` and `Record`.
+- Main page prevents page scrolling / pull-to-refresh and guards against leaving while recording.
 - Rename happens from the editable workspace title after opening a recording.
 - The Settings tab is summary-only and follows the currently selected summary version by default.
-- Summary versions are labeled `Draft`, `Latest`, then descending `vN`.
+- Summary versions are labeled `vN (Draft)`, `vN (Latest)`, then descending `vN-1 ... v1`.
 - Desktop uses the polished tab-row hide/reveal motion; mobile uses a simpler direct-tracking path for smoother touch scrolling.
 
 ## API

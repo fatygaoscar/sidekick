@@ -21,6 +21,9 @@ class SidekickApp {
         this.visualizer = null;
         this.ws = null;
         this.audioUploadPromise = null;
+        this._pageGuardArmed = false;
+        this._historyGuardArmed = false;
+        this._suppressHistoryGuardPop = false;
 
         this.clientId = crypto.randomUUID();
         this.chunkUploads = new Map();
@@ -52,6 +55,7 @@ class SidekickApp {
     }
 
     _init() {
+        this._seedMainPageHistoryState();
         this.visualizer = new AudioVisualizer(this.elements.audioCanvas);
         this.visualizer.clear();
 
@@ -94,14 +98,85 @@ class SidekickApp {
                     this.resolveCaptureStopped = null;
                 }
             },
-            onLevelUpdate: (level, frequencyData) => {
-                this.visualizer.draw(level, frequencyData);
+            onLevelUpdate: (level, frequencyData, sampleRate) => {
+                this.visualizer.draw(level, frequencyData, sampleRate);
             },
         });
     }
 
     _bindEvents() {
         this.elements.recordBtn.addEventListener('click', () => this._toggleRecording());
+
+        const armPageGuard = () => this._armMainPageHistoryGuard();
+        window.addEventListener('pointerdown', armPageGuard, { passive: true, once: true });
+        window.addEventListener('touchstart', armPageGuard, { passive: true, once: true });
+        window.addEventListener('keydown', armPageGuard, { once: true });
+
+        window.addEventListener('beforeunload', (event) => {
+            if (!this.state.isRecording) {
+                return;
+            }
+            event.preventDefault();
+            event.returnValue = '';
+        });
+
+        document.addEventListener('touchmove', (event) => {
+            if (!document.body.classList.contains('main-page')) {
+                return;
+            }
+            if (document.querySelector('.modal:not(.hidden)')) {
+                return;
+            }
+            event.preventDefault();
+        }, { passive: false });
+
+        document.addEventListener('click', (event) => {
+            const link = event.target.closest('a[href]');
+            if (!link || !this.state.isRecording) {
+                return;
+            }
+            if (link.target === '_blank' || link.hasAttribute('download')) {
+                return;
+            }
+            event.preventDefault();
+            this.elements.statusText.textContent = 'Stop recording before leaving this page';
+        });
+
+        window.addEventListener('popstate', () => {
+            if (this._suppressHistoryGuardPop) {
+                this._suppressHistoryGuardPop = false;
+                return;
+            }
+            if (this.state.isRecording && this._historyGuardArmed) {
+                window.history.pushState({ __sidekickRecordingGuard: true, __sidekickMainPage: true }, '', window.location.href);
+                this.elements.statusText.textContent = 'Stop recording before leaving this page';
+                return;
+            }
+            if (this._pageGuardArmed) {
+                window.history.pushState({ __sidekickMainPage: true }, '', window.location.href);
+            }
+        });
+
+        window.addEventListener('pagehide', () => {
+            if (!this.audioCapture?.isCapturing) {
+                return;
+            }
+            try {
+                this.ws.endSession();
+            } catch (_error) {
+                // no-op: page is being hidden/unloaded
+            }
+            try {
+                this.audioCapture.stop();
+            } catch (_error) {
+                // no-op: page is being hidden/unloaded
+            }
+            try {
+                this.ws.disconnect();
+            } catch (_error) {
+                // no-op: page is being hidden/unloaded
+            }
+        });
 
         document.addEventListener('visibilitychange', () => {
             if (document.visibilityState === 'visible' && !this.ws.isConnected) {
@@ -169,6 +244,15 @@ class SidekickApp {
             this.state.lastSessionId = null;
 
             await this.audioCapture.start();
+            this.state.isRecording = true;
+            this._armRecordingHistoryGuard();
+            this.elements.recordBtn.classList.add('recording');
+            this.elements.recordBtn.textContent = 'Stop';
+            this.elements.recordBtn.setAttribute('aria-pressed', 'true');
+            this.elements.statusText.textContent = 'Starting recording...';
+            this._resetLivePreview();
+            this._syncLivePreviewVisibility();
+            this._startTimer();
             this.ws.startSession();
 
             const startedSessionId = await this._waitForSessionId(3000);
@@ -188,17 +272,16 @@ class SidekickApp {
             this.fallbackBlob = null;
             this.fallbackMimeType = null;
 
-            this.state.isRecording = true;
-            this.elements.recordBtn.classList.add('recording');
-            this.elements.recordBtn.textContent = 'Stop';
-            this.elements.recordBtn.setAttribute('aria-pressed', 'true');
             this.elements.statusText.textContent = 'Recording';
-            this._resetLivePreview();
-            this._syncLivePreviewVisibility();
-            this._startTimer();
         } catch (error) {
             console.error('Failed to start recording:', error);
+            this.state.isRecording = false;
+            this._disarmRecordingHistoryGuard();
             this.audioCapture.stop();
+            this.elements.recordBtn.classList.remove('recording');
+            this.elements.recordBtn.textContent = 'Record';
+            this.elements.recordBtn.setAttribute('aria-pressed', 'false');
+            this._stopTimer();
             this.elements.statusText.textContent = 'Could not start session';
             this._syncLivePreviewVisibility();
         }
@@ -219,6 +302,7 @@ class SidekickApp {
         this.ws.endSession();
 
         this.state.isRecording = false;
+        this._disarmRecordingHistoryGuard();
         this.elements.recordBtn.classList.remove('recording');
         this.elements.recordBtn.textContent = 'Record';
         this.elements.recordBtn.setAttribute('aria-pressed', 'false');
@@ -276,6 +360,45 @@ class SidekickApp {
         const minutes = Math.floor((this.state.elapsedSeconds % 3600) / 60);
         const seconds = this.state.elapsedSeconds % 60;
         this.elements.timer.textContent = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+
+    _seedMainPageHistoryState() {
+        const currentState = window.history.state || {};
+        if (currentState.__sidekickMainPage) {
+            return;
+        }
+        window.history.replaceState(
+            { ...currentState, __sidekickMainPage: true },
+            '',
+            window.location.href
+        );
+    }
+
+    _armMainPageHistoryGuard() {
+        if (this._pageGuardArmed) {
+            return;
+        }
+        window.history.pushState({ __sidekickMainPage: true }, '', window.location.href);
+        this._pageGuardArmed = true;
+    }
+
+    _armRecordingHistoryGuard() {
+        if (this._historyGuardArmed) {
+            return;
+        }
+        window.history.pushState({ __sidekickRecordingGuard: true, __sidekickMainPage: true }, '', window.location.href);
+        this._historyGuardArmed = true;
+    }
+
+    _disarmRecordingHistoryGuard() {
+        if (!this._historyGuardArmed) {
+            return;
+        }
+        this._historyGuardArmed = false;
+        if (window.history.state && window.history.state.__sidekickRecordingGuard) {
+            this._suppressHistoryGuardPop = true;
+            window.history.back();
+        }
     }
 
     _resetAfterWorkspace() {

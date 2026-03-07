@@ -14,6 +14,7 @@ class SummarizationResult:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     speaker_map: dict[str, str] = field(default_factory=dict)
+    prompt_audit: dict[str, str] = field(default_factory=dict)
 
 
 class SummarizationBackend(ABC):

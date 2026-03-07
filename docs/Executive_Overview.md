@@ -68,7 +68,8 @@ More specifically:
 3. **Whisper AI** converts speech to text; speaker diarization identifies who said what
 4. **You can optionally review speakers and summary settings** in the workspace before finalizing output
 5. **Local AI** generates structured meeting notes following your chosen template
-6. **Markdown file** lands in your Obsidian vault with summary, decisions, action items table, and full transcript
+6. **The export includes an audit trail** with the exact prompts used for both summarization passes
+7. **Markdown file** lands in your Obsidian vault with summary, prompt audit blocks, and a collapsible full transcript
 
 ---
 

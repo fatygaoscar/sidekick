@@ -41,6 +41,7 @@
                 selectedSavedSummaryId: null,
                 banner: null,
                 pendingResetSummaryId: null,
+                lastCustomPrompt: '',
             };
 
             this._ensureDom();
@@ -72,6 +73,7 @@
             this.state.selectedSavedSummaryId = null;
             this.state.banner = null;
             this.state.pendingResetSummaryId = null;
+            this.state.lastCustomPrompt = '';
             this.elements.modal.classList.toggle('workspace-native-scroll-timeline', this._useNativeScrollTimeline);
             this.elements.modal.classList.remove('hidden');
             this._lockBodyScroll();
@@ -113,6 +115,7 @@
             this.state.summaryHistory = [];
             this.state.selectedSavedSummaryId = null;
             this.state.pendingResetSummaryId = null;
+            this.state.lastCustomPrompt = '';
             this._settingsSavePromise = null;
             this._resetTabScrollStage();
             this._stopSpeakerPlayback();
@@ -182,6 +185,8 @@
                 this.state.promptEditValue = '';
                 this.state.promptEditInitialValue = '';
             }
+
+            this._syncLastCustomPrompt();
 
             this._render();
         }
@@ -282,6 +287,7 @@
                                         <select id="workspace-summary-version-select" class="version-select"></select>
                                     </div>
                                     <div id="workspace-summary-display" class="summary-body"></div>
+                                    <div id="workspace-summary-edit-notice" class="workspace-edit-notice hidden">Editing summary. Click Done Editing when you are finished.</div>
                                     <textarea id="workspace-summary-edit" class="summary-edit-textarea hidden" spellcheck="true"></textarea>
                                     <div class="workspace-summary-actions">
                                         <button class="btn" id="workspace-edit-btn">Edit</button>
@@ -321,6 +327,7 @@
                                             <button type="button" class="btn btn-small workspace-prompt-edit-btn" id="workspace-prompt-edit-btn">Edit Prompt</button>
                                         </div>
                                         <div id="workspace-prompt-display" class="summary-body workspace-prompt-display"></div>
+                                        <div id="workspace-prompt-edit-notice" class="workspace-edit-notice hidden">Editing prompt. Click Done Editing when you are finished.</div>
                                         <textarea id="workspace-custom-prompt" class="form-input form-textarea workspace-prompt-textarea hidden" placeholder="Write custom prompt instructions."></textarea>
                                     </div>
                                 </section>
@@ -369,6 +376,7 @@
                 summaryVersionRow: modal.querySelector('#workspace-summary-version-row'),
                 summaryVersionSelect: modal.querySelector('#workspace-summary-version-select'),
                 summaryDisplay: modal.querySelector('#workspace-summary-display'),
+                summaryEditNotice: modal.querySelector('#workspace-summary-edit-notice'),
                 summaryEdit: modal.querySelector('#workspace-summary-edit'),
                 editBtn: modal.querySelector('#workspace-edit-btn'),
                 reviseBtn: modal.querySelector('#workspace-revise-btn'),
@@ -380,6 +388,7 @@
                 transcript: modal.querySelector('#workspace-transcript'),
                 templateGrid: modal.querySelector('#workspace-template-grid'),
                 promptDisplay: modal.querySelector('#workspace-prompt-display'),
+                promptEditNotice: modal.querySelector('#workspace-prompt-edit-notice'),
                 customPrompt: modal.querySelector('#workspace-custom-prompt'),
                 promptResetBtn: modal.querySelector('#workspace-prompt-reset-btn'),
                 promptEditBtn: modal.querySelector('#workspace-prompt-edit-btn'),
@@ -987,12 +996,14 @@
                 const options = [];
                 if (workspace.draft_summary) {
                     const selected = workspace.draft_summary.id === this.state.selectedSavedSummaryId ? 'selected' : '';
-                    options.push(`<option value="${workspace.draft_summary.id}" ${selected}>Draft</option>`);
+                    options.push(
+                        `<option value="${workspace.draft_summary.id}" ${selected}>v${totalSavedVersions + 1} (Draft)</option>`
+                    );
                 }
                 options.push(...workspace.saved_summaries.map((saved, index) => {
                         const selected = saved.id === this.state.selectedSavedSummaryId ? 'selected' : '';
                         const label = saved.saved_to_obsidian_at
-                            ? (index === 0 ? 'Latest' : `v${totalSavedVersions - index}`)
+                            ? (index === 0 ? `v${totalSavedVersions} (Latest)` : `v${totalSavedVersions - index}`)
                             : `Version ${index + 1}`;
                         return `<option value="${saved.id}" ${selected}>${label}</option>`;
                     }));
@@ -1036,6 +1047,10 @@
             this.elements.reviseBtn.disabled = false;
             this.elements.undoBtn.classList.toggle('hidden', this.state.summaryHistory.length === 0);
             this.elements.editBtn.textContent = this.state.editMode ? 'Done Editing' : 'Edit';
+            this.elements.editBtn.classList.toggle('workspace-done-btn', this.state.editMode);
+            this.elements.summaryEditNotice.classList.toggle('hidden', !this.state.editMode);
+            this.elements.summaryEdit.classList.toggle('workspace-editor-active', this.state.editMode);
+            this.elements.summaryDisplay.classList.toggle('workspace-editor-active', this.state.editMode);
 
             if (this.state.editMode) {
                 this.elements.summaryEdit.classList.remove('hidden');
@@ -1106,6 +1121,10 @@
             this.elements.customPrompt.classList.toggle('hidden', !this.state.promptEditMode);
             this.elements.promptResetBtn.disabled = !this._canResetSummarySettings();
             this.elements.promptEditBtn.textContent = this.state.promptEditMode ? 'Done Editing' : 'Edit Prompt';
+            this.elements.promptEditBtn.classList.toggle('workspace-done-btn', this.state.promptEditMode);
+            this.elements.promptEditNotice.classList.toggle('hidden', !this.state.promptEditMode);
+            this.elements.customPrompt.classList.toggle('workspace-editor-active', this.state.promptEditMode);
+            this.elements.promptDisplay.classList.toggle('workspace-editor-active', this.state.promptEditMode);
 
             if (this.state.promptEditMode) {
                 if (document.activeElement !== this.elements.customPrompt) {
@@ -1355,6 +1374,10 @@
                 if (job.status === 'completed') {
                     this.state.jobStatus = null;
                     await this._loadWorkspace({ keepTab: false });
+                    if (kind === 'summary' && this.state.workspace?.draft_summary?.id) {
+                        this.state.selectedSavedSummaryId = this.state.workspace.draft_summary.id;
+                        this._resetSettingsEditSession();
+                    }
                     this.state.activeTab = kind === 'transcription'
                         ? (this.state.workspace?.state?.requires_speaker_review ? 'speakers' : 'summary')
                         : 'summary';
@@ -1472,7 +1495,11 @@
                 this.state.editMode = true;
                 this.state.editBuffer = this._currentSummary()?.content || '';
                 this._renderSummary();
-                this.elements.summaryEdit.focus();
+                if (this._detectSimpleMobileTabMotion()) {
+                    this._bringEditorIntoView(this.elements.summaryEdit);
+                } else {
+                    this.elements.summaryEdit.focus();
+                }
                 return;
             }
 
@@ -1682,8 +1709,9 @@
             this.state.promptEditInitialValue = '';
 
             if (templateKey === 'custom') {
-                nextSettings.custom_prompt = current.custom_prompt || this.templates.custom?.prompt || '';
+                nextSettings.custom_prompt = this._preferredCustomPrompt();
             } else if (current.template_key !== templateKey) {
+                this._syncLastCustomPrompt();
                 nextSettings.custom_prompt = null;
             }
 
@@ -1709,11 +1737,15 @@
                 this.state.promptEditInitialValue = promptText;
                 this.state.promptEditValue = promptText;
                 this._renderSettings();
-                this.elements.customPrompt.focus();
-                this.elements.customPrompt.setSelectionRange(
-                    this.elements.customPrompt.value.length,
-                    this.elements.customPrompt.value.length
-                );
+                if (this._detectSimpleMobileTabMotion()) {
+                    this._bringEditorIntoView(this.elements.customPrompt);
+                } else {
+                    this.elements.customPrompt.focus();
+                    this.elements.customPrompt.setSelectionRange(
+                        this.elements.customPrompt.value.length,
+                        this.elements.customPrompt.value.length
+                    );
+                }
                 return;
             }
 
@@ -1751,6 +1783,7 @@
                 template_key: summary.template_key || 'meeting',
                 custom_prompt: summary.custom_prompt || null,
             };
+            this._syncLastCustomPrompt();
             this._renderSettings();
             this._renderHeader();
             this._renderSummary();
@@ -1784,6 +1817,9 @@
             }
 
             this.state.promptEditValue = value;
+            if (value.trim()) {
+                this.state.lastCustomPrompt = value.trim();
+            }
             this._renderSettings();
             this._renderHeader();
             this._renderSummary();
@@ -1922,6 +1958,21 @@
             return settings.custom_prompt || null;
         }
 
+        _preferredCustomPrompt() {
+            const workspacePrompt = (this.state.workspace?.settings?.custom_prompt || '').trim();
+            const summaryPrompt = (this._currentSummary()?.custom_prompt || '').trim();
+            const lastPrompt = (this.state.lastCustomPrompt || '').trim();
+            const defaultPrompt = (this.templates.custom?.prompt || '').trim();
+            return workspacePrompt || summaryPrompt || lastPrompt || defaultPrompt || '';
+        }
+
+        _syncLastCustomPrompt() {
+            const workspacePrompt = (this.state.workspace?.settings?.custom_prompt || '').trim();
+            const summaryPrompt = (this._currentSummary()?.custom_prompt || '').trim();
+            const nextPrompt = workspacePrompt || summaryPrompt || this.state.lastCustomPrompt || '';
+            this.state.lastCustomPrompt = nextPrompt;
+        }
+
         _speakerColorForLabel(label) {
             const palette = [
                 '#7dd3fc',
@@ -2058,6 +2109,7 @@
                 template_key: displayedSettings.template_key || 'meeting',
                 custom_prompt: displayedSettings.custom_prompt ?? null,
             };
+            this._syncLastCustomPrompt();
             this.state.settingsViewMode = 'workspace';
         }
 
@@ -2081,6 +2133,7 @@
                 template_key: currentSummary.template_key || 'meeting',
                 custom_prompt: currentSummary.custom_prompt ?? null,
             };
+            this._syncLastCustomPrompt();
         }
 
         _formatStage(stage) {
@@ -2106,6 +2159,18 @@
         _autoResizeTextarea(textarea) {
             textarea.style.height = 'auto';
             textarea.style.height = `${Math.max(textarea.scrollHeight, 120)}px`;
+        }
+
+        _bringEditorIntoView(element) {
+            if (!element || !this._detectSimpleMobileTabMotion()) {
+                return;
+            }
+            window.setTimeout(() => {
+                element.scrollIntoView({
+                    block: 'start',
+                    behavior: 'smooth',
+                });
+            }, 80);
         }
 
         _escapeHtml(value) {

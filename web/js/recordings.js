@@ -83,7 +83,9 @@ class RecordingsPage {
         const timeStr = startedAt.toLocaleTimeString('en-US', {
             hour: '2-digit',
             minute: '2-digit',
-        });
+        }).replace(' AM', 'AM').replace(' PM', 'PM');
+        const dateLabel = recording.recorded_date_label || dateStr;
+        const timeLabel = recording.recorded_time_label || timeStr;
         const title = (recording.title || 'Untitled Recording').trim() || 'Untitled Recording';
         const badges = [];
         if (recording.needs_speaker_review) {
@@ -97,17 +99,28 @@ class RecordingsPage {
 
         return `
             <div class="recording-card" data-id="${recording.id}">
-                <div class="recording-date">${dateStr} ${timeStr}</div>
-                <div class="recording-title-row">
-                    <span class="recording-title">${this._escapeHtml(title)}</span>
+                <div class="recording-card-shell">
+                    <div class="recording-primary">
+                        <div class="recording-title-row">
+                            <span class="recording-title">${this._escapeHtml(title)}</span>
+                        </div>
+                        <div class="recording-subline">
+                            <div class="recording-meta-line">
+                                <span>${this._escapeHtml(dateLabel)}</span>
+                                <span aria-hidden="true">&middot;</span>
+                                <span>${this._escapeHtml(timeLabel)}</span>
+                                <span aria-hidden="true">&middot;</span>
+                                <span>${this._formatDuration(recording.duration_seconds)}</span>
+                            </div>
+                        </div>
+                        <div class="recording-badges">${badges.join('')}</div>
+                    </div>
                 </div>
-                <div class="recording-meta">
-                    <span>Duration: ${this._formatDuration(recording.duration_seconds)}</span>
-                </div>
-                <div class="recording-badges">${badges.join('')}</div>
-                <div class="recording-actions">
-                    <button class="btn view-btn" data-id="${recording.id}">Open</button>
+                <div class="recording-card-footer">
                     <button class="btn delete-btn" data-id="${recording.id}">Delete</button>
+                    <div class="recording-actions">
+                        <button class="btn btn-primary view-btn" data-id="${recording.id}">Open</button>
+                    </div>
                 </div>
             </div>
         `;

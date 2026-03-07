@@ -414,6 +414,10 @@ class Repository:
         parent_summary_id: str | None = None,
         template_key: str | None = None,
         custom_prompt: str | None = None,
+        pass1_system_prompt: str | None = None,
+        pass1_user_prompt: str | None = None,
+        pass2_system_prompt: str | None = None,
+        pass2_user_prompt: str | None = None,
         attendees_snapshot: str | None = None,
         saved_to_obsidian_at: datetime | None = None,
         obsidian_relative_path: str | None = None,
@@ -434,6 +438,10 @@ class Repository:
                 parent_summary_id=parent_summary_id,
                 template_key=template_key,
                 custom_prompt=custom_prompt,
+                pass1_system_prompt=pass1_system_prompt,
+                pass1_user_prompt=pass1_user_prompt,
+                pass2_system_prompt=pass2_system_prompt,
+                pass2_user_prompt=pass2_user_prompt,
                 attendees_snapshot=attendees_snapshot,
                 saved_to_obsidian_at=saved_to_obsidian_at,
                 obsidian_relative_path=obsidian_relative_path,
@@ -501,6 +509,10 @@ class Repository:
         parent_summary_id: str | None = None,
         template_key: str | None = None,
         custom_prompt: str | None = None,
+        pass1_system_prompt: str | None = None,
+        pass1_user_prompt: str | None = None,
+        pass2_system_prompt: str | None = None,
+        pass2_user_prompt: str | None = None,
         attendees_snapshot: str | None = None,
     ) -> Summary:
         """Replace the active draft summary for a meeting."""
@@ -519,6 +531,10 @@ class Repository:
             parent_summary_id=parent_summary_id,
             template_key=template_key,
             custom_prompt=custom_prompt,
+            pass1_system_prompt=pass1_system_prompt,
+            pass1_user_prompt=pass1_user_prompt,
+            pass2_system_prompt=pass2_system_prompt,
+            pass2_user_prompt=pass2_user_prompt,
             attendees_snapshot=attendees_snapshot,
         )
 
@@ -575,6 +591,10 @@ class Repository:
             parent_summary_id=source.id,
             template_key=source.template_key,
             custom_prompt=source.custom_prompt,
+            pass1_system_prompt=source.pass1_system_prompt,
+            pass1_user_prompt=source.pass1_user_prompt,
+            pass2_system_prompt=source.pass2_system_prompt,
+            pass2_user_prompt=source.pass2_user_prompt,
             attendees_snapshot=source.attendees_snapshot,
         )
 
@@ -606,6 +626,10 @@ class Repository:
             parent_summary_id=draft.parent_summary_id,
             template_key=draft.template_key,
             custom_prompt=draft.custom_prompt,
+            pass1_system_prompt=draft.pass1_system_prompt,
+            pass1_user_prompt=draft.pass1_user_prompt,
+            pass2_system_prompt=draft.pass2_system_prompt,
+            pass2_user_prompt=draft.pass2_user_prompt,
             attendees_snapshot=draft.attendees_snapshot,
             saved_to_obsidian_at=saved_to_obsidian_at,
             obsidian_relative_path=obsidian_relative_path,
@@ -783,6 +807,14 @@ class Repository:
             await conn.execute(text("ALTER TABLE summaries ADD COLUMN template_key VARCHAR(100)"))
         if "custom_prompt" not in column_names:
             await conn.execute(text("ALTER TABLE summaries ADD COLUMN custom_prompt TEXT"))
+        if "pass1_system_prompt" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN pass1_system_prompt TEXT"))
+        if "pass1_user_prompt" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN pass1_user_prompt TEXT"))
+        if "pass2_system_prompt" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN pass2_system_prompt TEXT"))
+        if "pass2_user_prompt" not in column_names:
+            await conn.execute(text("ALTER TABLE summaries ADD COLUMN pass2_user_prompt TEXT"))
         if "attendees_snapshot" not in column_names:
             await conn.execute(text("ALTER TABLE summaries ADD COLUMN attendees_snapshot TEXT"))
         if "saved_to_obsidian_at" not in column_names:

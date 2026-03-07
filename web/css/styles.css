@@ -50,6 +50,29 @@ body {
     line-height: 1.6;
 }
 
+body.main-page {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100dvh;
+    overflow: hidden;
+    overscroll-behavior: none;
+}
+
+body.main-page .app {
+    position: relative;
+    height: 100dvh;
+    min-height: 100dvh;
+    overflow: hidden;
+}
+
+body.main-page .main-content {
+    justify-content: center;
+    overflow: hidden;
+    padding-top: 0;
+    --record-center-y: 43%;
+}
+
 /* App Layout */
 .app {
     display: flex;
@@ -96,19 +119,33 @@ body {
     color: var(--accent);
 }
 
+.mobile-history-bar,
+.mobile-page-bar {
+    display: none;
+}
+
 /* Main Content - Centered */
 .main-content {
     flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
+    position: relative;
     padding: 48px 24px;
-    gap: 48px;
 }
 
-/* Record Button */
-.record-section {
+/* Record Layout */
+.record-hero {
+    position: absolute;
+    left: 50%;
+    top: var(--record-center-y);
+    transform: translate(-50%, -50%);
+    z-index: 1;
+}
+
+.record-support {
+    position: absolute;
+    left: 50%;
+    top: calc(var(--record-center-y) + 122px);
+    transform: translateX(-50%);
+    width: min(560px, calc(100% - 48px));
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -116,14 +153,18 @@ body {
 }
 
 .record-btn {
-    width: 140px;
-    height: 140px;
+    width: 168px;
+    height: 168px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border-radius: 50%;
     border: 2px solid var(--text-dim);
     background: transparent;
     color: var(--text);
     font-family: inherit;
     font-size: 12px;
+    line-height: 1;
     letter-spacing: 0.15em;
     text-transform: uppercase;
     cursor: pointer;
@@ -174,6 +215,7 @@ body {
 .live-preview {
     width: 100%;
     max-width: 560px;
+    min-height: 88px;
     border: 1px solid var(--border);
     background: var(--bg-elevated);
     padding: 12px 14px;
@@ -207,6 +249,13 @@ body {
     font-size: 11px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
+    background: var(--bg);
+}
+
+body.main-page .status-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 5;
 }
 
 .status-left {
@@ -740,11 +789,11 @@ textarea.form-input {
     padding: 24px;
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 12px;
 }
 
 .recording-card {
-    padding: 20px;
+    padding: 14px 16px;
     border: 1px solid var(--border);
     background: var(--bg-elevated);
     transition: border-color 0.2s ease;
@@ -754,17 +803,19 @@ textarea.form-input {
     border-color: var(--border-hover);
 }
 
-.recording-date {
-    font-size: 11px;
-    color: var(--text-muted);
-    letter-spacing: 0.1em;
-    margin-bottom: 4px;
+.recording-card-shell {
+    display: block;
+}
+
+.recording-primary {
+    min-width: 0;
 }
 
 .recording-title-row {
     display: flex;
     align-items: center;
-    margin-bottom: 12px;
+    gap: 12px;
+    margin-bottom: 6px;
 }
 
 .recording-title-row .recording-title {
@@ -772,26 +823,62 @@ textarea.form-input {
 }
 
 .recording-title {
-    font-size: 14px;
+    font-size: 15px;
+    font-weight: 500;
+    line-height: 1.35;
+    letter-spacing: 0.01em;
     color: var(--text);
-    margin-bottom: 12px;
+    margin-bottom: 0;
+    min-width: 0;
 }
 
-.recording-meta {
+.recording-subline {
+    display: block;
+}
+
+.recording-meta-line {
     display: flex;
-    gap: 24px;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
     font-size: 11px;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.08em;
+    line-height: 1.35;
     text-transform: uppercase;
     color: var(--text-dim);
-    margin-bottom: 16px;
+    margin-bottom: 0;
 }
 
 .recording-badges {
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 16px;
+    gap: 6px;
+    margin-top: 8px;
+    margin-bottom: 0;
+}
+
+.recording-badges .workspace-badge {
+    padding: 3px 8px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    line-height: 1.2;
+    text-transform: uppercase;
+}
+
+.recording-badges .workspace-badge:not(.workspace-badge-warning):not(.workspace-badge-accent) {
+    border-color: color-mix(in srgb, var(--text-dim) 45%, var(--border));
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--bg) 75%, var(--text-dim) 4%);
+}
+
+.recording-badges .workspace-badge-warning {
+    border-color: color-mix(in srgb, var(--recording) 55%, var(--border));
+    color: color-mix(in srgb, var(--recording) 72%, var(--text));
+}
+
+.recording-badges .workspace-badge-accent {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+    color: color-mix(in srgb, var(--accent) 72%, var(--text));
 }
 
 /* View modal Details section */
@@ -820,17 +907,34 @@ textarea.form-input {
     word-break: break-word;
 }
 
+.recording-card-footer {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 14px;
+}
+
 .recording-actions {
     display: flex;
-    gap: 8px;
+    justify-content: flex-end;
 }
 
 .recording-actions .btn {
-    padding: 8px 16px;
-    font-size: 10px;
+    min-width: 108px;
+    padding: 10px 18px;
+    font-size: 11px;
 }
 
-.recording-actions .delete-btn:hover {
+.recording-card-footer .delete-btn {
+    min-width: 108px;
+    padding: 10px 18px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: transparent;
+}
+
+.recording-card-footer .delete-btn:hover {
     border-color: var(--recording);
     color: var(--recording);
 }
@@ -947,18 +1051,20 @@ textarea.form-input {
     }
 
     .main-content {
-        padding: 16px 16px;
-        gap: 24px;
-    }
-
-    .record-section {
-        gap: 20px;
+        padding: 16px;
+        --record-center-y: 40%;
     }
 
     .record-btn {
-        width: 110px;
-        height: 110px;
+        width: 136px;
+        height: 136px;
         font-size: 11px;
+    }
+
+    .record-support {
+        top: calc(var(--record-center-y) + 104px);
+        width: calc(100% - 32px);
+        gap: 20px;
     }
 
     .visualizer-section {
@@ -971,6 +1077,39 @@ textarea.form-input {
 
     .timer {
         font-size: 22px;
+    }
+
+    .header-right {
+        display: none;
+    }
+
+    .main-content {
+        padding-bottom: 20px;
+    }
+
+    .mobile-history-bar,
+    .mobile-page-bar {
+        display: block;
+        padding: 0 16px 18px;
+    }
+
+    .mobile-page-bar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 20;
+        padding: 10px 16px calc(18px + env(safe-area-inset-bottom, 0px));
+        border-top: 1px solid var(--border);
+        background: var(--bg);
+    }
+
+    .mobile-history-link,
+    .mobile-page-link {
+        width: 100%;
+        justify-content: center;
+        min-height: 48px;
+        font-size: 11px;
     }
 
     .status-bar {
@@ -1152,6 +1291,8 @@ textarea.form-input {
 .summary-edit-textarea {
     width: 100%;
     font-family: inherit;
+    font-size: 14px;
+    line-height: 1.7;
     resize: none;
     outline: none;
 }
@@ -1249,6 +1390,12 @@ textarea.form-input {
 /* Utility */
 .hidden {
     display: none !important;
+}
+
+.live-preview.hidden {
+    display: block !important;
+    visibility: hidden;
+    pointer-events: none;
 }
 
 .text-muted {
@@ -1641,6 +1788,8 @@ textarea.form-input {
 
 .workspace-prompt-textarea {
     min-height: 160px;
+    font-size: 14px;
+    line-height: 1.6;
 }
 
 .workspace-prompt-display {
@@ -1648,6 +1797,35 @@ textarea.form-input {
     margin-bottom: 0;
     font-size: 14px;
     line-height: 1.6;
+}
+
+.workspace-edit-notice {
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--accent) 60%, var(--border));
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+    color: var(--accent);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    line-height: 1.4;
+    text-transform: uppercase;
+}
+
+.workspace-editor-active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.workspace-done-btn {
+    background: #ffffff;
+    border-color: #ffffff;
+    color: #000000;
+}
+
+.workspace-done-btn:hover:not(:disabled),
+.workspace-done-btn:focus-visible {
+    background: #ffffff;
+    border-color: #ffffff;
+    color: #000000;
 }
 
 .workspace-footer {
@@ -1682,6 +1860,44 @@ textarea.form-input {
 }
 
 @media (max-width: 700px) {
+    .recordings-list {
+        padding: 16px;
+        gap: 10px;
+        padding-bottom: 92px;
+    }
+
+    .recording-card {
+        padding: 12px 14px;
+    }
+
+    .recording-card-shell {
+        display: block;
+    }
+
+    .recording-title-row {
+        margin-bottom: 4px;
+    }
+
+    .recording-title {
+        line-height: 1.35;
+    }
+
+    .recording-badges {
+        margin-top: 6px;
+    }
+
+    .recording-card-footer {
+        margin-top: 12px;
+    }
+
+    .recording-actions .btn {
+        min-width: 96px;
+    }
+
+    .recording-card-footer .delete-btn {
+        min-width: 96px;
+    }
+
     .workspace-modal {
         padding: 0;
         align-items: stretch;
@@ -1776,8 +1992,32 @@ textarea.form-input {
         line-height: 1.6;
     }
 
-    .summary-edit-textarea,
-    .workspace-prompt-textarea,
+    .summary-edit-textarea {
+        min-height: min(52dvh, 460px);
+        padding: 16px 18px;
+        font-size: 13px;
+        line-height: 1.6;
+        border-radius: 6px;
+        -webkit-appearance: none;
+        appearance: none;
+        caret-color: var(--accent);
+        overflow-y: hidden;
+        overscroll-behavior: none;
+    }
+
+    .workspace-prompt-textarea {
+        min-height: min(52dvh, 460px);
+        padding: 16px 18px;
+        font-size: 13px;
+        line-height: 1.6;
+        border-radius: 6px;
+        -webkit-appearance: none;
+        appearance: none;
+        caret-color: var(--accent);
+        overflow-y: hidden;
+        overscroll-behavior: none;
+    }
+
     .refine-input,
     .version-select {
         font-size: 16px;
@@ -1785,6 +2025,12 @@ textarea.form-input {
 
     .workspace-prompt-display {
         font-size: 13px;
+    }
+
+    .workspace-edit-notice {
+        padding: 9px 10px;
+        font-size: 10px;
+        line-height: 1.35;
     }
 
     .summary-meta,
@@ -1821,6 +2067,13 @@ textarea.form-input {
     .workspace-summary-actions {
         gap: 6px;
         margin-top: 12px;
+    }
+
+    .summary-edit-textarea:focus,
+    .workspace-prompt-textarea:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
     }
 
     .workspace-settings-reset-actions {

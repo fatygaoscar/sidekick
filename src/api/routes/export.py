@@ -746,7 +746,12 @@ async def _run_export_pipeline(
 
     await _emit_progress(progress_callback, "summarizing", "Generating summary", 1.0, 0.02)
     _sum_t0 = time.monotonic()
-    logger.info("[step] summarization | start | chars=%d | template=%s", len(full_transcript), template)
+    logger.info(
+        "[step] summarization | start | chars=%d | template=%s | custom_prompt_chars=%d",
+        len(full_transcript),
+        template,
+        len((request_payload.custom_prompt or "").strip()),
+    )
 
     def _on_sum_progress(p: float) -> None:
         if progress_callback:
@@ -782,6 +787,10 @@ async def _run_export_pipeline(
         parent_summary_id=latest_saved.id if latest_saved else None,
         template_key=template,
         custom_prompt=request_payload.custom_prompt,
+        pass1_system_prompt=summary_result.prompt_audit.get("pass1_system_prompt"),
+        pass1_user_prompt=summary_result.prompt_audit.get("pass1_user_prompt"),
+        pass2_system_prompt=summary_result.prompt_audit.get("pass2_system_prompt"),
+        pass2_user_prompt=summary_result.prompt_audit.get("pass2_user_prompt"),
         attendees_snapshot=None,
     )
 
@@ -831,6 +840,10 @@ async def _run_export_pipeline(
         "meeting_id": primary_meeting_id,
         "template_key": template,
         "custom_prompt": request_payload.custom_prompt,
+        "pass1_system_prompt": summary_result.prompt_audit.get("pass1_system_prompt"),
+        "pass1_user_prompt": summary_result.prompt_audit.get("pass1_user_prompt"),
+        "pass2_system_prompt": summary_result.prompt_audit.get("pass2_system_prompt"),
+        "pass2_user_prompt": summary_result.prompt_audit.get("pass2_user_prompt"),
     }
 
     preview = summary_content[:200] + "..." if len(summary_content) > 200 else summary_content
@@ -994,6 +1007,10 @@ async def _build_summary_save_params(
     summary_content: str,
     template_label: str,
     processing_duration_seconds: float | None,
+    pass1_system_prompt: str | None = None,
+    pass1_user_prompt: str | None = None,
+    pass2_system_prompt: str | None = None,
+    pass2_user_prompt: str | None = None,
 ) -> dict:
     """Assemble markdown and path metadata for saving a summary draft."""
     segments = await repository.get_segments(session_id=session.id)
@@ -1034,6 +1051,10 @@ async def _build_summary_save_params(
         "processing_time_str": processing_time_str,
         "filename": filename,
         "relative_path": relative_path,
+        "pass1_system_prompt": pass1_system_prompt,
+        "pass1_user_prompt": pass1_user_prompt,
+        "pass2_system_prompt": pass2_system_prompt,
+        "pass2_user_prompt": pass2_user_prompt,
     }
 
 
@@ -1107,6 +1128,10 @@ async def _run_summary_job(
             parent_summary_id=latest_saved.id if latest_saved else None,
             template_key=template_key,
             custom_prompt=meeting.custom_prompt,
+            pass1_system_prompt=summary_result.prompt_audit.get("pass1_system_prompt"),
+            pass1_user_prompt=summary_result.prompt_audit.get("pass1_user_prompt"),
+            pass2_system_prompt=summary_result.prompt_audit.get("pass2_system_prompt"),
+            pass2_user_prompt=summary_result.prompt_audit.get("pass2_user_prompt"),
             attendees_snapshot=None,
         )
         preview = (
@@ -1177,6 +1202,10 @@ async def export_to_obsidian(
         duration_str=bp["duration_str"],
         processing_time_str=bp["processing_time_str"],
         transcript=bp["transcript"],
+        pass1_system_prompt=bp.get("pass1_system_prompt"),
+        pass1_user_prompt=bp.get("pass1_user_prompt"),
+        pass2_system_prompt=bp.get("pass2_system_prompt"),
+        pass2_user_prompt=bp.get("pass2_user_prompt"),
     )
     filepath, obsidian_uri = await _write_obsidian_file(
         markdown_content, bp["relative_path"], settings.obsidian_vault_path
@@ -1348,6 +1377,10 @@ async def save_export_job(
         duration_str=bp["duration_str"],
         processing_time_str=bp["processing_time_str"],
         transcript=bp["transcript"],
+        pass1_system_prompt=bp.get("pass1_system_prompt"),
+        pass1_user_prompt=bp.get("pass1_user_prompt"),
+        pass2_system_prompt=bp.get("pass2_system_prompt"),
+        pass2_user_prompt=bp.get("pass2_user_prompt"),
         revision_instruction=request.revision_instruction,
     )
 
@@ -1532,6 +1565,10 @@ async def save_summary_draft(
             {},
         ).get("name", "Meeting"),
         processing_duration_seconds=draft.processing_duration_seconds,
+        pass1_system_prompt=draft.pass1_system_prompt,
+        pass1_user_prompt=draft.pass1_user_prompt,
+        pass2_system_prompt=draft.pass2_system_prompt,
+        pass2_user_prompt=draft.pass2_user_prompt,
     )
 
     obsidian_uri = None
@@ -1551,6 +1588,10 @@ async def save_summary_draft(
             duration_str=params["duration_str"],
             processing_time_str=params["processing_time_str"],
             transcript=params["transcript"],
+            pass1_system_prompt=params.get("pass1_system_prompt"),
+            pass1_user_prompt=params.get("pass1_user_prompt"),
+            pass2_system_prompt=params.get("pass2_system_prompt"),
+            pass2_user_prompt=params.get("pass2_user_prompt"),
         )
         _, obsidian_uri = await _write_obsidian_file(
             markdown_content,

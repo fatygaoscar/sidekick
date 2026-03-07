@@ -7,6 +7,16 @@ from pathlib import Path
 from typing import Optional
 
 
+_PASS1_CONTEXT_BLOCK_RE = re.compile(
+    r"\n## Source Context \([^)]+\)\n.*?\n(?=Follow (?:the|exact) )",
+    re.DOTALL,
+)
+_PASS2_DRAFT_BLOCK_RE = re.compile(
+    r"\nDraft:\n.*?\n\nReturn ONLY the final edited output\.",
+    re.DOTALL,
+)
+
+
 def format_duration_human(seconds: int) -> str:
     """Return e.g. '45 min' or '1 hour 45 min'."""
     minutes = seconds // 60
@@ -49,6 +59,26 @@ def week_folder(dt: datetime) -> str:
     return f"{iso_year} Week {week_num:02d}"
 
 
+def _sanitize_prompt_for_note(prompt: Optional[str], pass_title: str, role: str) -> str:
+    if not prompt or not prompt.strip():
+        return ""
+
+    cleaned = prompt.strip()
+
+    if role == "user" and pass_title == "Pass 1":
+        cleaned = _PASS1_CONTEXT_BLOCK_RE.sub(
+            "\n## Source Context\n[Omitted from note: transcript/context payload]\n\n",
+            cleaned,
+        )
+    elif role == "user" and pass_title == "Pass 2":
+        cleaned = _PASS2_DRAFT_BLOCK_RE.sub(
+            "\nDraft:\n[Omitted from note: draft summary payload]\n\nReturn ONLY the final edited output.",
+            cleaned,
+        )
+
+    return cleaned
+
+
 def build_obsidian_markdown(
     content: str,
     template_label: str,
@@ -57,6 +87,10 @@ def build_obsidian_markdown(
     duration_str: str,
     processing_time_str: str,
     transcript: str,
+    pass1_system_prompt: Optional[str] = None,
+    pass1_user_prompt: Optional[str] = None,
+    pass2_system_prompt: Optional[str] = None,
+    pass2_user_prompt: Optional[str] = None,
     revision_instruction: Optional[str] = None,
 ) -> str:
     """Assemble the final Obsidian markdown note."""
@@ -70,6 +104,28 @@ def build_obsidian_markdown(
     processing_line = ""
     if processing_time_str and processing_time_str != "N/A":
         processing_line = f"**Processing Time**: {processing_time_str}\n"
+
+    prompt_sections = ""
+    if any(
+        part and part.strip()
+        for part in (pass1_system_prompt, pass1_user_prompt, pass2_system_prompt, pass2_user_prompt)
+    ):
+        prompt_parts = []
+
+        def _append_prompt_block(pass_title: str, role_title: str, prompt: Optional[str], role: str) -> None:
+            note_prompt = _sanitize_prompt_for_note(prompt, pass_title, role)
+            if not note_prompt:
+                return
+            prompt_parts.append(f"### {pass_title}: {role_title}\n\n```text\n{note_prompt}\n```")
+
+        _append_prompt_block("Pass 1", "System Prompt", pass1_system_prompt, "system")
+        _append_prompt_block("Pass 1", "User Prompt", pass1_user_prompt, "user")
+        _append_prompt_block("Pass 2", "System Prompt", pass2_system_prompt, "system")
+        _append_prompt_block("Pass 2", "User Prompt", pass2_user_prompt, "user")
+
+        prompt_sections = "\n\n".join(prompt_parts)
+        if prompt_sections:
+            prompt_sections = f"{prompt_sections}\n\n"
     
     return (
         f"**Template**: {template_label}\n"
@@ -81,7 +137,8 @@ def build_obsidian_markdown(
         f"\n---\n\n"
         f"{content}\n"
         f"\n---\n\n"
-        f"<details>\n<summary>Full Transcript</summary>\n\n"
-        f"{transcript}\n\n"
+        f"{prompt_sections}"
+        f"<details>\n<summary>Transcript</summary>\n\n"
+        f"```text\n{transcript}\n```\n\n"
         f"</details>\n"
     )
