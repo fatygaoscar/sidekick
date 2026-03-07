@@ -7,9 +7,8 @@ Browser-based meeting recorder that transcribes audio, identifies speakers, and 
 - **High-fidelity audio** — captures and plays back at 48kHz (DVD quality) while downsampling to 16kHz for AI
 - **Local transcription** via faster-whisper large-v3 (CUDA)
 - **Speaker diarization** via pyannote.audio 3.1 — speech-aware optimization skips silent ends
-- **Speaker name resolution** — provide attendee names and the LLM maps labels to real people before summarizing
-- **Manual speaker identification** — if LLM resolution fails (names not spoken), listen to audio clips and manually identify speakers
-- **Force re-diarize** — when attendees are provided, diarization always re-runs to improve speaker accuracy
+- **Manual-first speaker identification** — review speaker clips and assign names directly in the workspace
+- **Readable unresolved speakers** — transcript and summary views use `Attendee`, `Attendee A`, `Attendee B`, etc. instead of raw `SPEAKER_XX`
 - **Eager background processing** — transcription starts in the background as soon as recording stops, so export skips Whisper when you click Process
 - **Inline rename** — hover a recording card and click the pencil icon to rename without opening the view modal
 - **History Summary View** — view and refine processed summaries directly in the recordings history
@@ -54,7 +53,7 @@ Then open `http://localhost:8000`.
 │ EXPORT PIPELINE (authoritative)                             │
 │                                                             │
 │  Saved audio file → Whisper → Diarization →                │
-│  Speaker map → Two-pass summary → Obsidian .md             │
+│  Humanized transcript → Two-pass summary → Obsidian .md    │
 │  src/api/routes/export.py                                   │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -69,7 +68,7 @@ Browser
   └─[stop recording]────► Audio saved: data/audio/{session_id}.webm
                                 │
                      POST /api/recordings/{id}/export-obsidian-job
-                     {title, template, attendees, custom_prompt}
+                     {title, template, custom_prompt}
                                 │
                     ┌───────────▼────────────┐
                     │   HAS TRANSCRIPT?      │
@@ -93,19 +92,14 @@ Browser
                                 │
                     ┌───────────▼────────────────────────────────┐
                     │  Build transcript string                    │
-                    │  [MM:SS] SPEAKER_XX: text (per segment)    │
+                    │  [MM:SS] Name/Attendee A: text             │
                     └───────────┬────────────────────────────────┘
                                 │
                     ┌───────────▼────────────────────────────────┐
                     │  SUMMARIZATION  (cohesive.py)              │
                     │                                            │
-                    │  Pre-pass (if attendees provided):         │
-                    │    LLM maps SPEAKER_XX → real names        │
-                    │    Apply string replace across transcript  │
-                    │                                            │
                     │  Pass 1: Draft                             │
                     │    system: template style contract         │
-                    │           + attendees note                 │
                     │    user:  transcript (or compressed pack   │
                     │           if transcript > context budget)  │
                     │                                            │
@@ -144,14 +138,16 @@ sidekick/
 │   ├── audio/
 │   │   └── storage.py                # Audio file management, chunk recovery
 │   ├── core/
-│   │   └── datetime_utils.py         # Timezone helpers
+│   │   ├── datetime_utils.py         # Timezone helpers
+│   │   ├── markdown_utils.py         # Shared Obsidian note construction logic
+│   │   └── speaker_labels.py         # Humanized fallback labels for unresolved speakers
 │   ├── sessions/
 │   │   ├── models.py                 # SQLAlchemy models (Session, Meeting,
 │   │   │                             #   TranscriptSegment w/ speaker, StructuredItem)
 │   │   └── repository.py             # DB CRUD incl. update_segments_speakers()
 │   ├── summarization/
-│   │   ├── cohesive.py               # Two-pass summary + speaker pre-pass
-│   │   ├── manager.py                # Summarization orchestration, passes attendees
+│   │   ├── cohesive.py               # Two-pass summary with humanized unresolved speakers
+│   │   ├── manager.py                # Summarization orchestration
 │   │   ├── ollama_backend.py         # Ollama client, strips <think> blocks
 │   │   ├── prompts.py                # Template strings + TEMPLATE_INFO (UI order)
 │   │   └── pipeline/                 # Kept in codebase but NOT invoked from export
@@ -168,8 +164,8 @@ sidekick/
 │       └── whisper_local.py          # faster-whisper with progress callbacks
 │
 ├── web/
-│   ├── index.html                    # Main recording UI (has Attendees field)
-│   ├── recordings.html               # History / re-summarize UI (has Attendees field)
+│   ├── index.html                    # Main recording UI
+│   ├── recordings.html               # History / re-summarize UI
 │   ├── css/styles.css
 │   └── js/
 │       ├── app.js                    # Recording + export flow
@@ -303,10 +299,10 @@ All templates are editable before export (click "Show" to view and modify the pr
 1. **Record** — Click the microphone button to start
 2. **Stop** — Click again to stop recording
 3. **Title** — Give the recording a name
-4. **Attendees** *(optional)* — Enter names (e.g. `Oscar, Jane, Mike`) to resolve speaker labels to real names in the summary
-5. **Template** — Choose a template; click "Show" to edit the prompt
-6. **Export** — Watch real-time progress through transcription and summarization
-7. **Open in Obsidian** — One click opens the exported note
+4. **Speakers** *(optional but recommended)* — In the workspace `Speakers` tab, name any detected speakers you recognize
+5. **Template** — Choose a template and edit the custom prompt if needed
+6. **Generate Summary** — Watch real-time progress through transcription and summarization
+7. **Save to Obsidian** — Save the draft and open the exported note
 
 ## API
 
@@ -325,8 +321,8 @@ All templates are editable before export (click "Show" to view and modify the pr
 | `PUT /api/recordings/{id}/audio` | Upload full audio blob (fallback) |
 | `PUT /api/recordings/{id}/audio/chunks/{n}` | Upload chunk (needs `X-Client-ID`) |
 | `POST /api/recordings/{id}/audio/finalize` | Finalize chunks (needs `X-Client-ID`) |
-| `GET /api/recordings/{id}/speaker-clips` | Get audio clips for manual speaker resolution |
-| `POST /api/recordings/{id}/speaker-mapping` | Save manual speaker name mapping |
+| `GET /api/recordings/{id}/speakers` | Get speaker cards and clip metadata for workspace review |
+| `PUT /api/recordings/{id}/speakers` | Save manual speaker name mapping |
 | `WS /ws/audio` | Live audio stream |
 
 ## Debugging
@@ -371,9 +367,9 @@ All templates are editable before export (click "Show" to view and modify the pr
 - `SUMMARIZATION_TIMEOUT_SECONDS` is only a per-call timeout. It does not control model unloading.
 - Summarization calls now send Ollama `keep_alive=0`, so the summarization model unloads immediately after each call finishes.
 - Pipeline package (`src/summarization/pipeline/`) exists in codebase but is **not called from export**
-- Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist; diarization runs again if attendees are provided (force re-diarize)
-- Speaker name resolution requires the **Attendees field** at export time. Resolved names are written back to DB segments so the transcript view shows real names.
-- **Manual speaker resolution**: If LLM-based resolution fails (names not spoken in recording), use "Resolve Speakers" button in View modal to manually identify speakers by listening to audio clips
+- Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist; it does not require attendees.
+- Speaker identity is manual-first. The `Speakers` tab is the only product-facing place to map diarization clusters to real names.
+- If a speaker is still unresolved, transcript and summary output use fallback labels like `Attendee`, `Attendee A`, `Attendee B`.
 - `start.sh` port check uses `connect()` (not `bind()`) to avoid false positives in WSL mirrored mode
 - `OLLAMA_HOST=http://127.0.0.1:11434` does not prove you are using Windows host Ollama. In WSL it may also point at a WSL-local Ollama daemon.
 - Context budget: `OLLAMA_CONTEXT_LENGTH=32768` suits `qwen3:8b` (5.2 GB model). Fits 100% in 16 GB VRAM. Supports ~2.5+ hours of speech.

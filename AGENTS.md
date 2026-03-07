@@ -39,13 +39,14 @@ sidekick/
 │   │   └── storage.py                # Audio file management, chunk recovery
 │   ├── core/
 │   │   ├── datetime_utils.py         # Timezone helpers
-│   │   └── markdown_utils.py         # SHARED Obsidian note construction logic
+│   │   ├── markdown_utils.py         # SHARED Obsidian note construction logic
+│   │   └── speaker_labels.py         # Humanized fallback labels for unresolved speakers
 │   ├── sessions/
 │   │   ├── models.py                 # SQLAlchemy models (Summary has processing_duration_seconds, template)
 │   │   └── repository.py             # DB CRUD incl. update_segments_speakers() + migrations
 │   ├── summarization/
-│   │   ├── cohesive.py               # Two-pass summary + speaker pre-pass
-│   │   ├── manager.py                # Summarization orchestration, passes attendees
+│   │   ├── cohesive.py               # Two-pass summary with humanized unresolved speakers
+│   │   ├── manager.py                # Summarization orchestration
 │   │   ├── ollama_backend.py         # Ollama client, strips <think> blocks
 │   │   ├── prompts.py                # Template strings + TEMPLATE_INFO (UI order)
 │   │   └── pipeline/                 # Kept in codebase but NOT invoked from export
@@ -62,7 +63,7 @@ sidekick/
 │       └── whisper_local.py          # faster-whisper with progress callbacks
 │
 ├── web/
-│   ├── index.html                    # Main recording UI (has Attendees field)
+│   ├── index.html                    # Main recording UI
 │   ├── recordings.html               # History / re-summarize UI (unified View modal)
 │   ├── css/styles.css                # Mobile-optimized (13px text, no double scroll)
 │   └── js/
@@ -97,7 +98,7 @@ Browser
   └─[stop recording]────► Audio saved: data/audio/{session_id}.webm
                                 │
                      POST /export-obsidian-job
-                     {title, template, attendees, custom_prompt}
+                     {title, template, custom_prompt}
                                 │
                     ┌───────────▼────────────┐
                     │   HAS TRANSCRIPT?      │
@@ -121,19 +122,14 @@ Browser
                                 │
                     ┌───────────▼────────────────────────────────┐
                     │  Build transcript string                    │
-                    │  [MM:SS] SPEAKER_XX: text (per segment)    │
+                    │  [MM:SS] Name/Attendee A: text             │
                     └───────────┬────────────────────────────────┘
                                 │
                     ┌───────────▼────────────────────────────────┐
                     │  SUMMARIZATION  (cohesive.py)              │
                     │                                            │
-                    │  Pre-pass (if attendees provided):         │
-                    │    LLM maps SPEAKER_XX → real names        │
-                    │    Apply string replace across transcript  │
-                    │                                            │
                     │  Pass 1: Draft (Indented bullets)          │
                     │    system: template style contract         │
-                    │           + attendees note                 │
                     │    user:  transcript                       │
                     │                                            │
                     │  Pass 2: Editorial polish (No paragraphs)  │
@@ -220,8 +216,8 @@ Default template: `meeting`
 | `GET /api/export-jobs/{job_id}` | Poll export job |
 | `POST /api/recordings/{id}/transcription-job` | Transcription only |
 | `PUT /api/recordings/{id}/audio` | Upload audio |
-| `GET /api/recordings/{id}/speaker-clips` | Get audio clips for each speaker (for manual resolution) |
-| `POST /api/recordings/{id}/speaker-mapping` | Save manual speaker name mapping |
+| `GET /api/recordings/{id}/speakers` | Get speaker cards and clip metadata for workspace review |
+| `PUT /api/recordings/{id}/speakers` | Save manual speaker name mapping |
 | `WS /ws/audio` | Live audio stream |
 
 ## Speaker Diarization
@@ -229,21 +225,18 @@ Default template: `meeting`
 **Status**: Live and enabled.
 
 **Features**:
-- **Manual Speaker Resolution**: Users can manually identify speakers by listening to audio clips:
-  1. Click "Resolve Speakers" in the View modal
+- **Manual Speaker Resolution**: Users identify speakers from the `Speakers` tab in the workspace:
+  1. Open a recording
   2. See audio clips for each detected speaker (first 5 seconds of their first utterance)
   3. Enter names in text fields
-  4. Click "Apply & Re-summarize" to save mapping and regenerate summary
-- **Force Re-diarize**: When attendees are provided, diarization always runs (even if speakers already exist in DB)
-- **Min/Max Speakers**: diarize.py accepts `min_speakers` and `max_speakers` params to constrain pyannote
+  4. Save speaker edits, then re-summarize when needed
 
-**Handoff Notes (2026-03-06, latest)**:
+**Handoff Notes (2026-03-07, latest)**:
 - **Model**: `qwen3:8b` (5.2GB, 100% GPU). `OLLAMA_NUM_GPU=99` forces all layers to GPU. `temperature=0.3` added to all calls.
-- **Speaker Resolution**: Two methods:
-  1. **LLM-based**: `_resolve_speaker_map()` uses first 5000 chars + attendee name lines from full transcript. Requires names to be spoken in recording.
-  2. **Manual**: Users listen to clips and enter names manually. Much more reliable when names aren't spoken.
-- **Workspace Summary Gate**: Pending speaker review no longer blocks summary generation when `meeting.attendees` is filled in. The attendee pre-pass gets the first attempt to resolve `SPEAKER_XX` labels before manual review is required.
-- **Resolved Speaker Persistence**: When the attendee pre-pass resolves every generic speaker label, those names are written back to transcript segments and the workspace marks speaker review complete so the draft can be saved normally.
+- **Speaker Identity**: Manual-first. The `Speakers` tab is the product-facing source of truth for speaker naming.
+- **Unresolved Speakers**: Raw `SPEAKER_XX` stays visible only in the `Speakers` tab. Transcript and summary views use stable fallback labels: `Attendee`, `Attendee A`, `Attendee B`, etc.
+- **Workspace Summary Gate**: Pending speaker review does not block summary generation. Users can summarize before naming every speaker.
+- **Settings Tab**: Summary-only. The workspace no longer shows a `People` or attendees field.
 - **Workspace State Isolation**: Opening a different recording clears unsaved speaker assignments from the previous workspace, and closing the workspace flushes pending settings edits before dismissing the modal.
 - **Pipeline Optimizations**:
   - Speech-Aware Diarization: stops at last Whisper timestamp + 5s.
@@ -254,12 +247,13 @@ Default template: `meeting`
 - **Obsidian Versioning:** exports append `(v2)`, `(v3)`, etc.
 - **Markdown Logic:** Consolidated into `src/core/markdown_utils.py`.
 - **Database:** Auto-migrations in `repository.py` for `processing_duration_seconds` and `template`.
+- **Attendees Compatibility:** `meeting.attendees` and `attendees_snapshot` still exist in the DB/API for backward compatibility, but they are deprecated and no longer drive speaker resolution or summary gating.
 
 **Key implementation notes**:
 - Audio loaded via **PyAV** — no system `ffmpeg` needed.
 - pyannote 4.x returns `DiarizeOutput`.
-- Speaker name resolution pre-pass LLM call if `attendees` provided. Results persisted to DB.
 - Manual resolution endpoint returns clip timestamps; frontend uses HTML5 audio seek to play.
+- `src/core/speaker_labels.py` centralizes fallback speaker labels for transcript and summary output.
 
 ## Gotchas
 
@@ -269,5 +263,5 @@ Default template: `meeting`
 - `temperature=0.3` is set in all Ollama call options for consistent, factual output (Ollama default is 0.8).
 - Mobile: removed `max-height` from internal containers to fix double scrolling.
 - Context budget: `OLLAMA_CONTEXT_LENGTH=32768` suits `qwen3:8b` (5.2GB model). Fits 100% in 16GB VRAM. Supports ~2.5+ hours of speech. Larger context or larger models cause CPU spillover.
-- Speaker name resolution requires the **Attendees field** to be filled in at export time. Without it, SPEAKER_XX labels remain unresolved. With it, the pre-pass maps labels to names and writes them back to the DB.
+- Speaker naming no longer depends on an attendees field. If speakers are not mapped manually, user-facing output falls back to `Attendee`, `Attendee A`, `Attendee B`, etc.
 - Pull Ollama models from Windows PowerShell, not WSL: `powershell.exe -Command "ollama pull qwen3:8b"`

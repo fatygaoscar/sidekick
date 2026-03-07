@@ -24,8 +24,8 @@ python -m src.main
 
 1. Record audio in browser
 2. Stop recording
-3. Name recording, select template, optionally enter attendees + edit prompt
-4. Process/export to Obsidian markdown with real-time progress
+3. Open the workspace, name recording, review speakers if needed, choose template, edit prompt
+4. Generate or revise summary, then save/export to Obsidian markdown with real-time progress
 
 ## Architecture: Two Transcription Pipelines
 
@@ -48,11 +48,11 @@ python -m src.main
 
 ### 3) Summarization
 
-`transcript -> optional speaker pre-pass -> two-pass cohesive summary -> markdown`
+`transcript -> humanized speaker labels -> two-pass cohesive summary -> markdown`
 
 - All templates use `generate_cohesive_summary()` in `src/summarization/cohesive.py`
-- **Speaker pre-pass**: if attendees are provided, one dedicated LLM call resolves `SPEAKER_XX` labels to real names before any summarization pass
-- **Pass 1 (draft)**: template style contract + attendees context → draft following exact section structure
+- **Speaker handling**: unresolved diarization labels are converted to `Attendee`, `Attendee A`, `Attendee B`, etc. before summarization
+- **Pass 1 (draft)**: template style contract → draft following exact section structure
 - **Pass 2 (polish)**: editorial rewrite preserving all `##` headers from draft
 - **Retry pass**: triggered if artifacts or repeated sentences detected in pass 2 output
 - Context budget: full transcript when it fits; compressed evidence pack fallback for long meetings; chunked extraction for very long meetings
@@ -96,7 +96,8 @@ Legacy templates (constants kept for backward compat, not in UI): `strategic_rev
 - Recording list cards show plain title (no date prefix) — date is shown separately on the card.
 - Template chooser shows 5 templates in the order above.
 - Keep `General Meeting` as default unless explicit product changes requested.
-- Attendees field (optional) in both export modals — used for speaker name resolution.
+- Speaker naming is manual-first in the workspace `Speakers` tab.
+- Summary generation is allowed before speaker review is complete.
 
 ## Key Config (Current)
 
@@ -135,7 +136,7 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - Metadata block: Template, Recorded date, Exported date, Duration, Processing Time
 - Summary body follows template section structure
 - **Markdown Standard:** Strict bullet-point-first structure with nested indentation (2 spaces) and blank lines between sections for Obsidian scannability.
-- Collapsible full transcript (with `SPEAKER_XX:` or resolved real names)
+- Collapsible full transcript (with resolved names or fallback labels like `Attendee A`)
 
 ## Data Locations
 

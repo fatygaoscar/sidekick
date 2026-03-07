@@ -24,7 +24,7 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **Ollama Optimization:** Maintain `OLLAMA_CONTEXT_LENGTH=32768` for `qwen3:8b`. Use dynamic `num_ctx` calculation based on input size to speed up Ollama initialization for short meetings. `OLLAMA_NUM_GPU=99` forces all layers to GPU — never remove this.
 - **Ollama Think:** Always pass `think: false` to Ollama for summarization. Note: this only works for `qwen3` models. `qwen3.5` models always think regardless.
 - **temperature=0.3:** Always pass `temperature: 0.3` to Ollama for consistent, factual summarization output.
-- **Speaker Resolution:** `generate_cohesive_summary()` returns `speaker_map` as 5th element. After export, resolved names must be written back to DB segments via `repository.update_segments_speakers()`. Do not remove this persistence step.
+- **Speaker Labels:** Manual speaker mapping in the workspace is the source of truth. User-facing transcript and summary output must never expose raw `SPEAKER_XX`; use fallback labels like `Attendee`, `Attendee A`, `Attendee B` when unresolved.
 - **Database Migrations:** Use the `init_db` pattern in `src/sessions/repository.py` to automatically backfill schema changes for existing users.
 
 ## Project Context

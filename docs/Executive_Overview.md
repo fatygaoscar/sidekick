@@ -28,7 +28,7 @@ The system uses your computer's **graphics card (GPU)** to process speech up to 
 
 ### 4. The Writer: Local AI Summarization
 After transcribing your words, a **local AI model called Qwen 3** processes the transcript through a two-pass pipeline:
-1. **Speaker identification** *(if attendees listed)*: Maps speaker labels (SPEAKER_00, SPEAKER_01) to real names
+1. **Speaker handling**: Uses any manually assigned speaker names and falls back to readable labels like `Attendee A` when someone is still unresolved
 2. **Draft pass**: Produces structured meeting notes following the selected template (summary, decisions, action items)
 3. **Editorial pass**: Polishes the draft for scannability — bullet points, clean spacing, no repetition
 
