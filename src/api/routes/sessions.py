@@ -20,6 +20,11 @@ from src.core.markdown_utils import (
     format_processing_time,
     week_folder,
 )
+from src.core.speaker_labels import (
+    build_user_facing_speaker_map,
+    is_generic_speaker,
+    resolve_user_facing_speaker_name,
+)
 from src.audio.storage import (
     assemble_chunks,
     cleanup_chunk_storage,
@@ -148,25 +153,12 @@ def _normalize_optional_text(value: str | None) -> str:
     return (value or "").strip()
 
 
-def _can_resolve_speakers_from_attendees(meeting) -> bool:
-    return bool(
-        meeting
-        and meeting.speaker_review_required
-        and meeting.speaker_review_completed_at is None
-        and _normalize_optional_text(getattr(meeting, "attendees", None))
-    )
-
-
-def _is_generic_speaker(label: str | None) -> bool:
-    return bool(label and label.startswith("SPEAKER_"))
-
-
 def _transcript_requires_speaker_review(segments: list) -> bool:
     raw_speakers = {
         getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
         for segment in segments
     }
-    unresolved = {speaker for speaker in raw_speakers if _is_generic_speaker(speaker)}
+    unresolved = {speaker for speaker in raw_speakers if is_generic_speaker(speaker)}
     return len(unresolved) > 1
 
 
@@ -189,16 +181,26 @@ def _serialize_summary(summary) -> dict:
 
 
 def _serialize_transcript_segments(segments: list) -> list[dict]:
+    fallback_map = build_user_facing_speaker_map(
+        (getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None))
+        for segment in segments
+    )
     transcript_lines = []
     for segment in segments:
         mins = int(segment.start_time // 60)
         secs = int(segment.start_time % 60)
+        raw_label = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+        speaker = resolve_user_facing_speaker_name(
+            getattr(segment, "speaker", None),
+            raw_label,
+            fallback_map,
+        )
         transcript_lines.append(
             {
                 "id": str(segment.id),
                 "timestamp": f"[{mins:02d}:{secs:02d}]",
                 "text": segment.text,
-                "speaker": getattr(segment, "speaker", None),
+                "speaker": speaker,
                 "speaker_cluster": getattr(segment, "speaker_cluster", None),
                 "is_important": segment.is_important,
                 "start_time": segment.start_time,
@@ -231,7 +233,7 @@ def _build_speaker_cards(segments: list, session_id: str) -> list[dict]:
                 "clip_start": float(first.start_time),
                 "clip_end": float(first.start_time) + clip_duration,
                 "audio_url": f"/api/recordings/{session_id}/audio",
-                "needs_name": _is_generic_speaker(speaker_cluster)
+                "needs_name": is_generic_speaker(speaker_cluster)
                 and (not display_name or display_name == speaker_cluster),
             }
         )
@@ -257,10 +259,6 @@ def _summary_is_out_of_date(meeting, summary) -> bool:
     meeting_prompt = _normalize_optional_text(meeting.custom_prompt)
     if (summary_prompt or meeting_prompt) and summary_prompt != meeting_prompt:
         return True
-    summary_attendees = _normalize_optional_text(summary.attendees_snapshot)
-    meeting_attendees = _normalize_optional_text(meeting.attendees)
-    if (summary_attendees or meeting_attendees) and summary_attendees != meeting_attendees:
-        return True
     return False
 
 
@@ -273,22 +271,12 @@ def _build_recording_workspace_state(
     latest_saved_summary,
 ) -> dict:
     current_summary = draft_summary or latest_saved_summary
-    can_resolve_speakers_from_attendees = _can_resolve_speakers_from_attendees(meeting)
     return {
         "has_transcription": bool(session.has_transcription),
         "requires_speaker_review": bool(
             meeting and meeting.speaker_review_required and meeting.speaker_review_completed_at is None
         ),
-        "can_resolve_speakers_from_attendees": can_resolve_speakers_from_attendees,
-        "can_generate_summary": bool(
-            session.has_transcription
-            and (
-                not meeting
-                or not meeting.speaker_review_required
-                or meeting.speaker_review_completed_at is not None
-                or can_resolve_speakers_from_attendees
-            )
-        ),
+        "can_generate_summary": bool(session.has_transcription),
         "has_unsaved_draft": draft_summary is not None,
         "summary_out_of_date": _summary_is_out_of_date(meeting, current_summary) if meeting else False,
         "transcript_segment_count": len(segments),
@@ -649,7 +637,6 @@ class UpdateRecordingSettingsRequest(BaseModel):
     title: Optional[str] = None
     template_key: Optional[str] = None
     custom_prompt: Optional[str] = None
-    attendees: Optional[str] = None
 
 
 class UpdateSpeakerAssignmentsRequest(BaseModel):
@@ -812,7 +799,6 @@ async def get_recording_workspace(
             "title": meeting.title,
             "template_key": meeting.template_key or "meeting",
             "custom_prompt": meeting.custom_prompt,
-            "attendees": meeting.attendees,
         },
         "speaker_review": {
             "required": bool(meeting.speaker_review_required),
@@ -862,16 +848,12 @@ async def update_recording_settings(
     normalized_custom_prompt = UNSET
     if request.custom_prompt is not None:
         normalized_custom_prompt = request.custom_prompt.strip() or None
-    normalized_attendees = UNSET
-    if request.attendees is not None:
-        normalized_attendees = request.attendees.strip() or None
 
     updated = await repository.update_meeting_settings(
         meeting.id,
         title=normalized_title,
         template_key=normalized_template_key,
         custom_prompt=normalized_custom_prompt,
-        attendees=normalized_attendees,
     )
     return {
         "success": True,
@@ -879,7 +861,6 @@ async def update_recording_settings(
         "title": updated.title,
         "template_key": updated.template_key,
         "custom_prompt": updated.custom_prompt,
-        "attendees": updated.attendees,
     }
 
 
@@ -976,7 +957,7 @@ async def save_recording_summary(
         source_type="manual_edit",
         template_key=primary_meeting.template_key,
         custom_prompt=primary_meeting.custom_prompt,
-        attendees_snapshot=primary_meeting.attendees,
+        attendees_snapshot=None,
     )
 
     # Best-effort vault write

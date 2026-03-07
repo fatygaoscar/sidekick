@@ -28,6 +28,10 @@ from src.core.markdown_utils import (
     format_processing_time,
     week_folder,
 )
+from src.core.speaker_labels import (
+    build_user_facing_speaker_map,
+    resolve_user_facing_speaker_name,
+)
 from src.sessions.repository import Repository
 from src.summarization.manager import SummarizationManager
 from src.summarization.prompts import TEMPLATE_INFO, get_template_content
@@ -238,17 +242,8 @@ def _speaker_review_required(segments: list) -> bool:
     return len(raw_clusters) > 1
 
 
-def _meeting_has_attendees(meeting) -> bool:
-    return bool(meeting and str(getattr(meeting, "attendees", "") or "").strip())
-
-
 def _speaker_review_blocks_summary(meeting) -> bool:
-    return bool(
-        meeting
-        and meeting.speaker_review_required
-        and meeting.speaker_review_completed_at is None
-        and not _meeting_has_attendees(meeting)
-    )
+    return False
 
 
 async def _update_meeting_speaker_review_state(
@@ -263,40 +258,6 @@ async def _update_meeting_speaker_review_state(
         speaker_review_required=required,
         speaker_review_completed_at=completed_at,
     )
-
-
-async def _persist_resolved_speaker_map(
-    repository: Repository,
-    meeting,
-    segments: list,
-    speaker_map: dict[str, str],
-) -> None:
-    if not speaker_map or not meeting:
-        return
-
-    updates = {}
-    unresolved_clusters = {
-        identity
-        for identity in (_speaker_identity(segment) for segment in segments)
-        if identity and str(identity).startswith("SPEAKER_")
-    }
-
-    for segment in segments:
-        identity = _speaker_identity(segment)
-        if identity in speaker_map:
-            updates[segment.id] = speaker_map[identity]
-
-    if not updates:
-        return
-
-    await repository.update_segments_speakers(updates)
-
-    if unresolved_clusters and unresolved_clusters.issubset(set(speaker_map)):
-        await repository.update_meeting_settings(
-            meeting.id,
-            speaker_review_required=True,
-            speaker_review_completed_at=datetime.utcnow(),
-        )
 
 
 def _create_export_job(session_id: str) -> dict:
@@ -424,11 +385,17 @@ def _segments_to_transcript(segments: list) -> tuple[str, float]:
     """Format transcript segments into a timestamped string and the max end time."""
     lines = []
     duration = 0.0
+    fallback_map = build_user_facing_speaker_map(_speaker_identity(segment) for segment in segments)
     for segment in segments:
         mins = int(segment.start_time // 60)
         secs = int(segment.start_time % 60)
         marker = " [IMPORTANT]" if segment.is_important else ""
-        speaker_prefix = f"{segment.speaker}: " if getattr(segment, "speaker", None) else ""
+        speaker = resolve_user_facing_speaker_name(
+            getattr(segment, "speaker", None),
+            _speaker_identity(segment),
+            fallback_map,
+        )
+        speaker_prefix = f"{speaker}: " if speaker else ""
         lines.append(f"[{mins:02d}:{secs:02d}]{marker} {speaker_prefix}{segment.text}")
         duration = max(duration, float(segment.end_time))
     return "\n".join(lines).strip(), duration
@@ -440,7 +407,6 @@ async def _transcribe_and_persist_session(
     repository: Repository,
     transcription_manager: TranscriptionManager,
     primary_meeting_id: str,
-    attendees: str | None = None,
     progress_callback: Optional[TranscriptionProgressCallback] = None,
 ) -> tuple[str, float]:
     audio_path = get_session_audio_path(session_id)
@@ -475,18 +441,7 @@ async def _transcribe_and_persist_session(
     from src.transcription.diarize import assign_speaker, diarize
     diarization_spans: list[tuple[float, float, str]] = []
     _settings = get_settings()
-    
-    # Calculate speaker constraints from attendee count
-    min_speakers = None
-    max_speakers = None
-    if attendees:
-        attendee_names = [a.strip() for a in attendees.split(",") if a.strip()]
-        if attendee_names:
-            count = len(attendee_names)
-            min_speakers = count
-            max_speakers = count
-            logger.info("diarization: using %d speakers from attendees field", count)
-    
+
     if _settings.diarization_enabled and _settings.hf_token:
         try:
             with pipeline_step(logger, "diarization") as step:
@@ -494,8 +449,6 @@ async def _transcribe_and_persist_session(
                     diarize,
                     str(audio_path),
                     _settings.hf_token,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
                 )
                 step["spans"] = len(diarization_spans)
         except Exception as exc:
@@ -680,7 +633,6 @@ async def _run_export_pipeline(
             title=request_payload.title,
             template_key=request_payload.template,
             custom_prompt=request_payload.custom_prompt,
-            attendees=request_payload.attendees,
         )
     else:
         primary_meeting = await repository.create_meeting(session_id=session.id, title=request_payload.title)
@@ -689,7 +641,6 @@ async def _run_export_pipeline(
             primary_meeting_id,
             template_key=request_payload.template,
             custom_prompt=request_payload.custom_prompt,
-            attendees=request_payload.attendees,
         )
 
     # Reuse existing transcript when authoritative transcription exists and segments are present.
@@ -700,7 +651,6 @@ async def _run_export_pipeline(
         _tx_t0 = time.monotonic()
 
         # Run diarization on existing segments if enabled and not yet applied.
-        # Always re-diarize if attendees are provided to ensure accurate speaker assignment
         _settings = get_settings()
         has_speaker_clusters = any(_speaker_identity(seg) for seg in existing_segments)
         should_diarize = _settings.diarization_enabled and _settings.hf_token
@@ -720,18 +670,6 @@ async def _run_export_pipeline(
                     # Calculate speech end time to limit diarization processing
                     speech_end_time = max((seg.end_time for seg in existing_segments), default=None)
                     diarization_limit = speech_end_time + 5.0 if speech_end_time else None
-
-                    # Calculate speaker constraints from attendee count
-                    min_speakers = None
-                    max_speakers = None
-                    if request_payload.attendees:
-                        attendee_names = [a.strip() for a in request_payload.attendees.split(",") if a.strip()]
-                        if attendee_names:
-                            count = len(attendee_names)
-                            min_speakers = count
-                            max_speakers = count
-                            logger.info("diarization: using %d speakers from attendees field", count)
-
                     from src.transcription.diarize import assign_speaker, diarize
                     limit_str = f"{diarization_limit:.1f}s" if diarization_limit else "none"
                     with pipeline_step(logger, "diarization", limit=limit_str) as step:
@@ -740,8 +678,6 @@ async def _run_export_pipeline(
                             str(audio_path),
                             _settings.hf_token,
                             duration_limit=diarization_limit,
-                            min_speakers=min_speakers,
-                            max_speakers=max_speakers,
                         )
                         step["spans"] = len(diarization_spans)
 
@@ -777,7 +713,6 @@ async def _run_export_pipeline(
                 repository=repository,
                 transcription_manager=transcription_manager,
                 primary_meeting_id=primary_meeting_id,
-                attendees=request_payload.attendees,
                 progress_callback=(
                     lambda stage, message, progress: (
                         progress_callback(stage, message, progress, 0.0) if progress_callback else None
@@ -806,21 +741,11 @@ async def _run_export_pipeline(
             transcript=full_transcript,
             prompt_type=template,
             custom_instructions=request_payload.custom_prompt,
-            attendees=request_payload.attendees,
             progress_callback=_on_sum_progress,
         )
     except Exception as e:
         logger.warning("[step] summarization | error | elapsed=%.1fs", time.monotonic() - _sum_t0)
         raise HTTPException(status_code=500, detail=f"Failed to generate summary: {str(e)}")
-
-    if primary_meeting:
-        segments = await repository.get_segments(session_id=session_id)
-        await _persist_resolved_speaker_map(
-            repository=repository,
-            meeting=primary_meeting,
-            segments=segments,
-            speaker_map=summary_result.speaker_map,
-        )
 
     summarization_duration = time.monotonic() - _sum_t0
     logger.info("[step] summarization | done | elapsed=%.1fs", summarization_duration)
@@ -841,7 +766,7 @@ async def _run_export_pipeline(
         parent_summary_id=latest_saved.id if latest_saved else None,
         template_key=template,
         custom_prompt=request_payload.custom_prompt,
-        attendees_snapshot=request_payload.attendees,
+        attendees_snapshot=None,
     )
 
     summary_content = summary_result.content
@@ -890,7 +815,6 @@ async def _run_export_pipeline(
         "meeting_id": primary_meeting_id,
         "template_key": template,
         "custom_prompt": request_payload.custom_prompt,
-        "attendees": request_payload.attendees,
     }
 
     preview = summary_content[:200] + "..." if len(summary_content) > 200 else summary_content
@@ -1137,12 +1061,6 @@ async def _run_summary_job(
                 status_code=409,
                 detail="Transcription must complete before generating a summary",
             )
-        if _speaker_review_blocks_summary(meeting):
-            raise HTTPException(
-                status_code=409,
-                detail="Speaker review is required before generating a summary",
-            )
-
         transcript, _ = _build_transcript_from_segments(segments)
         template_key = meeting.template_key or "meeting"
         await _emit_progress(update_progress, "summarizing", "Generating summary", 1.0, 0.02)
@@ -1155,14 +1073,7 @@ async def _run_summary_job(
             transcript=transcript,
             prompt_type=template_key,
             custom_instructions=meeting.custom_prompt,
-            attendees=meeting.attendees,
             progress_callback=on_progress,
-        )
-        await _persist_resolved_speaker_map(
-            repository=repository,
-            meeting=meeting,
-            segments=segments,
-            speaker_map=summary_result.speaker_map,
         )
         processing_duration = time.monotonic() - started_at
         template_label = TEMPLATE_INFO.get(template_key, {}).get("name", template_key.title())
@@ -1180,7 +1091,7 @@ async def _run_summary_job(
             parent_summary_id=latest_saved.id if latest_saved else None,
             template_key=template_key,
             custom_prompt=meeting.custom_prompt,
-            attendees_snapshot=meeting.attendees,
+            attendees_snapshot=None,
         )
         preview = (
             summary_result.content[:200] + "..."

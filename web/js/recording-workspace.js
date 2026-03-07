@@ -6,6 +6,8 @@
             this._settingsSaveTimer = null;
             this._settingsSavePromise = null;
             this._bannerTimer = null;
+            this._bodyScrollLocked = false;
+            this._speakerPlayback = null;
             this.state = {
                 sessionId: null,
                 workspace: null,
@@ -13,6 +15,7 @@
                 jobStatus: null,
                 speakerAssignments: {},
                 speakerDirty: false,
+                speakerEditMode: false,
                 editMode: false,
                 editBuffer: '',
                 showRefineInput: false,
@@ -31,6 +34,7 @@
             this.state.jobStatus = null;
             this.state.speakerAssignments = {};
             this.state.speakerDirty = false;
+            this.state.speakerEditMode = false;
             this.state.editMode = false;
             this.state.editBuffer = '';
             this.state.showRefineInput = false;
@@ -38,6 +42,7 @@
             this.state.selectedSavedSummaryId = null;
             this.state.banner = null;
             this.elements.modal.classList.remove('hidden');
+            this._lockBodyScroll();
 
             await this._loadTemplates();
             await this._loadWorkspace();
@@ -59,17 +64,20 @@
             }
 
             this.elements.modal.classList.add('hidden');
+            this._unlockBodyScroll();
             this.state.jobStatus = null;
             this.state.workspace = null;
             this.state.sessionId = null;
             this.state.speakerAssignments = {};
             this.state.speakerDirty = false;
+            this.state.speakerEditMode = false;
             this.state.editMode = false;
             this.state.editBuffer = '';
             this.state.showRefineInput = false;
             this.state.summaryHistory = [];
             this.state.selectedSavedSummaryId = null;
             this._settingsSavePromise = null;
+            this._stopSpeakerPlayback();
             if (typeof this.options.onClose === 'function') {
                 this.options.onClose();
             }
@@ -154,17 +162,20 @@
                 modal = document.createElement('div');
                 modal.id = 'recording-workspace-modal';
                 modal.className = 'modal hidden workspace-modal';
+                modal.setAttribute('role', 'dialog');
+                modal.setAttribute('aria-modal', 'true');
+                modal.setAttribute('aria-labelledby', 'workspace-title-input');
                 modal.innerHTML = `
                     <div class="modal-content workspace-modal-content">
                         <div class="modal-header workspace-header">
                             <div class="workspace-header-copy">
-                                <input id="workspace-title-input" class="workspace-title-input" placeholder="Untitled Recording">
+                                <input id="workspace-title-input" class="workspace-title-input" placeholder="Untitled Recording" autocapitalize="words">
                                 <div id="workspace-meta" class="workspace-meta"></div>
                             </div>
-                            <button class="modal-close" id="workspace-close" aria-label="Close">&times;</button>
+                            <button type="button" class="modal-close" id="workspace-close" aria-label="Close workspace">&times;</button>
                         </div>
-                        <div id="workspace-banner" class="workspace-banner hidden"></div>
-                        <div id="workspace-progress" class="workspace-progress hidden">
+                        <div id="workspace-banner" class="workspace-banner hidden" aria-live="polite"></div>
+                        <div id="workspace-progress" class="workspace-progress hidden" aria-live="polite">
                             <div class="processing-panel-header">
                                 <div class="processing-title">Workspace Progress</div>
                                 <div id="workspace-progress-overall" class="processing-overall">0%</div>
@@ -192,21 +203,24 @@
                             </div>
                             <div id="workspace-progress-message" class="processing-text">Preparing...</div>
                         </div>
-                        <div class="workspace-tab-row">
-                            <button class="workspace-tab active" data-tab="speakers">Speakers</button>
-                            <button class="workspace-tab" data-tab="summary">Summary</button>
-                            <button class="workspace-tab" data-tab="transcript">Transcript</button>
-                            <button class="workspace-tab" data-tab="settings">Settings</button>
+                        <div class="workspace-tab-row" role="tablist" aria-label="Workspace sections">
+                            <button type="button" class="workspace-tab active" id="workspace-tab-speakers" data-tab="speakers" role="tab" aria-controls="workspace-panel-speakers" aria-selected="true">Speakers</button>
+                            <button type="button" class="workspace-tab" id="workspace-tab-summary" data-tab="summary" role="tab" aria-controls="workspace-panel-summary" aria-selected="false">Summary</button>
+                            <button type="button" class="workspace-tab" id="workspace-tab-settings" data-tab="settings" role="tab" aria-controls="workspace-panel-settings" aria-selected="false">Settings</button>
+                            <button type="button" class="workspace-tab" id="workspace-tab-transcript" data-tab="transcript" role="tab" aria-controls="workspace-panel-transcript" aria-selected="false">Transcript</button>
                         </div>
                         <div class="modal-body workspace-body">
-                            <section class="workspace-panel" data-panel="speakers">
+                            <section class="workspace-panel" id="workspace-panel-speakers" data-panel="speakers" role="tabpanel" aria-labelledby="workspace-tab-speakers">
                                 <div class="workspace-panel-copy">
                                     <h3>Speaker Review</h3>
                                     <p id="workspace-speakers-copy" class="workspace-copy"></p>
                                 </div>
                                 <div id="workspace-speakers-list" class="speaker-card-list"></div>
+                                <div id="workspace-speaker-actions" class="workspace-summary-actions hidden">
+                                    <button type="button" class="btn" id="workspace-speaker-edit-btn">Edit</button>
+                                </div>
                             </section>
-                            <section class="workspace-panel hidden" data-panel="summary">
+                            <section class="workspace-panel hidden" id="workspace-panel-summary" data-panel="summary" role="tabpanel" aria-labelledby="workspace-tab-summary" aria-hidden="true">
                                 <div class="workspace-panel-copy">
                                     <h3>Summary Draft</h3>
                                     <div id="workspace-summary-meta" class="summary-meta"></div>
@@ -224,30 +238,26 @@
                                 <div id="workspace-refine-section" class="hidden">
                                     <div class="refine-input-row">
                                         <input type="text" id="workspace-refine-input" class="refine-input" placeholder="e.g. tighten the takeaways, make it more technical">
-                                        <button class="btn" id="workspace-refine-cancel">Cancel</button>
-                                        <button class="btn btn-primary" id="workspace-refine-submit">Revise</button>
+                                        <button type="button" class="btn" id="workspace-refine-cancel">Cancel</button>
+                                        <button type="button" class="btn btn-primary" id="workspace-refine-submit">Revise</button>
                                     </div>
                                 </div>
                             </section>
-                            <section class="workspace-panel hidden" data-panel="transcript">
+                            <section class="workspace-panel hidden" id="workspace-panel-transcript" data-panel="transcript" role="tabpanel" aria-labelledby="workspace-tab-transcript" aria-hidden="true">
                                 <div class="workspace-panel-copy">
                                     <h3>Transcript</h3>
                                     <p class="workspace-copy">The transcript stays available while you review speakers and summary changes.</p>
                                 </div>
                                 <div id="workspace-transcript" class="transcript-view"></div>
                             </section>
-                            <section class="workspace-panel hidden" data-panel="settings">
+                            <section class="workspace-panel hidden" id="workspace-panel-settings" data-panel="settings" role="tabpanel" aria-labelledby="workspace-tab-settings" aria-hidden="true">
                                 <div class="workspace-panel-copy">
                                     <h3>Summary Settings</h3>
-                                    <p class="workspace-copy">Template, prompt, and attendees persist with this recording.</p>
+                                    <p class="workspace-copy">Template and prompt persist with this recording.</p>
                                 </div>
                                 <div class="form-group">
                                     <label class="form-label">Template</label>
                                     <div id="workspace-template-grid" class="template-grid"></div>
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">People <span class="form-label-optional">(optional)</span></label>
-                                    <input type="text" id="workspace-attendees-input" class="form-input" placeholder="e.g. Oscar, Jane, Mike">
                                 </div>
                                 <div class="form-group">
                                     <label class="form-label">Custom Prompt <span class="form-label-optional">(optional)</span></label>
@@ -258,9 +268,9 @@
                         <div class="modal-footer workspace-footer">
                             <div id="workspace-footer-status" class="workspace-footer-status"></div>
                             <div class="workspace-footer-actions">
-                                <button class="btn hidden" id="workspace-open-obsidian-btn">Open in Obsidian</button>
-                                <button class="btn" id="workspace-secondary-btn">Close</button>
-                                <button class="btn btn-primary" id="workspace-primary-btn">Continue</button>
+                                <button type="button" class="btn hidden" id="workspace-open-obsidian-btn">Open in Obsidian</button>
+                                <button type="button" class="btn" id="workspace-secondary-btn">Close</button>
+                                <button type="button" class="btn btn-primary" id="workspace-primary-btn">Continue</button>
                             </div>
                         </div>
                     </div>
@@ -286,6 +296,8 @@
                 panels: Array.from(modal.querySelectorAll('.workspace-panel')),
                 speakersCopy: modal.querySelector('#workspace-speakers-copy'),
                 speakersList: modal.querySelector('#workspace-speakers-list'),
+                speakerActions: modal.querySelector('#workspace-speaker-actions'),
+                speakerEditBtn: modal.querySelector('#workspace-speaker-edit-btn'),
                 summaryMeta: modal.querySelector('#workspace-summary-meta'),
                 summaryVersionRow: modal.querySelector('#workspace-summary-version-row'),
                 summaryVersionSelect: modal.querySelector('#workspace-summary-version-select'),
@@ -300,7 +312,6 @@
                 refineSubmit: modal.querySelector('#workspace-refine-submit'),
                 transcript: modal.querySelector('#workspace-transcript'),
                 templateGrid: modal.querySelector('#workspace-template-grid'),
-                attendeesInput: modal.querySelector('#workspace-attendees-input'),
                 customPrompt: modal.querySelector('#workspace-custom-prompt'),
                 footerStatus: modal.querySelector('#workspace-footer-status'),
                 openObsidianBtn: modal.querySelector('#workspace-open-obsidian-btn'),
@@ -326,7 +337,6 @@
             });
 
             this.elements.titleInput.addEventListener('input', () => this._queueSettingsSave());
-            this.elements.attendeesInput.addEventListener('input', () => this._queueSettingsSave());
             this.elements.customPrompt.addEventListener('input', () => {
                 this._autoResizeTextarea(this.elements.customPrompt);
                 this._queueSettingsSave();
@@ -349,6 +359,7 @@
                 this.state.speakerDirty = true;
                 this._renderFooter();
             });
+            this.elements.speakerEditBtn.addEventListener('click', () => this._toggleSpeakerEditMode());
 
             this.elements.summaryVersionSelect.addEventListener('change', (event) => {
                 this.state.selectedSavedSummaryId = event.target.value;
@@ -373,6 +384,48 @@
             this.elements.openObsidianBtn.addEventListener('click', () => this._openInObsidian());
             this.elements.secondaryBtn.addEventListener('click', () => this.close());
             this.elements.primaryBtn.addEventListener('click', () => this._handlePrimaryAction());
+        }
+
+        _lockBodyScroll() {
+            if (this._bodyScrollLocked) {
+                return;
+            }
+
+            const body = document.body;
+            const lockCount = Number(body.dataset.modalLockCount || 0);
+
+            if (lockCount === 0) {
+                const scrollY = window.scrollY || window.pageYOffset || 0;
+                body.dataset.modalScrollY = String(scrollY);
+                body.classList.add('modal-open');
+                body.style.top = `-${scrollY}px`;
+            }
+
+            body.dataset.modalLockCount = String(lockCount + 1);
+            this._bodyScrollLocked = true;
+        }
+
+        _unlockBodyScroll() {
+            if (!this._bodyScrollLocked) {
+                return;
+            }
+
+            const body = document.body;
+            const lockCount = Number(body.dataset.modalLockCount || 0);
+            const nextCount = Math.max(0, lockCount - 1);
+
+            if (nextCount === 0) {
+                const scrollY = Number(body.dataset.modalScrollY || 0);
+                body.classList.remove('modal-open');
+                body.style.top = '';
+                delete body.dataset.modalLockCount;
+                delete body.dataset.modalScrollY;
+                window.scrollTo(0, scrollY);
+            } else {
+                body.dataset.modalLockCount = String(nextCount);
+            }
+
+            this._bodyScrollLocked = false;
         }
 
         _render() {
@@ -457,42 +510,45 @@
             this.elements.tabButtons.forEach((button) => {
                 const active = button.dataset.tab === this.state.activeTab;
                 button.classList.toggle('active', active);
+                button.setAttribute('aria-selected', active ? 'true' : 'false');
+                button.tabIndex = active ? 0 : -1;
             });
             this.elements.panels.forEach((panel) => {
-                panel.classList.toggle('hidden', panel.dataset.panel !== this.state.activeTab);
+                const active = panel.dataset.panel === this.state.activeTab;
+                panel.classList.toggle('hidden', !active);
+                panel.setAttribute('aria-hidden', active ? 'false' : 'true');
             });
-        }
-
-        _canResolveSpeakersFromAttendees() {
-            return Boolean(this.state.workspace?.state?.can_resolve_speakers_from_attendees);
         }
 
         _renderSpeakers() {
             const workspace = this.state.workspace;
             const speakers = workspace?.speaker_review?.speakers || [];
+            const inputsLocked = this._speakerInputsLocked();
+            this._stopSpeakerPlayback();
 
             if (!workspace?.recording?.has_transcription) {
                 this.elements.speakersCopy.textContent = 'Transcription will start automatically once the recording is ready.';
                 this.elements.speakersList.innerHTML = '<div class="workspace-empty">No transcript yet.</div>';
+                this.elements.speakerActions.classList.add('hidden');
                 return;
             }
 
             if (workspace.speaker_review?.required) {
-                this.elements.speakersCopy.textContent = this._canResolveSpeakersFromAttendees()
-                    ? 'Assign names now, or continue and let the attendee list resolve speaker labels during summary generation.'
-                    : 'Assign names before the first summary so the draft is readable and stable.';
+                this.elements.speakersCopy.textContent = 'Assign names you know now. Any unresolved speakers will appear as Attendee labels in the transcript and summary until you map them.';
             } else {
                 this.elements.speakersCopy.textContent = 'Single-speaker or already-reviewed recordings can continue immediately.';
             }
 
             if (speakers.length === 0) {
                 this.elements.speakersList.innerHTML = '<div class="workspace-empty">No speaker clusters were detected.</div>';
+                this.elements.speakerActions.classList.add('hidden');
                 return;
             }
 
             this.elements.speakersList.innerHTML = speakers
                 .map((speaker, index) => {
                     const value = this.state.speakerAssignments[speaker.speaker_cluster] ?? speaker.display_name ?? '';
+                    const disabledAttr = inputsLocked ? 'disabled' : '';
                     return `
                         <div class="speaker-card">
                             <div class="speaker-card-header">
@@ -518,12 +574,17 @@
                                     data-cluster="${this._escapeHtml(speaker.speaker_cluster)}"
                                     value="${this._escapeHtml(value)}"
                                     placeholder="Enter speaker name"
+                                    ${disabledAttr}
                                 >
                             </div>
                         </div>
                     `;
                 })
                 .join('');
+
+            const showSpeakerActions = this._canLockSpeakerInputs() || this.state.speakerEditMode;
+            this.elements.speakerActions.classList.toggle('hidden', !showSpeakerActions);
+            this.elements.speakerEditBtn.textContent = this.state.speakerEditMode ? 'Done Editing' : 'Edit';
 
             this.elements.speakersList.querySelectorAll('.speaker-audio-btn').forEach((button) => {
                 button.addEventListener('click', () => {
@@ -533,17 +594,104 @@
                     }
                     const start = Number(button.dataset.start || 0);
                     const end = Number(button.dataset.end || 0);
-                    audio.currentTime = start;
-                    const stopAtEnd = () => {
-                        if (audio.currentTime >= end) {
-                            audio.pause();
-                            audio.removeEventListener('timeupdate', stopAtEnd);
-                        }
-                    };
-                    audio.addEventListener('timeupdate', stopAtEnd);
-                    audio.play().catch(() => {});
+                    const isCurrent = this._speakerPlayback?.audio === audio && !audio.paused;
+                    if (isCurrent) {
+                        this._stopSpeakerPlayback();
+                        return;
+                    }
+                    this._playSpeakerClip({ button, audio, start, end });
                 });
             });
+        }
+
+        _speakerAssignmentsComplete() {
+            const speakers = this.state.workspace?.speaker_review?.speakers || [];
+            return speakers.length > 0 && speakers.every((speaker) => {
+                const value = this.state.speakerAssignments[speaker.speaker_cluster] ?? speaker.display_name ?? '';
+                return Boolean(String(value).trim());
+            });
+        }
+
+        _canLockSpeakerInputs() {
+            return Boolean(this.state.workspace?.speaker_review?.completed) || this._speakerAssignmentsComplete();
+        }
+
+        _speakerInputsLocked() {
+            return this._canLockSpeakerInputs() && !this.state.speakerEditMode;
+        }
+
+        async _toggleSpeakerEditMode() {
+            if (!this.state.speakerEditMode) {
+                this.state.speakerEditMode = true;
+                this._renderSpeakers();
+                const firstInput = this.elements.speakersList.querySelector('.speaker-name-input:not(:disabled)');
+                firstInput?.focus();
+                return;
+            }
+
+            this.state.speakerEditMode = false;
+            if (this.state.speakerDirty) {
+                try {
+                    await this._saveSpeakerAssignments();
+                } catch (error) {
+                    this.state.speakerEditMode = true;
+                    this._renderSpeakers();
+                    this._showBanner(error.message || 'Failed to save speaker assignments.', 'error');
+                    return;
+                }
+            } else {
+                this._renderSpeakers();
+            }
+            this._renderFooter();
+        }
+
+        _playSpeakerClip({ button, audio, start, end }) {
+            this._stopSpeakerPlayback();
+
+            audio.currentTime = start;
+            button.textContent = 'Stop Clip';
+
+            const stopAtEnd = () => {
+                if (audio.currentTime >= end) {
+                    this._stopSpeakerPlayback();
+                }
+            };
+            const handlePause = () => {
+                if (this._speakerPlayback?.audio === audio) {
+                    this._stopSpeakerPlayback();
+                }
+            };
+
+            audio.addEventListener('timeupdate', stopAtEnd);
+            audio.addEventListener('pause', handlePause);
+
+            this._speakerPlayback = {
+                audio,
+                button,
+                stopAtEnd,
+                handlePause,
+            };
+
+            audio.play().catch(() => {
+                this._stopSpeakerPlayback();
+            });
+        }
+
+        _stopSpeakerPlayback() {
+            if (!this._speakerPlayback) {
+                return;
+            }
+
+            const { audio, button, stopAtEnd, handlePause } = this._speakerPlayback;
+            audio.removeEventListener('timeupdate', stopAtEnd);
+            audio.removeEventListener('pause', handlePause);
+            if (!audio.paused) {
+                audio.pause();
+            }
+            if (button?.isConnected) {
+                button.textContent = 'Play Clip';
+            }
+            this._speakerPlayback = null;
         }
 
         _renderSummary() {
@@ -587,8 +735,8 @@
             this.elements.summaryMeta.textContent = metaParts.join(' · ');
 
             if (!summary) {
-                const emptyMessage = workspace?.state?.requires_speaker_review && !this._canResolveSpeakersFromAttendees()
-                    ? 'Generate a summary after transcription and speaker review.'
+                const emptyMessage = workspace?.state?.requires_speaker_review
+                    ? 'Generate a summary when you are ready. Unresolved speakers will be shown as Attendee labels.'
                     : 'Generate a summary once transcription is ready.';
                 this.elements.summaryDisplay.innerHTML = `<div class="workspace-empty">${this._escapeHtml(emptyMessage)}</div>`;
                 this.elements.summaryEdit.classList.add('hidden');
@@ -658,9 +806,6 @@
                 })
                 .join('');
 
-            if (document.activeElement !== this.elements.attendeesInput) {
-                this.elements.attendeesInput.value = settings.attendees || '';
-            }
             if (document.activeElement !== this.elements.customPrompt) {
                 this.elements.customPrompt.value = settings.custom_prompt || '';
                 this._autoResizeTextarea(this.elements.customPrompt);
@@ -688,9 +833,7 @@
                 return this.state.jobStatus.message || 'Working...';
             }
             if (workspace.state?.requires_speaker_review) {
-                return this._canResolveSpeakersFromAttendees()
-                    ? 'Review speakers now or continue with attendee-based speaker resolution.'
-                    : 'Review speakers before continuing.';
+                return 'Review speakers now, or continue with Attendee labels for anyone still unresolved.';
             }
             if (workspace.draft_summary) {
                 return 'Current draft has not been saved to Obsidian.';
@@ -791,22 +934,6 @@
 
         async _completeSpeakerReview() {
             try {
-                if (!this._canResolveSpeakersFromAttendees()) {
-                    const speakers = this.state.workspace?.speaker_review?.speakers || [];
-                    const missingRequiredNames = speakers.filter((speaker) => {
-                        if (!speaker.needs_name) {
-                            return false;
-                        }
-                        const value = (this.state.speakerAssignments[speaker.speaker_cluster] || '').trim();
-                        return !value;
-                    });
-
-                    if (missingRequiredNames.length > 0) {
-                        this._showBanner('Name each detected speaker before summarizing.', 'error');
-                        return;
-                    }
-                }
-
                 this.state.activeTab = 'summary';
                 this._renderTabs();
                 this._renderFooter();
@@ -1155,7 +1282,6 @@
             this.state.workspace.settings = {
                 ...this.state.workspace.settings,
                 title: this.elements.titleInput.value.trim() || null,
-                attendees: this.elements.attendeesInput.value.trim() || null,
                 custom_prompt: this.elements.customPrompt.value.trim() || null,
             };
             this.elements.footerStatus.textContent = 'Saving settings...';
@@ -1176,7 +1302,6 @@
             const payload = {
                 title: this.elements.titleInput.value.trim() || null,
                 template_key: this.state.workspace?.settings?.template_key || 'meeting',
-                attendees: this.elements.attendeesInput.value.trim() || null,
                 custom_prompt: this.elements.customPrompt.value.trim() || null,
             };
 

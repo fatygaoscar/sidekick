@@ -6,6 +6,7 @@ import re
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from src.core.log_utils import pipeline_step
+from src.core.speaker_labels import humanize_transcript_speaker_labels
 
 logger = logging.getLogger(__name__)
 
@@ -381,7 +382,6 @@ async def _extract_chunk_record(
 def _build_system_prompt(
     template: str,
     perspective: Optional[str] = None,
-    attendees: Optional[str] = None,
 ) -> str:
     focus = ""
     if perspective and perspective.strip():
@@ -390,16 +390,8 @@ def _build_system_prompt(
             f"This summary is from the perspective of {p}. Lead with what matters most to them, "
             "then cover the broader meeting context.\n\n"
         )
-    attendees_note = ""
-    if attendees and attendees.strip():
-        attendees_note = (
-            f"The attendees in this meeting were: {attendees.strip()}. "
-            "The transcript uses SPEAKER_XX labels — use conversation context to identify who is who "
-            "and use their real names throughout your summary.\n\n"
-        )
     return (
         f"{focus}"
-        f"{attendees_note}"
         f"You are an expert meeting summarizer for a {template} meeting.\n"
         "Write clear, cohesive output like a strong human executive assistant.\n"
         "Avoid formulaic language and repetitive phrasing.\n"
@@ -448,7 +440,7 @@ Follow the exact section structure defined in the Style Contract above.
 Use the same section headers (##) as specified in the Style Contract.
 For Action Items, always use a markdown table with columns: | Owner | Action | Due |
 Each action item must be self-explanatory: include the owner, what they will do, and what system/project/feature it relates to. Include deadline if stated.
-Owner must come directly from the transcript: use the speaker's real name, or their SPEAKER_XX label if names are unresolved. Use "TBD" only when no speaker attribution exists at all. Never guess a name from context.
+Owner must come directly from the transcript: use the speaker's real name when known, otherwise use the transcript's provided fallback label such as Attendee A. Use "TBD" only when no speaker attribution exists at all. Never guess a name from context or invent a role.
 Be specific: use actual names, exact terms, concrete details, dates, and numbers from the context.
 Omit filler, pleasantries, and off-topic chatter.{synthesis_note}{extra_tables_block}
 """
@@ -472,87 +464,6 @@ Draft:
 Return ONLY the final edited Obsidian-compatible output."""
 
 
-_SPEAKER_LABEL_RE = re.compile(r"\bSPEAKER_\d+\b")
-
-
-async def _resolve_speaker_map(
-    llm_call: LLMCallFunc,
-    transcript: str,
-    attendees: str,
-) -> dict[str, str]:
-    """Identify which SPEAKER_XX label corresponds to which attendee.
-
-    Uses only the first portion of the transcript where name references are
-    most common (direct address, introductions, etc.).
-    Returns a mapping like {"SPEAKER_00": "Oscar", "SPEAKER_01": "Pam"}.
-    """
-    labels = sorted(set(_SPEAKER_LABEL_RE.findall(transcript)))
-    if not labels:
-        return {}
-
-    # Use first ~5000 chars for identification, plus lines where attendee names appear
-    beginning = transcript[:5000]
-    names = [n.strip() for n in attendees.split(",") if n.strip()]
-    name_lines = [
-        line for line in transcript.splitlines()
-        if any(n.lower() in line.lower() for n in names)
-    ]
-    name_context = "\n".join(name_lines[:40]) if name_lines else ""
-    sample = beginning
-    if name_context and name_context not in beginning:
-        sample = f"{beginning}\n\n[Lines containing attendee names throughout transcript:]\n{name_context}"
-
-    system = (
-        "You are identifying which speaker label corresponds to which person. "
-        "Be precise and conservative — only assign a name when you are confident."
-    )
-    user = (
-        f"Attendees: {attendees.strip()}\n"
-        f"Speaker labels present: {', '.join(labels)}\n\n"
-        "IMPORTANT: If a speaker says someone else's name (e.g. 'Thanks Pam', 'Hey Oscar'), "
-        "that identifies who is being ADDRESSED, not who is speaking. "
-        "Only assign a name to a label when that label is clearly identified AS that person "
-        "(e.g. they introduce themselves, are introduced by someone else, or context is unambiguous).\n\n"
-        "Look for clues: self-introduction ('I'm Oscar'), being introduced ('Oscar, you're up'), "
-        "or unmistakable context. When unsure, return null.\n\n"
-        "Return ONLY a JSON object mapping each label to a name, or null if unsure.\n"
-        'Example: {"SPEAKER_00": "Oscar", "SPEAKER_01": "Pam", "SPEAKER_02": null}\n\n'
-        f"Transcript sample:\n{sample}"
-    )
-
-    logger.info(
-        "speaker_prepass: labels=%s attendees=%r sample_chars=%d name_lines=%d",
-        labels, attendees.strip(), len(sample), len(name_lines),
-    )
-    try:
-        raw = await llm_call(system, user)
-        logger.info("speaker_prepass: raw_response=%r", raw[:600] if raw else "")
-        # Extract JSON object from response
-        match = re.search(r"\{[^{}]+\}", raw, re.DOTALL)
-        if not match:
-            logger.warning("speaker_prepass: no JSON found in response — returning {}")
-            return {}
-        import json
-        mapping = json.loads(match.group())
-        resolved = {k: v for k, v in mapping.items() if isinstance(v, str) and v.strip()}
-        nulled = [k for k, v in mapping.items() if v is None]
-        logger.info("speaker_prepass: resolved=%s nulled=%s", resolved, nulled)
-        return resolved
-    except Exception as exc:
-        logger.warning("speaker_prepass: exception=%s — returning {}", exc)
-        return {}
-
-
-def _apply_speaker_map(transcript: str, speaker_map: dict[str, str]) -> str:
-    if not speaker_map:
-        return transcript
-
-    def replace(m: re.Match) -> str:
-        return speaker_map.get(m.group(), m.group())
-
-    return _SPEAKER_LABEL_RE.sub(replace, transcript)
-
-
 def _needs_retry(text: str, items: Optional["StructuredItems"]) -> bool:
     if _has_artifacts(text) or _has_repetition(text):
         return True
@@ -567,7 +478,6 @@ async def generate_cohesive_summary(
     template: str,
     template_contract: str,
     perspective: Optional[str] = None,
-    attendees: Optional[str] = None,
     structured_items: Optional["StructuredItems"] = None,
     context_length: int = 4096,
     custom_instructions: Optional[str] = None,
@@ -591,27 +501,7 @@ async def generate_cohesive_summary(
                 pass
 
     _emit(0.02)
-
-    # Resolve SPEAKER_XX labels to real names before any summarization pass.
-    speaker_map: dict[str, str] = {}
-    attendee_count = len([a for a in (attendees or "").split(",") if a.strip()])
-    label_count = len(set(_SPEAKER_LABEL_RE.findall(transcript)))
-    has_attendees = attendee_count > 0
-    has_speaker_labels = label_count > 0
-    if not has_attendees:
-        logger.info("[step] speaker_prepass | skipped | reason=no_attendees | attendees=0")
-    elif not has_speaker_labels:
-        logger.info(
-            "[step] speaker_prepass | skipped | reason=no_speaker_labels | attendees=%d | labels=0",
-            attendee_count,
-        )
-    else:
-        with pipeline_step(logger, "speaker_prepass", attendees=attendee_count) as step:
-            speaker_map = await _resolve_speaker_map(llm_call, transcript, attendees)
-            step["resolved"] = len(speaker_map)
-        logger.info("cohesive: speaker_map=%s", speaker_map)
-        if speaker_map:
-            transcript = _apply_speaker_map(transcript, speaker_map)
+    transcript, speaker_map = humanize_transcript_speaker_labels(transcript)
     _emit(0.08)
 
     approx_char_budget = max(2200, int(context_length * 3.2 * 0.75))
@@ -676,7 +566,7 @@ async def generate_cohesive_summary(
                 debug_info["chunk_merge_input_chars"] = len(context_text)
                 debug_info["chunk_merge_input_estimated_tokens"] = _estimate_tokens(context_text)
 
-    pass1_system = _build_system_prompt(template, perspective=perspective, attendees=attendees)
+    pass1_system = _build_system_prompt(template, perspective=perspective)
     pass1_user = _build_pass1_prompt(
         template=template,
         template_contract=template_contract,

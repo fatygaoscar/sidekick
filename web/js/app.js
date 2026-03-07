@@ -191,6 +191,7 @@ class SidekickApp {
             this.state.isRecording = true;
             this.elements.recordBtn.classList.add('recording');
             this.elements.recordBtn.textContent = 'Stop';
+            this.elements.recordBtn.setAttribute('aria-pressed', 'true');
             this.elements.statusText.textContent = 'Recording';
             this._resetLivePreview();
             this._syncLivePreviewVisibility();
@@ -220,6 +221,7 @@ class SidekickApp {
         this.state.isRecording = false;
         this.elements.recordBtn.classList.remove('recording');
         this.elements.recordBtn.textContent = 'Record';
+        this.elements.recordBtn.setAttribute('aria-pressed', 'false');
         this.elements.statusText.textContent = 'Finalizing recording...';
         this._syncLivePreviewVisibility();
         this._stopTimer();

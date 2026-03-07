@@ -52,12 +52,11 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
 
         self.assertTrue(self.sessions._summary_is_out_of_date(meeting, summary))
 
-    def test_workspace_state_allows_summary_when_attendees_can_resolve_speakers(self):
+    def test_workspace_state_allows_summary_when_speaker_review_is_pending(self):
         session = SimpleNamespace(has_transcription=True)
         meeting = SimpleNamespace(
             speaker_review_required=True,
             speaker_review_completed_at=None,
-            attendees="Oscar, Jane",
         )
 
         state = self.sessions._build_recording_workspace_state(
@@ -71,25 +70,59 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
 
         self.assertTrue(state["requires_speaker_review"])
         self.assertTrue(state["can_generate_summary"])
-        self.assertTrue(state["can_resolve_speakers_from_attendees"])
+        self.assertNotIn("can_resolve_speakers_from_attendees", state)
 
-    def test_summary_job_gate_allows_pending_review_when_attendees_exist(self):
+    def test_summary_job_gate_does_not_block_pending_review(self):
         meeting = SimpleNamespace(
             speaker_review_required=True,
             speaker_review_completed_at=None,
-            attendees="Oscar, Jane",
         )
 
         self.assertFalse(self.export._speaker_review_blocks_summary(meeting))
 
-    def test_summary_job_gate_blocks_pending_review_without_attendees(self):
-        meeting = SimpleNamespace(
-            speaker_review_required=True,
-            speaker_review_completed_at=None,
-            attendees="  ",
-        )
+    def test_workspace_transcript_humanizes_unresolved_speakers(self):
+        segments = [
+            SimpleNamespace(
+                id="seg-1",
+                start_time=0.0,
+                end_time=5.0,
+                text="We should ship on Friday.",
+                speaker="SPEAKER_00",
+                speaker_cluster="SPEAKER_00",
+                is_important=False,
+            ),
+            SimpleNamespace(
+                id="seg-2",
+                start_time=5.0,
+                end_time=9.0,
+                text="I can own the rollout.",
+                speaker="SPEAKER_01",
+                speaker_cluster="SPEAKER_01",
+                is_important=False,
+            ),
+        ]
 
-        self.assertTrue(self.export._speaker_review_blocks_summary(meeting))
+        transcript = self.sessions._serialize_transcript_segments(segments)
+
+        self.assertEqual(transcript[0]["speaker"], "Attendee A")
+        self.assertEqual(transcript[1]["speaker"], "Attendee B")
+
+    def test_export_transcript_uses_attendee_label_for_single_unresolved_speaker(self):
+        segments = [
+            SimpleNamespace(
+                start_time=0.0,
+                end_time=5.0,
+                text="I will handle the follow-up.",
+                speaker="SPEAKER_00",
+                speaker_cluster="SPEAKER_00",
+                is_important=False,
+            )
+        ]
+
+        transcript, _ = self.export._segments_to_transcript(segments)
+
+        self.assertIn("Attendee: I will handle the follow-up.", transcript)
+        self.assertNotIn("SPEAKER_00", transcript)
 
 
 if __name__ == "__main__":

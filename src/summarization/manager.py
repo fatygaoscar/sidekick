@@ -216,7 +216,6 @@ class SummarizationManager:
                     template=prompt_type,
                     template_contract=template_contract,
                     perspective=perspective,
-                    attendees=attendees,
                     context_length=ctx_len,
                     custom_instructions=(
                         custom_instructions if prompt_type != "custom" else None
