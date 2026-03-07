@@ -321,11 +321,15 @@ def get_prompt(
     return SYSTEM_PROMPT, user_prompt
 
 
-# Template metadata for frontend display
+# All template metadata, including legacy templates kept for compatibility.
 TEMPLATE_INFO = {
     "meeting": {
         "name": "General Meeting",
         "description": "Standard meeting notes with decisions and action items",
+    },
+    "strategic_review": {
+        "name": "Strategic Review",
+        "description": "Strategic alignment, metrics review, decisions, and next steps",
     },
     "one_on_one": {
         "name": "1-on-1",
@@ -344,6 +348,15 @@ TEMPLATE_INFO = {
         "description": "Targeted extraction for a specific audience or artifact",
     },
 }
+
+
+# Templates intentionally exposed in the app.
+PUBLIC_TEMPLATE_KEYS = (
+    "meeting",
+    "strategic_review",
+    "working_session",
+    "custom",
+)
 
 
 def get_template_content(template_key: str) -> str:

@@ -179,8 +179,7 @@ Active (shown in UI, in chooser order):
 | Key | Name | Description |
 |-----|------|-------------|
 | `meeting` | General Meeting | Summary, Key Decisions, Action Items table, Discussion Notes |
-| `one_on_one` | 1-on-1 | Summary, Highlights, Feedback, Goals, Action Items table |
-| `standup` | Standup | Per-person Done/Doing/Blocked, Team Blockers, Action Items |
+| `strategic_review` | Strategic Review | Strategic alignment, metrics review, decisions, and next steps |
 | `working_session` | Working Session | High-detail technical log — decisions, SQL notes, open questions |
 | `custom` | Custom | User-provided prompt |
 
@@ -198,7 +197,7 @@ Default template: `meeting`
 - **Audio player** is at the bottom of the view modal.
 - **Card titles:** Plain meeting title (no date prefix); date shown separately.
 - **Mobile optimization:** `13px` text, `1.7` line height, single-unit scroll, Details grid uses `word-break` to prevent horizontal overflow.
-- Template chooser shows 5 templates in the order above.
+- Template chooser shows 4 templates in the order above.
 - `General Meeting` is default unless explicitly changed.
 
 ## API Endpoints

@@ -795,7 +795,7 @@
             const workspace = this.state.workspace;
             const settings = workspace?.settings || {};
             const selectedTemplate = settings.template_key || 'meeting';
-            const order = ['meeting', 'strategic_review', 'working_session', 'standup', 'one_on_one', 'brainstorm', 'custom'];
+            const order = ['meeting', 'strategic_review', 'working_session', 'custom'];
 
             this.elements.templateGrid.innerHTML = order
                 .filter((key) => this.templates[key])

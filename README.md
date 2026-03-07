@@ -16,7 +16,7 @@ Browser-based meeting recorder that transcribes audio, identifies speakers, and 
 - **Obsidian-Optimized Formatting** — summaries use nested bullet points and clean spacing for maximum scannability
 - **Smart Versioning** — Obsidian exports append `(v2)`, `(v3)`, etc., to prevent overwriting existing notes
 - **Performance Optimizations** — dynamic context sizing and single-pass early exit for ultra-fast short meeting processing
-- **Structured templates** — meeting notes, 1-on-1, standup, working session, custom
+- **Structured templates** — general meeting, strategic review, working session, custom
 - **Editable prompts** — customize any template before export
 - **Real-time progress** — live percent tracking through transcription and summarization
 - **Obsidian export** — writes a dated `.md` file and opens it with `obsidian://`
@@ -287,8 +287,7 @@ Models download once (~1 GB total) and run locally from then on. Diarization run
 | Template | Best For |
 |----------|----------|
 | **General Meeting** | Standard meetings — summary, decisions, action items, discussion notes (default) |
-| **1-on-1** | Manager/report — highlights, feedback, goals, action items |
-| **Standup** | Daily status — per-person done/doing/blocked, team blockers |
+| **Strategic Review** | Leadership and planning reviews — metrics, direction changes, milestones, next steps |
 | **Working Session** | Technical work — decisions, SQL notes, open questions, high detail |
 | **Custom** | User-provided prompt — targeted extraction for a specific audience or artifact |
 

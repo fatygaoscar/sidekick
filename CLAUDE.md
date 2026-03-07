@@ -66,19 +66,17 @@ Defined in `src/summarization/prompts.py`:
 | Template | Description |
 |----------|-------------|
 | **General Meeting** | Summary, Key Decisions, Action Items table, Discussion Notes (default) |
-| **1-on-1** | Summary, Highlights, Feedback, Goals, Action Items table |
-| **Standup** | Per-person Done/Doing/Blocked, Team Blockers, Action Items table |
+| **Strategic Review** | Meeting Context, report review, decisions, strategy changes, milestones, next steps |
 | **Working Session** | High-detail technical log — decisions, SQL notes, open questions |
 | **Custom** | User-provided prompt |
 
 UI template chooser order:
 1. `meeting` (General Meeting)
-2. `one_on_one`
-3. `standup`
-4. `working_session`
-5. `custom`
+2. `strategic_review`
+3. `working_session`
+4. `custom`
 
-Legacy templates (constants kept for backward compat, not in UI): `strategic_review`, `brainstorm`, `interview`, `lecture`
+Legacy templates (constants kept for backward compat, not in UI): `one_on_one`, `standup`, `brainstorm`, `interview`, `lecture`
 
 ## UX Conventions
 
@@ -94,7 +92,7 @@ Legacy templates (constants kept for backward compat, not in UI): `strategic_rev
 - **Audio player** is positioned at the bottom of the modal (below summary, above Downloads).
 - Download affordances in the view modal (`Download Audio`, `Download Transcript`).
 - Recording list cards show plain title (no date prefix) — date is shown separately on the card.
-- Template chooser shows 5 templates in the order above.
+- Template chooser shows 4 templates in the order above.
 - Keep `General Meeting` as default unless explicit product changes requested.
 - Speaker naming is manual-first in the workspace `Speakers` tab.
 - Summary generation is allowed before speaker review is complete.

@@ -34,7 +34,7 @@ from src.core.speaker_labels import (
 )
 from src.sessions.repository import Repository
 from src.summarization.manager import SummarizationManager
-from src.summarization.prompts import TEMPLATE_INFO, get_template_content
+from src.summarization.prompts import PUBLIC_TEMPLATE_KEYS, TEMPLATE_INFO, get_template_content
 from src.transcription.manager import TranscriptionManager
 
 
@@ -178,7 +178,8 @@ _SUMMARY_TASKS: dict[str, asyncio.Task] = {}
 async def get_templates():
     """Get available summary templates with their prompts."""
     templates_with_prompts = {}
-    for key, info in TEMPLATE_INFO.items():
+    for key in PUBLIC_TEMPLATE_KEYS:
+        info = TEMPLATE_INFO[key]
         templates_with_prompts[key] = {
             **info,
             "prompt": get_template_content(key),

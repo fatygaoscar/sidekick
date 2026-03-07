@@ -49,7 +49,7 @@ The final notes are saved as **Markdown files** directly into your Obsidian vaul
 | **Runs locally** | Your meeting audio and content never leave your network — complete privacy and security |
 | **No subscription fees** | After setup, the AI runs for free on your hardware |
 | **GPU accelerated** | Uses your graphics card for fast transcription (a 30-minute meeting processes quickly) |
-| **Template-based** | 5 built-in meeting types (general meeting, 1-on-1, standup, working session, custom) — each produces appropriately structured notes |
+| **Template-based** | 4 built-in meeting types (general meeting, strategic review, working session, custom) — each produces appropriately structured notes |
 | **Real-time progress** | You see transcription and summarization progress live |
 | **Works remotely** | Optional secure tunneling lets you use it from your phone or another location |
 
