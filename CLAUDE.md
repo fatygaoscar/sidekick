@@ -85,8 +85,10 @@ Legacy templates (constants kept for backward compat, not in UI): `one_on_one`, 
 - Re-summarize/export initiated from the recording view modal, not cards.
 - **Unified Modals:** Both History "View" and post-recording "Review" modals support identical features: AI refinement, manual editing, and undo history.
 - **View Modal Title:** Shows plain meeting title (no date prefix). Date/time is in the Details section.
+- **Rename flow:** Rename from the editable workspace title after opening a recording. Do not reintroduce card-level rename controls.
 - **Details Section:** Two-column grid (label + value) — Template, Recorded, Exported, Length, Processing Time. Template omitted for old summaries (null). Updates when switching summary versions.
 - **Summary label:** "Summary Version" (not "Summary") in the view modal.
+- **Summary versions:** `Draft`, `Latest`, then descending `vN`.
 - **Metadata Visibility:** Details section mirrors Obsidian markdown header fields. Template is stored per-summary in DB (`summaries.template`).
 - **Obsidian Save:** "Save to Obsidian" button available in history view to create versioned copies or re-export.
 - **Audio player** is positioned at the bottom of the modal (below summary, above Downloads).
@@ -96,6 +98,8 @@ Legacy templates (constants kept for backward compat, not in UI): `one_on_one`, 
 - Keep `General Meeting` as default unless explicit product changes requested.
 - Speaker naming is manual-first in the workspace `Speakers` tab.
 - Summary generation is allowed before speaker review is complete.
+- Settings is summary-only and follows the currently selected summary version by default.
+- Workspace tab hide/reveal motion is device-specific: polished on desktop, simpler direct tracking on mobile.
 
 ## Key Config (Current)
 

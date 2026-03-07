@@ -25,6 +25,8 @@
 html, body {
     height: 100%;
     overflow-x: hidden;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
 }
 
 /* Lock body scroll and prevent horizontal scroll when any modal is open */
@@ -444,6 +446,7 @@ textarea.form-input {
     color: var(--text-dim);
     cursor: pointer;
     transition: all 0.2s ease;
+    -webkit-tap-highlight-color: transparent;
 }
 
 .template-btn:hover {
@@ -451,7 +454,20 @@ textarea.form-input {
     color: var(--text);
 }
 
-.template-btn.selected {
+.template-btn.selected,
+.template-btn[aria-pressed="true"] {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: #101010;
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.template-btn:active {
+    background: #101010;
+}
+
+.template-btn.selected:hover,
+.template-btn[aria-pressed="true"]:hover {
     border-color: var(--accent);
     color: var(--accent);
 }
@@ -748,7 +764,6 @@ textarea.form-input {
 .recording-title-row {
     display: flex;
     align-items: center;
-    gap: 6px;
     margin-bottom: 12px;
 }
 
@@ -760,50 +775,6 @@ textarea.form-input {
     font-size: 14px;
     color: var(--text);
     margin-bottom: 12px;
-}
-
-.rename-btn {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-muted);
-    font-size: 13px;
-    padding: 0 2px;
-    opacity: 0;
-    transition: opacity 0.15s ease;
-    line-height: 1;
-}
-
-.recording-card:hover .rename-btn {
-    opacity: 1;
-}
-
-.rename-input {
-    flex: 1;
-    background: var(--bg);
-    border: 1px solid var(--border-hover);
-    color: var(--text);
-    font-size: 14px;
-    padding: 2px 6px;
-    border-radius: 3px;
-    min-width: 0;
-}
-
-.rename-save-btn,
-.rename-cancel-btn {
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-muted);
-    cursor: pointer;
-    font-size: 11px;
-    padding: 2px 6px;
-    border-radius: 3px;
-    white-space: nowrap;
-}
-
-.rename-save-btn:hover {
-    border-color: var(--border-hover);
-    color: var(--text);
 }
 
 .recording-meta {
@@ -896,34 +867,41 @@ textarea.form-input {
 }
 
 .transcript-segment {
+    display: grid;
+    grid-template-columns: var(--transcript-time-width, 42px) var(--transcript-speaker-width, 44px) minmax(0, 1fr);
+    column-gap: 4px;
+    align-items: start;
     margin-bottom: 12px;
-    padding-left: 60px;
-    position: relative;
 }
 
 .transcript-segment .timestamp {
-    position: absolute;
-    left: 0;
+    display: block;
     font-size: 11px;
     color: var(--text-muted);
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
 }
 
-.transcript-segment .text {
+.transcript-segment .speaker-inline {
+    display: block;
+    font-size: inherit;
+    color: var(--speaker-color, var(--text-muted));
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.transcript-segment .speaker-inline-unknown {
+    color: var(--text-muted);
+}
+
+.transcript-segment .transcript-line-text {
     color: var(--text);
+    min-width: 0;
 }
 
 .transcript-segment.important {
     border-left: 2px solid var(--recording);
-    padding-left: 68px;
-}
-
-.transcript-segment.important::before {
-    content: '';
-    position: absolute;
-    left: 58px;
-    top: 0;
-    bottom: 0;
+    padding-left: 8px;
 }
 
 /* Scrollbar */
@@ -1065,7 +1043,7 @@ textarea.form-input {
     background: var(--bg);
     border: 1px solid var(--border);
     padding: 20px 24px;
-    font-size: 16px;
+    font-size: 14px;
     line-height: 1.7;
     color: var(--text);
 }
@@ -1118,6 +1096,7 @@ textarea.form-input {
 .summary-view table {
     width: 100%;
     border-collapse: collapse;
+    table-layout: fixed;
     margin: 10px 0 12px;
     font-size: 12px;
 }
@@ -1130,6 +1109,9 @@ textarea.form-input {
     padding: 8px 12px;
     text-align: left;
     vertical-align: top;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .summary-body th,
@@ -1363,11 +1345,22 @@ textarea.form-input {
 
 /* Unified Workspace */
 .workspace-modal-content {
-    max-width: 1080px;
-    max-height: calc(100dvh - 48px);
+    position: relative;
+    width: min(1320px, calc(100vw - 48px));
+    height: calc(100dvh - 48px);
+    max-width: none;
+    max-height: none;
+}
+
+.workspace-top-stack {
+    position: relative;
+    z-index: 3;
+    background: var(--bg);
 }
 
 .workspace-header {
+    position: relative;
+    z-index: 3;
     align-items: flex-start;
     gap: 16px;
 }
@@ -1380,16 +1373,27 @@ textarea.form-input {
 .workspace-title-input {
     width: 100%;
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
     color: var(--text);
     font-family: inherit;
     font-size: 22px;
     line-height: 1.2;
-    padding: 0;
+    padding: 6px 8px;
+    margin: -6px -8px 0;
+    cursor: text;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.workspace-title-input:hover {
+    border-color: var(--border);
+    background: var(--bg);
 }
 
 .workspace-title-input:focus {
     outline: none;
+    border-color: var(--accent);
+    background: var(--bg);
 }
 
 .workspace-meta {
@@ -1412,6 +1416,13 @@ textarea.form-input {
     color: var(--text);
 }
 
+.workspace-badge-button {
+    font: inherit;
+    letter-spacing: inherit;
+    text-transform: inherit;
+    cursor: pointer;
+}
+
 .workspace-badge-warning {
     border-color: var(--recording);
     color: var(--recording);
@@ -1422,7 +1433,21 @@ textarea.form-input {
     color: var(--accent);
 }
 
+.workspace-meta-tooltip {
+    margin-top: 6px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 10px;
+    line-height: 1.4;
+    letter-spacing: normal;
+    text-transform: none;
+}
+
 .workspace-banner {
+    position: relative;
+    z-index: 2;
     padding: 12px 24px;
     border-bottom: 1px solid var(--border);
     font-size: 12px;
@@ -1441,17 +1466,33 @@ textarea.form-input {
 }
 
 .workspace-progress {
+    position: relative;
+    z-index: 2;
     padding: 16px 24px;
     border-bottom: 1px solid var(--border);
     background: #080808;
+}
+
+.workspace-tab-shell {
+    position: absolute;
+    left: 0;
+    right: 0;
+    overflow: hidden;
+    background: var(--bg-elevated);
+    z-index: 2;
+    will-change: transform;
+    contain: paint;
 }
 
 .workspace-tab-row {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    padding: 16px 24px 0;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
     overscroll-behavior-x: contain;
+    position: relative;
 }
 
 .workspace-tab {
@@ -1473,13 +1514,46 @@ textarea.form-input {
 
 .workspace-body {
     padding-top: 16px;
+    flex: 1 1 auto;
+    min-height: 0;
     overscroll-behavior: contain;
+    scroll-timeline-name: --workspace-tab-timeline;
+    scroll-timeline-axis: block;
+}
+
+.workspace-scroll-stage {
+    padding-top: 0;
+    background: var(--bg-elevated);
+}
+
+@supports (animation-timeline: scroll()) {
+    .workspace-native-scroll-timeline .workspace-tab-shell {
+        animation-name: workspace-tab-shell-track;
+        animation-duration: 1ms;
+        animation-timing-function: linear;
+        animation-fill-mode: both;
+        animation-timeline: --workspace-tab-timeline;
+        animation-range: 0px var(--workspace-tab-height, 0px);
+        transition: none !important;
+    }
+}
+
+@keyframes workspace-tab-shell-track {
+    from {
+        transform: translate3d(0, 0, 0);
+    }
+
+    to {
+        transform: translate3d(0, calc(-1 * var(--workspace-tab-height, 0px)), 0);
+    }
 }
 
 .workspace-panel {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 7px;
+    min-height: 100%;
+    padding-bottom: 12px;
 }
 
 .workspace-panel.hidden {
@@ -1544,8 +1618,36 @@ textarea.form-input {
     margin-top: 16px;
 }
 
+.workspace-settings-reset-actions {
+    margin-top: 0;
+    margin-bottom: 12px;
+}
+
+.workspace-field-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.workspace-field-header .form-label {
+    margin-bottom: 0;
+}
+
+.workspace-prompt-edit-btn {
+    padding: 8px 12px;
+}
+
 .workspace-prompt-textarea {
     min-height: 160px;
+}
+
+.workspace-prompt-display {
+    min-height: 160px;
+    margin-bottom: 0;
+    font-size: 14px;
+    line-height: 1.6;
 }
 
 .workspace-footer {
@@ -1623,7 +1725,9 @@ textarea.form-input {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
-        padding: 10px 16px 8px;
+        padding: 10px 16px 12px;
+        border-bottom: 1px solid var(--border);
+        background: var(--bg);
         overflow: visible;
     }
 
@@ -1639,7 +1743,7 @@ textarea.form-input {
     }
 
     .workspace-panel {
-        gap: 14px;
+        gap: 5px;
     }
 
     .workspace-panel-copy h3 {
@@ -1665,12 +1769,22 @@ textarea.form-input {
     }
 
     .summary-body,
-    .summary-view,
-    .summary-edit-textarea {
+    .summary-view {
         min-height: 220px;
         padding: 14px 16px;
-        font-size: 14px;
+        font-size: 13px;
         line-height: 1.6;
+    }
+
+    .summary-edit-textarea,
+    .workspace-prompt-textarea,
+    .refine-input,
+    .version-select {
+        font-size: 16px;
+    }
+
+    .workspace-prompt-display {
+        font-size: 13px;
     }
 
     .summary-meta,
@@ -1684,14 +1798,42 @@ textarea.form-input {
 
     .summary-body table,
     .summary-view table {
-        display: block;
-        overflow-x: auto;
-        white-space: nowrap;
+        font-size: 12px;
+    }
+
+    .summary-body th,
+    .summary-body td,
+    .summary-view th,
+    .summary-view td {
+        font-size: 12px;
+    }
+
+    .summary-body th,
+    .summary-view th {
+        font-size: 10px;
+    }
+
+    .transcript-segment .speaker-inline,
+    .transcript-segment .transcript-line-text {
+        font-size: 13px;
     }
 
     .workspace-summary-actions {
         gap: 6px;
         margin-top: 12px;
+    }
+
+    .workspace-settings-reset-actions {
+        margin-top: 0;
+        margin-bottom: 10px;
+    }
+
+    .workspace-field-header {
+        margin-bottom: 6px;
+    }
+
+    .workspace-prompt-edit-btn {
+        padding: 8px 10px;
     }
 
     .workspace-summary-actions .btn,
@@ -1728,5 +1870,20 @@ textarea.form-input {
 
     .workspace-footer-actions .btn {
         flex: 1 1 140px;
+    }
+}
+
+@media (hover: none) and (pointer: coarse) {
+    button,
+    .btn,
+    .btn-toggle,
+    .template-btn,
+    .workspace-tab,
+    .record-btn,
+    .modal-close,
+    .workspace-badge-button,
+    .header-link,
+    .back-link {
+        touch-action: manipulation;
     }
 }

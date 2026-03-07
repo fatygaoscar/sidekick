@@ -22,6 +22,7 @@ from src.core.markdown_utils import (
 )
 from src.core.speaker_labels import (
     build_user_facing_speaker_map,
+    infer_strict_segment_speakers,
     is_generic_speaker,
     resolve_user_facing_speaker_name,
 )
@@ -162,7 +163,8 @@ def _transcript_requires_speaker_review(segments: list) -> bool:
     return len(unresolved) > 1
 
 
-def _serialize_summary(summary) -> dict:
+def _serialize_summary(summary, meeting=None) -> dict:
+    out_of_date_reason = _summary_out_of_date_reason(meeting, summary) if meeting else None
     return {
         "id": str(summary.id),
         "meeting_id": str(summary.meeting_id),
@@ -173,35 +175,50 @@ def _serialize_summary(summary) -> dict:
         "processing_duration_seconds": summary.processing_duration_seconds,
         "template": summary.template,
         "template_key": summary.template_key,
+        "custom_prompt": summary.custom_prompt,
         "status": summary.status,
         "source_type": summary.source_type,
         "saved_to_obsidian_at": to_utc_iso(summary.saved_to_obsidian_at),
         "obsidian_relative_path": summary.obsidian_relative_path,
+        "summary_out_of_date": out_of_date_reason is not None,
+        "summary_out_of_date_reason": out_of_date_reason,
     }
 
 
 def _serialize_transcript_segments(segments: list) -> list[dict]:
+    inferred_speakers = infer_strict_segment_speakers(segments)
     fallback_map = build_user_facing_speaker_map(
-        (getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None))
-        for segment in segments
+        (
+            (inferred or {}).get("speaker_cluster")
+            or getattr(segment, "speaker_cluster", None)
+            or getattr(segment, "speaker", None)
+            or (inferred or {}).get("speaker")
+        )
+        for segment, inferred in zip(segments, inferred_speakers)
     )
     transcript_lines = []
-    for segment in segments:
+    for segment, inferred in zip(segments, inferred_speakers):
         mins = int(segment.start_time // 60)
         secs = int(segment.start_time % 60)
-        raw_label = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+        effective_speaker = getattr(segment, "speaker", None) or (inferred or {}).get("speaker")
+        raw_label = (
+            getattr(segment, "speaker_cluster", None)
+            or getattr(segment, "speaker", None)
+            or (inferred or {}).get("speaker_cluster")
+            or (inferred or {}).get("speaker")
+        )
         speaker = resolve_user_facing_speaker_name(
-            getattr(segment, "speaker", None),
+            effective_speaker,
             raw_label,
             fallback_map,
-        )
+        ) or "?"
         transcript_lines.append(
             {
                 "id": str(segment.id),
                 "timestamp": f"[{mins:02d}:{secs:02d}]",
                 "text": segment.text,
                 "speaker": speaker,
-                "speaker_cluster": getattr(segment, "speaker_cluster", None),
+                "speaker_cluster": getattr(segment, "speaker_cluster", None) or (inferred or {}).get("speaker_cluster"),
                 "is_important": segment.is_important,
                 "start_time": segment.start_time,
                 "end_time": segment.end_time,
@@ -240,26 +257,30 @@ def _build_speaker_cards(segments: list, session_id: str) -> list[dict]:
     return cards
 
 
-def _summary_is_out_of_date(meeting, summary) -> bool:
+def _summary_out_of_date_reason(meeting, summary) -> str | None:
     if not summary:
-        return False
+        return None
     if (
         meeting.speaker_review_required
         and meeting.speaker_review_completed_at
         and summary.created_at < meeting.speaker_review_completed_at
     ):
-        return True
+        return "Speaker assignments changed after this summary was generated."
     meeting_template_key = meeting.template_key or "meeting"
     if summary.template_key:
         if summary.template_key != meeting_template_key:
-            return True
+            return "Summary settings changed to a different template."
     elif meeting_template_key != "meeting":
-        return True
+        return "Summary settings changed to a different template."
     summary_prompt = _normalize_optional_text(summary.custom_prompt)
     meeting_prompt = _normalize_optional_text(meeting.custom_prompt)
     if (summary_prompt or meeting_prompt) and summary_prompt != meeting_prompt:
-        return True
-    return False
+        return "Summary prompt settings changed after this summary was generated."
+    return None
+
+
+def _summary_is_out_of_date(meeting, summary) -> bool:
+    return _summary_out_of_date_reason(meeting, summary) is not None
 
 
 def _build_recording_workspace_state(
@@ -271,6 +292,7 @@ def _build_recording_workspace_state(
     latest_saved_summary,
 ) -> dict:
     current_summary = draft_summary or latest_saved_summary
+    summary_out_of_date_reason = _summary_out_of_date_reason(meeting, current_summary) if meeting else None
     return {
         "has_transcription": bool(session.has_transcription),
         "requires_speaker_review": bool(
@@ -278,7 +300,8 @@ def _build_recording_workspace_state(
         ),
         "can_generate_summary": bool(session.has_transcription),
         "has_unsaved_draft": draft_summary is not None,
-        "summary_out_of_date": _summary_is_out_of_date(meeting, current_summary) if meeting else False,
+        "summary_out_of_date": summary_out_of_date_reason is not None,
+        "summary_out_of_date_reason": summary_out_of_date_reason,
         "transcript_segment_count": len(segments),
         "saved_summary_count": len(saved_summaries),
     }
@@ -781,6 +804,9 @@ async def get_recording_workspace(
             ),
             "timezone_name": session.timezone_name,
             "timezone_offset_minutes": session.timezone_offset_minutes,
+            "recorded_datetime_label": " · ".join(
+                part for part in (date_label, time_label) if part
+            ),
             "recorded_date_label": date_label,
             "recorded_time_label": time_label,
             "recorded_timezone_label": tz_label,
@@ -808,9 +834,9 @@ async def get_recording_workspace(
             "speakers": speaker_cards,
         },
         "transcript": _serialize_transcript_segments(segments) if session.has_transcription else [],
-        "draft_summary": _serialize_summary(draft_summary) if draft_summary else None,
-        "saved_summaries": [_serialize_summary(summary) for summary in saved_summaries],
-        "active_summary": _serialize_summary(draft_summary or latest_saved_summary)
+        "draft_summary": _serialize_summary(draft_summary, meeting) if draft_summary else None,
+        "saved_summaries": [_serialize_summary(summary, meeting) for summary in saved_summaries],
+        "active_summary": _serialize_summary(draft_summary or latest_saved_summary, meeting)
         if (draft_summary or latest_saved_summary)
         else None,
         "obsidian": {
@@ -841,13 +867,23 @@ async def update_recording_settings(
     if not meeting:
         raise HTTPException(status_code=404, detail="Recording not found")
 
+    provided_fields = getattr(request, "model_fields_set", set())
+
     normalized_title = UNSET
-    if request.title is not None:
-        normalized_title = request.title.strip() or None
-    normalized_template_key = request.template_key if request.template_key is not None else UNSET
+    if "title" in provided_fields:
+        normalized_title = request.title.strip() or None if request.title is not None else None
+
+    normalized_template_key = UNSET
+    if "template_key" in provided_fields:
+        normalized_template_key = request.template_key
+
     normalized_custom_prompt = UNSET
-    if request.custom_prompt is not None:
-        normalized_custom_prompt = request.custom_prompt.strip() or None
+    if "custom_prompt" in provided_fields:
+        normalized_custom_prompt = (
+            request.custom_prompt.strip() or None
+            if request.custom_prompt is not None
+            else None
+        )
 
     updated = await repository.update_meeting_settings(
         meeting.id,

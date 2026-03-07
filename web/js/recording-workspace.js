@@ -6,8 +6,22 @@
             this._settingsSaveTimer = null;
             this._settingsSavePromise = null;
             this._bannerTimer = null;
+            this._metaTooltipTimer = null;
             this._bodyScrollLocked = false;
             this._speakerPlayback = null;
+            this._useNativeScrollTimeline = false;
+            this._useSimpleMobileTabMotion = this._detectSimpleMobileTabMotion();
+            this._tabStageCurrent = 0;
+            this._tabStageTarget = 0;
+            this._tabStageFrame = null;
+            this._tabStageHeight = 0;
+            this._tabShellTop = 0;
+            this._tabStageLastAppliedOffset = null;
+            this._tabShellTopApplied = null;
+            this._tabStageActiveUntil = 0;
+            this._tabStagePaddingApplied = null;
+            this._tabStageTransitionMode = null;
+            this._tabStageResizeObserver = null;
             this.state = {
                 sessionId: null,
                 workspace: null,
@@ -16,16 +30,28 @@
                 speakerAssignments: {},
                 speakerDirty: false,
                 speakerEditMode: false,
+                promptEditMode: false,
+                promptEditValue: '',
+                promptEditInitialValue: '',
+                settingsViewMode: 'selected',
                 editMode: false,
                 editBuffer: '',
                 showRefineInput: false,
                 summaryHistory: [],
                 selectedSavedSummaryId: null,
                 banner: null,
+                pendingResetSummaryId: null,
             };
 
             this._ensureDom();
             this._bindEvents();
+        }
+
+        _detectSimpleMobileTabMotion() {
+            if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+                return false;
+            }
+            return window.matchMedia('(max-width: 700px), (hover: none) and (pointer: coarse)').matches;
         }
 
         async open(sessionId, options = {}) {
@@ -35,12 +61,18 @@
             this.state.speakerAssignments = {};
             this.state.speakerDirty = false;
             this.state.speakerEditMode = false;
+            this.state.promptEditMode = false;
+            this.state.promptEditValue = '';
+            this.state.promptEditInitialValue = '';
+            this.state.settingsViewMode = 'selected';
             this.state.editMode = false;
             this.state.editBuffer = '';
             this.state.showRefineInput = false;
             this.state.summaryHistory = [];
             this.state.selectedSavedSummaryId = null;
             this.state.banner = null;
+            this.state.pendingResetSummaryId = null;
+            this.elements.modal.classList.toggle('workspace-native-scroll-timeline', this._useNativeScrollTimeline);
             this.elements.modal.classList.remove('hidden');
             this._lockBodyScroll();
 
@@ -71,12 +103,18 @@
             this.state.speakerAssignments = {};
             this.state.speakerDirty = false;
             this.state.speakerEditMode = false;
+            this.state.promptEditMode = false;
+            this.state.promptEditValue = '';
+            this.state.promptEditInitialValue = '';
+            this.state.settingsViewMode = 'selected';
             this.state.editMode = false;
             this.state.editBuffer = '';
             this.state.showRefineInput = false;
             this.state.summaryHistory = [];
             this.state.selectedSavedSummaryId = null;
+            this.state.pendingResetSummaryId = null;
             this._settingsSavePromise = null;
+            this._resetTabScrollStage();
             this._stopSpeakerPlayback();
             if (typeof this.options.onClose === 'function') {
                 this.options.onClose();
@@ -111,8 +149,12 @@
             const payload = await response.json();
             const previousTab = this.state.activeTab;
             this.state.workspace = payload;
-            this.state.selectedSavedSummaryId =
-                this.state.selectedSavedSummaryId || payload.saved_summaries?.[0]?.id || null;
+            const draftId = payload.draft_summary?.id || null;
+            const savedIds = (payload.saved_summaries || []).map((summary) => summary.id);
+            const availableSummaryIds = [draftId, ...savedIds].filter(Boolean);
+            if (!availableSummaryIds.includes(this.state.selectedSavedSummaryId)) {
+                this.state.selectedSavedSummaryId = draftId || savedIds[0] || null;
+            }
 
             if (!this.state.speakerDirty) {
                 this.state.speakerAssignments = {};
@@ -134,6 +176,11 @@
             if (!payload.draft_summary && this.state.editMode) {
                 this.state.editMode = false;
                 this.state.editBuffer = '';
+            }
+
+            if (!this.state.promptEditMode) {
+                this.state.promptEditValue = '';
+                this.state.promptEditInitialValue = '';
             }
 
             this._render();
@@ -167,103 +214,117 @@
                 modal.setAttribute('aria-labelledby', 'workspace-title-input');
                 modal.innerHTML = `
                     <div class="modal-content workspace-modal-content">
-                        <div class="modal-header workspace-header">
-                            <div class="workspace-header-copy">
-                                <input id="workspace-title-input" class="workspace-title-input" placeholder="Untitled Recording" autocapitalize="words">
-                                <div id="workspace-meta" class="workspace-meta"></div>
+                        <div class="workspace-top-stack">
+                            <div class="modal-header workspace-header">
+                                <div class="workspace-header-copy">
+                                    <input id="workspace-title-input" class="workspace-title-input" placeholder="Untitled Recording" autocapitalize="words">
+                                    <div id="workspace-meta" class="workspace-meta"></div>
+                                    <div id="workspace-meta-tooltip" class="workspace-meta-tooltip hidden" aria-live="polite"></div>
+                                </div>
+                                <button type="button" class="modal-close" id="workspace-close" aria-label="Close workspace">&times;</button>
                             </div>
-                            <button type="button" class="modal-close" id="workspace-close" aria-label="Close workspace">&times;</button>
-                        </div>
-                        <div id="workspace-banner" class="workspace-banner hidden" aria-live="polite"></div>
-                        <div id="workspace-progress" class="workspace-progress hidden" aria-live="polite">
-                            <div class="processing-panel-header">
-                                <div class="processing-title">Workspace Progress</div>
-                                <div id="workspace-progress-overall" class="processing-overall">0%</div>
-                            </div>
-                            <div id="workspace-progress-stage" class="processing-stage">Queued</div>
-                            <div class="processing-grid">
-                                <div class="processing-row">
-                                    <div class="processing-label-wrap">
-                                        <span class="processing-label">Transcription</span>
-                                        <span id="workspace-progress-transcription-text" class="processing-percent">0%</span>
+                            <div id="workspace-banner" class="workspace-banner hidden" aria-live="polite"></div>
+                            <div id="workspace-progress" class="workspace-progress hidden" aria-live="polite">
+                                <div class="processing-panel-header">
+                                    <div class="processing-title">Workspace Progress</div>
+                                    <div id="workspace-progress-overall" class="processing-overall">0%</div>
+                                </div>
+                                <div id="workspace-progress-stage" class="processing-stage">Queued</div>
+                                <div class="processing-grid">
+                                    <div class="processing-row">
+                                        <div class="processing-label-wrap">
+                                            <span class="processing-label">Transcription</span>
+                                            <span id="workspace-progress-transcription-text" class="processing-percent">0%</span>
+                                        </div>
+                                        <div class="processing-bar">
+                                            <div id="workspace-progress-transcription-fill" class="processing-bar-fill"></div>
+                                        </div>
                                     </div>
-                                    <div class="processing-bar">
-                                        <div id="workspace-progress-transcription-fill" class="processing-bar-fill"></div>
+                                    <div class="processing-row">
+                                        <div class="processing-label-wrap">
+                                            <span class="processing-label">Summary</span>
+                                            <span id="workspace-progress-summary-text" class="processing-percent">0%</span>
+                                        </div>
+                                        <div class="processing-bar">
+                                            <div id="workspace-progress-summary-fill" class="processing-bar-fill"></div>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="processing-row">
-                                    <div class="processing-label-wrap">
-                                        <span class="processing-label">Summary</span>
-                                        <span id="workspace-progress-summary-text" class="processing-percent">0%</span>
-                                    </div>
-                                    <div class="processing-bar">
-                                        <div id="workspace-progress-summary-fill" class="processing-bar-fill"></div>
-                                    </div>
-                                </div>
+                                <div id="workspace-progress-message" class="processing-text">Preparing...</div>
                             </div>
-                            <div id="workspace-progress-message" class="processing-text">Preparing...</div>
                         </div>
-                        <div class="workspace-tab-row" role="tablist" aria-label="Workspace sections">
-                            <button type="button" class="workspace-tab active" id="workspace-tab-speakers" data-tab="speakers" role="tab" aria-controls="workspace-panel-speakers" aria-selected="true">Speakers</button>
-                            <button type="button" class="workspace-tab" id="workspace-tab-summary" data-tab="summary" role="tab" aria-controls="workspace-panel-summary" aria-selected="false">Summary</button>
-                            <button type="button" class="workspace-tab" id="workspace-tab-settings" data-tab="settings" role="tab" aria-controls="workspace-panel-settings" aria-selected="false">Settings</button>
-                            <button type="button" class="workspace-tab" id="workspace-tab-transcript" data-tab="transcript" role="tab" aria-controls="workspace-panel-transcript" aria-selected="false">Transcript</button>
+                        <div class="workspace-tab-shell" id="workspace-tab-shell">
+                            <div class="workspace-tab-row" role="tablist" aria-label="Workspace sections">
+                                <button type="button" class="workspace-tab active" id="workspace-tab-speakers" data-tab="speakers" role="tab" aria-controls="workspace-panel-speakers" aria-selected="true">Speakers</button>
+                                <button type="button" class="workspace-tab" id="workspace-tab-summary" data-tab="summary" role="tab" aria-controls="workspace-panel-summary" aria-selected="false">Summary</button>
+                                <button type="button" class="workspace-tab" id="workspace-tab-settings" data-tab="settings" role="tab" aria-controls="workspace-panel-settings" aria-selected="false">Settings</button>
+                                <button type="button" class="workspace-tab" id="workspace-tab-transcript" data-tab="transcript" role="tab" aria-controls="workspace-panel-transcript" aria-selected="false">Transcript</button>
+                            </div>
                         </div>
                         <div class="modal-body workspace-body">
-                            <section class="workspace-panel" id="workspace-panel-speakers" data-panel="speakers" role="tabpanel" aria-labelledby="workspace-tab-speakers">
-                                <div class="workspace-panel-copy">
-                                    <h3>Speaker Review</h3>
-                                    <p id="workspace-speakers-copy" class="workspace-copy"></p>
-                                </div>
-                                <div id="workspace-speakers-list" class="speaker-card-list"></div>
-                                <div id="workspace-speaker-actions" class="workspace-summary-actions hidden">
-                                    <button type="button" class="btn" id="workspace-speaker-edit-btn">Edit</button>
-                                </div>
-                            </section>
-                            <section class="workspace-panel hidden" id="workspace-panel-summary" data-panel="summary" role="tabpanel" aria-labelledby="workspace-tab-summary" aria-hidden="true">
-                                <div class="workspace-panel-copy">
-                                    <h3>Summary Draft</h3>
-                                    <div id="workspace-summary-meta" class="summary-meta"></div>
-                                </div>
-                                <div id="workspace-summary-version-row" class="summary-version-row hidden">
-                                    <select id="workspace-summary-version-select" class="version-select"></select>
-                                </div>
-                                <div id="workspace-summary-display" class="summary-body"></div>
-                                <textarea id="workspace-summary-edit" class="summary-edit-textarea hidden" spellcheck="true"></textarea>
-                                <div class="workspace-summary-actions">
-                                    <button class="btn" id="workspace-edit-btn">Edit</button>
-                                    <button class="btn" id="workspace-revise-btn">Ask AI to Revise</button>
-                                    <button class="btn hidden" id="workspace-undo-btn">Undo</button>
-                                </div>
-                                <div id="workspace-refine-section" class="hidden">
-                                    <div class="refine-input-row">
-                                        <input type="text" id="workspace-refine-input" class="refine-input" placeholder="e.g. tighten the takeaways, make it more technical">
-                                        <button type="button" class="btn" id="workspace-refine-cancel">Cancel</button>
-                                        <button type="button" class="btn btn-primary" id="workspace-refine-submit">Revise</button>
+                            <div id="workspace-scroll-stage" class="workspace-scroll-stage">
+                                <section class="workspace-panel" id="workspace-panel-speakers" data-panel="speakers" role="tabpanel" aria-labelledby="workspace-tab-speakers">
+                                    <div class="workspace-panel-copy">
+                                        <h3>Speaker Review</h3>
+                                        <p id="workspace-speakers-copy" class="workspace-copy"></p>
                                     </div>
-                                </div>
-                            </section>
-                            <section class="workspace-panel hidden" id="workspace-panel-transcript" data-panel="transcript" role="tabpanel" aria-labelledby="workspace-tab-transcript" aria-hidden="true">
-                                <div class="workspace-panel-copy">
-                                    <h3>Transcript</h3>
-                                    <p class="workspace-copy">The transcript stays available while you review speakers and summary changes.</p>
-                                </div>
-                                <div id="workspace-transcript" class="transcript-view"></div>
-                            </section>
-                            <section class="workspace-panel hidden" id="workspace-panel-settings" data-panel="settings" role="tabpanel" aria-labelledby="workspace-tab-settings" aria-hidden="true">
-                                <div class="workspace-panel-copy">
-                                    <h3>Summary Settings</h3>
-                                    <p class="workspace-copy">Template and prompt persist with this recording.</p>
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Template</label>
-                                    <div id="workspace-template-grid" class="template-grid"></div>
-                                </div>
-                                <div class="form-group">
-                                    <label class="form-label">Custom Prompt <span class="form-label-optional">(optional)</span></label>
-                                    <textarea id="workspace-custom-prompt" class="form-input form-textarea workspace-prompt-textarea" placeholder="Leave blank to use the selected template prompt."></textarea>
-                                </div>
-                            </section>
+                                    <div id="workspace-speakers-list" class="speaker-card-list"></div>
+                                    <div id="workspace-speaker-actions" class="workspace-summary-actions hidden">
+                                        <button type="button" class="btn" id="workspace-speaker-edit-btn">Edit</button>
+                                    </div>
+                                </section>
+                                <section class="workspace-panel hidden" id="workspace-panel-summary" data-panel="summary" role="tabpanel" aria-labelledby="workspace-tab-summary" aria-hidden="true">
+                                    <div class="workspace-panel-copy">
+                                        <h3>Summary Preview</h3>
+                                        <div id="workspace-summary-meta" class="summary-meta"></div>
+                                    </div>
+                                    <div id="workspace-summary-version-row" class="summary-version-row hidden">
+                                        <select id="workspace-summary-version-select" class="version-select"></select>
+                                    </div>
+                                    <div id="workspace-summary-display" class="summary-body"></div>
+                                    <textarea id="workspace-summary-edit" class="summary-edit-textarea hidden" spellcheck="true"></textarea>
+                                    <div class="workspace-summary-actions">
+                                        <button class="btn" id="workspace-edit-btn">Edit</button>
+                                        <button class="btn" id="workspace-revise-btn">Ask AI to Revise</button>
+                                        <button class="btn hidden" id="workspace-undo-btn">Undo</button>
+                                    </div>
+                                    <div id="workspace-refine-section" class="hidden">
+                                        <div class="refine-input-row">
+                                            <input type="text" id="workspace-refine-input" class="refine-input" placeholder="e.g. tighten the takeaways, make it more technical">
+                                            <button type="button" class="btn" id="workspace-refine-cancel">Cancel</button>
+                                            <button type="button" class="btn btn-primary" id="workspace-refine-submit">Revise</button>
+                                        </div>
+                                    </div>
+                                </section>
+                                <section class="workspace-panel hidden" id="workspace-panel-transcript" data-panel="transcript" role="tabpanel" aria-labelledby="workspace-tab-transcript" aria-hidden="true">
+                                    <div class="workspace-panel-copy">
+                                        <h3>Transcript</h3>
+                                        <p class="workspace-copy">The transcript stays available while you review speakers and summary changes.</p>
+                                    </div>
+                                    <div id="workspace-transcript" class="transcript-view"></div>
+                                </section>
+                                <section class="workspace-panel hidden" id="workspace-panel-settings" data-panel="settings" role="tabpanel" aria-labelledby="workspace-tab-settings" aria-hidden="true">
+                                    <div class="workspace-panel-copy">
+                                        <h3>Summary Settings</h3>
+                                        <p class="workspace-copy">Template and prompt persist with this recording. Editing a built-in prompt switches this recording to Custom.</p>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Template</label>
+                                        <div id="workspace-template-grid" class="template-grid"></div>
+                                    </div>
+                                    <div class="form-group">
+                                        <div class="workspace-summary-actions workspace-settings-reset-actions">
+                                            <button type="button" class="btn" id="workspace-prompt-reset-btn">Reset</button>
+                                        </div>
+                                        <div class="workspace-field-header workspace-prompt-header">
+                                            <label class="form-label">Prompt</label>
+                                            <button type="button" class="btn btn-small workspace-prompt-edit-btn" id="workspace-prompt-edit-btn">Edit Prompt</button>
+                                        </div>
+                                        <div id="workspace-prompt-display" class="summary-body workspace-prompt-display"></div>
+                                        <textarea id="workspace-custom-prompt" class="form-input form-textarea workspace-prompt-textarea hidden" placeholder="Write custom prompt instructions."></textarea>
+                                    </div>
+                                </section>
+                            </div>
                         </div>
                         <div class="modal-footer workspace-footer">
                             <div id="workspace-footer-status" class="workspace-footer-status"></div>
@@ -280,10 +341,12 @@
 
             this.elements = {
                 modal,
+                topStack: modal.querySelector('.workspace-top-stack'),
                 close: modal.querySelector('#workspace-close'),
                 banner: modal.querySelector('#workspace-banner'),
                 titleInput: modal.querySelector('#workspace-title-input'),
                 meta: modal.querySelector('#workspace-meta'),
+                metaTooltip: modal.querySelector('#workspace-meta-tooltip'),
                 progress: modal.querySelector('#workspace-progress'),
                 progressStage: modal.querySelector('#workspace-progress-stage'),
                 progressMessage: modal.querySelector('#workspace-progress-message'),
@@ -292,7 +355,11 @@
                 progressSummaryText: modal.querySelector('#workspace-progress-summary-text'),
                 progressTranscriptionFill: modal.querySelector('#workspace-progress-transcription-fill'),
                 progressSummaryFill: modal.querySelector('#workspace-progress-summary-fill'),
+                tabShell: modal.querySelector('#workspace-tab-shell'),
+                tabRow: modal.querySelector('.workspace-tab-row'),
                 tabButtons: Array.from(modal.querySelectorAll('.workspace-tab')),
+                body: modal.querySelector('.workspace-body'),
+                scrollStage: modal.querySelector('#workspace-scroll-stage'),
                 panels: Array.from(modal.querySelectorAll('.workspace-panel')),
                 speakersCopy: modal.querySelector('#workspace-speakers-copy'),
                 speakersList: modal.querySelector('#workspace-speakers-list'),
@@ -312,20 +379,41 @@
                 refineSubmit: modal.querySelector('#workspace-refine-submit'),
                 transcript: modal.querySelector('#workspace-transcript'),
                 templateGrid: modal.querySelector('#workspace-template-grid'),
+                promptDisplay: modal.querySelector('#workspace-prompt-display'),
                 customPrompt: modal.querySelector('#workspace-custom-prompt'),
+                promptResetBtn: modal.querySelector('#workspace-prompt-reset-btn'),
+                promptEditBtn: modal.querySelector('#workspace-prompt-edit-btn'),
                 footerStatus: modal.querySelector('#workspace-footer-status'),
                 openObsidianBtn: modal.querySelector('#workspace-open-obsidian-btn'),
                 secondaryBtn: modal.querySelector('#workspace-secondary-btn'),
                 primaryBtn: modal.querySelector('#workspace-primary-btn'),
             };
+            this.elements.modal.classList.toggle('workspace-native-scroll-timeline', this._useNativeScrollTimeline);
         }
 
         _bindEvents() {
             this.elements.close.addEventListener('click', () => this.close());
             this.elements.modal.addEventListener('click', (event) => {
+                if (!event.target.closest('.workspace-badge-button')) {
+                    this._hideMetaTooltip();
+                }
                 if (event.target === this.elements.modal) {
                     this.close();
                 }
+            });
+
+            this.elements.meta.addEventListener('click', (event) => {
+                const tooltipButton = event.target.closest('.workspace-badge-button[data-tooltip]');
+                if (!tooltipButton) {
+                    return;
+                }
+                event.preventDefault();
+                event.stopPropagation();
+                const message = tooltipButton.dataset.tooltip || tooltipButton.getAttribute('aria-label') || '';
+                if (!message) {
+                    return;
+                }
+                this._toggleMetaTooltip(message);
             });
 
             this.elements.tabButtons.forEach((button) => {
@@ -336,11 +424,35 @@
                 });
             });
 
+            this.elements.body.addEventListener('scroll', () => {
+                this._syncTabScrollStage();
+            }, { passive: true });
+
+            window.addEventListener('resize', () => {
+                this._useSimpleMobileTabMotion = this._detectSimpleMobileTabMotion();
+                this._syncTabShellLayout();
+                this._syncTabScrollStage({ immediate: true });
+            }, { passive: true });
+
+            if (typeof window.ResizeObserver === 'function') {
+                this._tabStageResizeObserver = new window.ResizeObserver(() => {
+                    this._syncTabShellLayout();
+                    this._syncTabScrollStage({ immediate: true });
+                });
+                if (this.elements.topStack) {
+                    this._tabStageResizeObserver.observe(this.elements.topStack);
+                }
+                if (this.elements.tabRow) {
+                    this._tabStageResizeObserver.observe(this.elements.tabRow);
+                }
+            }
+
             this.elements.titleInput.addEventListener('input', () => this._queueSettingsSave());
             this.elements.customPrompt.addEventListener('input', () => {
-                this._autoResizeTextarea(this.elements.customPrompt);
-                this._queueSettingsSave();
+                this._handlePromptInput();
             });
+            this.elements.promptResetBtn.addEventListener('click', () => this._resetPromptSettings());
+            this.elements.promptEditBtn.addEventListener('click', () => this._togglePromptEditMode());
 
             this.elements.templateGrid.addEventListener('click', (event) => {
                 const target = event.target.closest('.template-btn');
@@ -363,7 +475,11 @@
 
             this.elements.summaryVersionSelect.addEventListener('change', (event) => {
                 this.state.selectedSavedSummaryId = event.target.value;
+                this._resetSettingsEditSession();
+                this._renderHeader();
                 this._renderSummary();
+                this._renderSettings();
+                this._renderFooter();
             });
 
             this.elements.editBtn.addEventListener('click', () => this._toggleEditMode());
@@ -445,31 +561,32 @@
             if (!workspace) {
                 return;
             }
+            const currentSummary = this._currentSummary();
 
             if (document.activeElement !== this.elements.titleInput) {
                 this.elements.titleInput.value = workspace.settings?.title || '';
             }
 
             const parts = [
-                workspace.recording?.recorded_date_label,
-                workspace.recording?.recorded_time_label,
-                workspace.recording?.recorded_timezone_label,
-                workspace.recording?.duration_seconds != null
-                    ? this._formatDuration(workspace.recording.duration_seconds)
-                    : null,
+                workspace.recording?.recorded_datetime_label,
             ].filter(Boolean);
 
             const badges = [];
             if (workspace.state?.requires_speaker_review) {
                 badges.push('<span class="workspace-badge workspace-badge-warning">Needs speaker review</span>');
             }
-            if (workspace.draft_summary) {
+            if (currentSummary?.status === 'draft') {
                 badges.push('<span class="workspace-badge workspace-badge-accent">Draft</span>');
-            } else if ((workspace.saved_summaries || []).length > 0) {
+            } else if (currentSummary?.status === 'saved' || (workspace.saved_summaries || []).length > 0) {
                 badges.push('<span class="workspace-badge">Saved</span>');
             }
-            if (workspace.state?.summary_out_of_date) {
-                badges.push('<span class="workspace-badge workspace-badge-warning">Out of date</span>');
+            if (this._currentSummaryIsOutOfDate()) {
+                const staleReason = this._escapeHtml(
+                    this._currentSummaryOutOfDateReason() || 'Summary settings changed.'
+                );
+                badges.push(
+                    `<button type="button" class="workspace-badge workspace-badge-warning workspace-badge-button" title="${staleReason}" aria-label="${staleReason}" data-tooltip="${staleReason}">Out of date</button>`
+                );
             }
 
             this.elements.meta.innerHTML = `
@@ -506,6 +623,37 @@
             this.elements.banner.textContent = banner?.message || '';
         }
 
+        _toggleMetaTooltip(message) {
+            if (
+                !this.elements.metaTooltip.classList.contains('hidden')
+                && this.elements.metaTooltip.textContent === message
+            ) {
+                this._hideMetaTooltip();
+                return;
+            }
+            this._showMetaTooltip(message);
+        }
+
+        _showMetaTooltip(message) {
+            if (this._metaTooltipTimer) {
+                clearTimeout(this._metaTooltipTimer);
+            }
+            this.elements.metaTooltip.textContent = message;
+            this.elements.metaTooltip.classList.remove('hidden');
+            this._metaTooltipTimer = window.setTimeout(() => {
+                this._hideMetaTooltip();
+            }, 2800);
+        }
+
+        _hideMetaTooltip() {
+            if (this._metaTooltipTimer) {
+                clearTimeout(this._metaTooltipTimer);
+                this._metaTooltipTimer = null;
+            }
+            this.elements.metaTooltip.textContent = '';
+            this.elements.metaTooltip.classList.add('hidden');
+        }
+
         _renderTabs() {
             this.elements.tabButtons.forEach((button) => {
                 const active = button.dataset.tab === this.state.activeTab;
@@ -518,6 +666,137 @@
                 panel.classList.toggle('hidden', !active);
                 panel.setAttribute('aria-hidden', active ? 'false' : 'true');
             });
+            this._syncTabScrollStage({ immediate: true });
+        }
+
+        _syncTabScrollStage({ immediate = false } = {}) {
+            const body = this.elements.body;
+            const topStack = this.elements.topStack;
+            const tabShell = this.elements.tabShell;
+            const tabRow = this.elements.tabRow;
+            const scrollStage = this.elements.scrollStage;
+            if (!body || !topStack || !tabShell || !tabRow || !scrollStage) {
+                return;
+            }
+
+            if (!this._tabStageHeight) {
+                this._syncTabShellLayout(topStack, tabShell, scrollStage);
+            }
+
+            if (this._useNativeScrollTimeline) {
+                tabShell.style.transform = '';
+                tabShell.style.transition = '';
+                return;
+            }
+
+            if (immediate) {
+                this._tabStageCurrent = this._computeTabStageOffset();
+                this._applyTabScrollStage(this._tabStageCurrent);
+                return;
+            }
+
+            this._tabStageActiveUntil = performance.now() + 140;
+            if (this._tabStageFrame) {
+                return;
+            }
+
+            this._tabStageFrame = window.requestAnimationFrame(() => this._animateTabScrollStage());
+        }
+
+        _syncTabShellLayout(topStack = this.elements.topStack, tabShell = this.elements.tabShell, scrollStage = this.elements.scrollStage, tabHeight = null) {
+            if (!topStack || !tabShell || !scrollStage) {
+                return;
+            }
+
+            const resolvedTabHeight = tabHeight ?? Math.ceil(this.elements.tabRow?.offsetHeight || this.elements.tabRow?.getBoundingClientRect().height || 0);
+            this._tabStageHeight = resolvedTabHeight;
+            this._tabShellTop = Math.ceil(topStack.getBoundingClientRect().height);
+            if (this._tabShellTopApplied !== this._tabShellTop) {
+                tabShell.style.top = `${this._tabShellTop}px`;
+                this._tabShellTopApplied = this._tabShellTop;
+            }
+            if (tabShell.style.height !== `${resolvedTabHeight}px`) {
+                tabShell.style.height = `${resolvedTabHeight}px`;
+            }
+            tabShell.style.setProperty('--workspace-tab-height', `${resolvedTabHeight}px`);
+            if (this._tabStagePaddingApplied !== resolvedTabHeight) {
+                scrollStage.style.paddingTop = `${resolvedTabHeight}px`;
+                this._tabStagePaddingApplied = resolvedTabHeight;
+            }
+        }
+
+        _computeTabStageOffset() {
+            const scrollTop = this.elements.body?.scrollTop || 0;
+            return Math.min(scrollTop, this._tabStageHeight || 0);
+        }
+
+        _animateTabScrollStage() {
+            this._tabStageFrame = null;
+            this._tabStageTarget = this._computeTabStageOffset();
+            this._tabStageCurrent = this._tabStageTarget;
+            this._applyTabScrollStage(this._tabStageCurrent);
+
+            if (performance.now() < this._tabStageActiveUntil) {
+                this._tabStageFrame = window.requestAnimationFrame(() => this._animateTabScrollStage());
+            }
+        }
+
+        _applyTabScrollStage(offset) {
+            const tabShell = this.elements.tabShell;
+            const tabRow = this.elements.tabRow;
+            if (!tabRow || !tabShell) {
+                return;
+            }
+
+            if (this._useNativeScrollTimeline) {
+                tabShell.style.transform = '';
+                tabShell.style.transition = '';
+                tabRow.style.transform = '';
+                return;
+            }
+
+            let visualOffset = offset;
+            const softenZone = Math.min(28, this._tabStageHeight || 28);
+            visualOffset = Math.round(visualOffset * 100) / 100;
+            if (this._tabShellTopApplied !== this._tabShellTop) {
+                tabShell.style.top = `${this._tabShellTop}px`;
+                this._tabShellTopApplied = this._tabShellTop;
+            }
+            const transitionMode = this._useSimpleMobileTabMotion
+                ? 'none'
+                : (visualOffset > 0 && visualOffset < softenZone ? 'soft' : 'track');
+            if (this._tabStageTransitionMode !== transitionMode) {
+                if (transitionMode === 'soft') {
+                    tabShell.style.transition = 'transform 260ms cubic-bezier(0.22, 1, 0.36, 1)';
+                } else if (transitionMode === 'track') {
+                    tabShell.style.transition = 'transform 110ms cubic-bezier(0.22, 0.78, 0.22, 1)';
+                } else {
+                    tabShell.style.transition = 'none';
+                }
+                this._tabStageTransitionMode = transitionMode;
+            }
+            if (this._tabStageLastAppliedOffset !== visualOffset) {
+                tabShell.style.transform = visualOffset > 0 ? `translate3d(0, ${-visualOffset}px, 0)` : '';
+                this._tabStageLastAppliedOffset = visualOffset;
+            }
+            tabRow.style.transform = '';
+        }
+
+        _resetTabScrollStage() {
+            if (this._tabStageFrame) {
+                window.cancelAnimationFrame(this._tabStageFrame);
+                this._tabStageFrame = null;
+            }
+            this._tabStageCurrent = 0;
+            this._tabStageTarget = 0;
+            this._tabStageHeight = 0;
+            this._tabShellTop = 0;
+            this._tabStageLastAppliedOffset = null;
+            this._tabShellTopApplied = null;
+            this._tabStageActiveUntil = 0;
+            this._tabStagePaddingApplied = null;
+            this._tabStageTransitionMode = null;
+            this._applyTabScrollStage(0);
         }
 
         _renderSpeakers() {
@@ -700,19 +979,24 @@
 
             this.elements.summaryVersionRow.classList.toggle(
                 'hidden',
-                !workspace || (workspace.saved_summaries || []).length <= 1
+                !workspace || (!workspace.draft_summary && (workspace.saved_summaries || []).length <= 1)
             );
 
-            if ((workspace?.saved_summaries || []).length > 1) {
-                this.elements.summaryVersionSelect.innerHTML = workspace.saved_summaries
-                    .map((saved, index) => {
+            if (workspace?.draft_summary || (workspace?.saved_summaries || []).length > 1) {
+                const totalSavedVersions = workspace.saved_summaries.length;
+                const options = [];
+                if (workspace.draft_summary) {
+                    const selected = workspace.draft_summary.id === this.state.selectedSavedSummaryId ? 'selected' : '';
+                    options.push(`<option value="${workspace.draft_summary.id}" ${selected}>Draft</option>`);
+                }
+                options.push(...workspace.saved_summaries.map((saved, index) => {
                         const selected = saved.id === this.state.selectedSavedSummaryId ? 'selected' : '';
                         const label = saved.saved_to_obsidian_at
-                            ? `Saved ${index + 1}`
+                            ? (index === 0 ? 'Latest' : `v${totalSavedVersions - index}`)
                             : `Version ${index + 1}`;
                         return `<option value="${saved.id}" ${selected}>${label}</option>`;
-                    })
-                    .join('');
+                    }));
+                this.elements.summaryVersionSelect.innerHTML = options.join('');
             } else {
                 this.elements.summaryVersionSelect.innerHTML = '';
             }
@@ -729,7 +1013,7 @@
             if (summary?.source_type) {
                 metaParts.push(summary.source_type.replace(/_/g, ' '));
             }
-            if (workspace?.state?.summary_out_of_date) {
+            if (this._currentSummaryIsOutOfDate()) {
                 metaParts.push('Needs re-summarization');
             }
             this.elements.summaryMeta.textContent = metaParts.join(' · ');
@@ -774,17 +1058,32 @@
             const transcript = this.state.workspace?.transcript || [];
             if (!transcript.length) {
                 this.elements.transcript.innerHTML = '<div class="workspace-empty">Transcript not available yet.</div>';
+                this.elements.transcript.style.removeProperty('--transcript-time-width');
+                this.elements.transcript.style.removeProperty('--transcript-speaker-width');
                 return;
             }
+
+            this.elements.transcript.style.setProperty(
+                '--transcript-time-width',
+                `${this._measureTranscriptTimestampWidth(transcript)}px`
+            );
+            this.elements.transcript.style.setProperty(
+                '--transcript-speaker-width',
+                `${this._measureTranscriptSpeakerWidth(transcript)}px`
+            );
 
             this.elements.transcript.innerHTML = transcript
                 .map((segment) => {
                     const importantClass = segment.is_important ? ' important' : '';
-                    const speaker = segment.speaker ? `<span class="speaker">${this._escapeHtml(segment.speaker)}</span> ` : '';
+                    const speaker = segment.speaker || '?';
+                    const speakerStyle = speaker === '?'
+                        ? ''
+                        : ` style="--speaker-color: ${this._speakerColorForLabel(speaker)}"`;
                     return `
                         <div class="transcript-segment${importantClass}">
                             <span class="timestamp">${this._escapeHtml(segment.timestamp)}</span>
-                            <div class="text">${speaker}${this._escapeHtml(segment.text)}</div>
+                            <span class="speaker-inline${speaker === '?' ? ' speaker-inline-unknown' : ''}"${speakerStyle}>[${this._escapeHtml(speaker)}]:</span>
+                            <span class="transcript-line-text">${this._escapeHtml(segment.text)}</span>
                         </div>
                     `;
                 })
@@ -793,39 +1092,76 @@
 
         _renderSettings() {
             const workspace = this.state.workspace;
-            const settings = workspace?.settings || {};
+            const settings = this._settingsFormValues();
             const selectedTemplate = settings.template_key || 'meeting';
             const order = ['meeting', 'strategic_review', 'working_session', 'custom'];
 
-            this.elements.templateGrid.innerHTML = order
-                .filter((key) => this.templates[key])
-                .map((key) => {
-                    const template = this.templates[key];
-                    const selectedClass = key === selectedTemplate ? ' selected' : '';
-                    return `<button type="button" class="template-btn${selectedClass}" data-template="${key}">${this._escapeHtml(template.name)}</button>`;
-                })
-                .join('');
+            this._syncTemplateGrid(order, selectedTemplate);
 
-            if (document.activeElement !== this.elements.customPrompt) {
-                this.elements.customPrompt.value = settings.custom_prompt || '';
+            const promptText = this.state.promptEditMode
+                ? this.state.promptEditValue
+                : this._currentPromptDisplayText();
+
+            this.elements.promptDisplay.classList.toggle('hidden', this.state.promptEditMode);
+            this.elements.customPrompt.classList.toggle('hidden', !this.state.promptEditMode);
+            this.elements.promptResetBtn.disabled = !this._canResetSummarySettings();
+            this.elements.promptEditBtn.textContent = this.state.promptEditMode ? 'Done Editing' : 'Edit Prompt';
+
+            if (this.state.promptEditMode) {
+                if (document.activeElement !== this.elements.customPrompt) {
+                    this.elements.customPrompt.value = this.state.promptEditValue;
+                }
                 this._autoResizeTextarea(this.elements.customPrompt);
+                return;
             }
+
+            this._renderMarkdown(this.elements.promptDisplay, promptText);
+        }
+
+        _syncTemplateGrid(order, selectedTemplate) {
+            const templateKeys = order.filter((key) => this.templates[key]);
+            const existingButtons = Array.from(this.elements.templateGrid.querySelectorAll('.template-btn'));
+            const existingKeys = existingButtons.map((button) => button.dataset.template);
+            const needsRebuild = existingKeys.length !== templateKeys.length
+                || existingKeys.some((key, index) => key !== templateKeys[index]);
+
+            if (needsRebuild) {
+                this.elements.templateGrid.innerHTML = templateKeys
+                    .map((key) => {
+                        const template = this.templates[key];
+                        const selectedClass = key === selectedTemplate ? ' selected' : '';
+                        const pressed = key === selectedTemplate ? 'true' : 'false';
+                        return `<button type="button" class="template-btn${selectedClass}" data-template="${key}" aria-pressed="${pressed}">${this._escapeHtml(template.name)}</button>`;
+                    })
+                    .join('');
+            }
+
+            Array.from(this.elements.templateGrid.querySelectorAll('.template-btn')).forEach((button) => {
+                const selected = button.dataset.template === selectedTemplate;
+                button.classList.toggle('selected', selected);
+                button.setAttribute('aria-pressed', selected ? 'true' : 'false');
+            });
         }
 
         _renderFooter() {
             const workspace = this.state.workspace;
+            const currentSummary = this._currentSummary();
             const primaryAction = this._getPrimaryAction();
 
             this.elements.footerStatus.textContent = this._footerStatusText();
             this.elements.primaryBtn.textContent = primaryAction.label;
             this.elements.primaryBtn.disabled = !!primaryAction.disabled;
 
-            const showOpenButton = Boolean(workspace?.obsidian?.open_uri) && primaryAction.action !== 'open_obsidian';
+            const showOpenButton = Boolean(workspace?.obsidian?.open_uri)
+                && currentSummary?.status === 'saved'
+                && !this._currentSummaryIsOutOfDate()
+                && primaryAction.action !== 'open_obsidian';
             this.elements.openObsidianBtn.classList.toggle('hidden', !showOpenButton);
         }
 
         _footerStatusText() {
             const workspace = this.state.workspace;
+            const currentSummary = this._currentSummary();
             if (!workspace) {
                 return 'Loading workspace...';
             }
@@ -835,10 +1171,10 @@
             if (workspace.state?.requires_speaker_review) {
                 return 'Review speakers now, or continue with Attendee labels for anyone still unresolved.';
             }
-            if (workspace.draft_summary) {
+            if (currentSummary?.status === 'draft') {
                 return 'Current draft has not been saved to Obsidian.';
             }
-            if (workspace.state?.summary_out_of_date) {
+            if (this._currentSummaryIsOutOfDate()) {
                 return 'Current summary is stale against the latest speakers or settings.';
             }
             if (workspace.obsidian?.open_uri) {
@@ -852,6 +1188,7 @@
 
         _getPrimaryAction() {
             const workspace = this.state.workspace;
+            const currentSummary = this._currentSummary();
             if (!workspace) {
                 return { label: 'Loading...', disabled: true, action: 'none' };
             }
@@ -878,13 +1215,13 @@
                 }
                 return { label: 'Continue to Summary', action: 'complete_speakers' };
             }
-            if (workspace.state?.summary_out_of_date) {
+            if (this._currentSummaryIsOutOfDate()) {
                 return { label: 'Re-summarize', action: 'summarize' };
             }
-            if (workspace.draft_summary) {
+            if (currentSummary?.status === 'draft') {
                 return { label: 'Save to Obsidian', action: 'save_draft' };
             }
-            if (!this._currentSummary() && workspace.state?.can_generate_summary) {
+            if (!currentSummary && workspace.state?.can_generate_summary) {
                 return { label: 'Generate Summary', action: 'summarize' };
             }
             if (workspace.obsidian?.open_uri) {
@@ -1067,6 +1404,9 @@
         }
 
         _showRefineInput() {
+            if (this.state.workspace?.draft_summary?.id) {
+                this.state.selectedSavedSummaryId = this.state.workspace.draft_summary.id;
+            }
             this.state.showRefineInput = true;
             this._renderSummary();
             this.elements.refineInput.value = '';
@@ -1086,6 +1426,7 @@
             }
 
             const draftId = await this._ensureDraft('ai_revised');
+            this.state.selectedSavedSummaryId = draftId;
             const currentSummary = this._currentSummary();
             if (currentSummary?.content) {
                 this.state.summaryHistory.push(currentSummary.content);
@@ -1105,6 +1446,9 @@
                 }
                 this.state.showRefineInput = false;
                 await this._loadWorkspace();
+                if (this.state.workspace?.draft_summary?.id) {
+                    this.state.selectedSavedSummaryId = this.state.workspace.draft_summary.id;
+                }
                 this.state.activeTab = 'summary';
                 this._render();
             } catch (error) {
@@ -1117,12 +1461,14 @@
 
         async _toggleEditMode() {
             if (!this.state.editMode) {
+                let draftId;
                 try {
-                    await this._ensureDraft('manual_edit');
+                    draftId = await this._ensureDraft('manual_edit');
                 } catch (error) {
                     this._showBanner(error.message || 'Failed to create summary draft.', 'error');
                     return;
                 }
+                this.state.selectedSavedSummaryId = draftId;
                 this.state.editMode = true;
                 this.state.editBuffer = this._currentSummary()?.content || '';
                 this._renderSummary();
@@ -1153,6 +1499,9 @@
                     return;
                 }
                 await this._loadWorkspace();
+                if (this.state.workspace?.draft_summary?.id) {
+                    this.state.selectedSavedSummaryId = this.state.workspace.draft_summary.id;
+                }
             }
 
             this.state.editMode = false;
@@ -1183,6 +1532,9 @@
                 return;
             }
             await this._loadWorkspace();
+            if (this.state.workspace?.draft_summary?.id) {
+                this.state.selectedSavedSummaryId = this.state.workspace.draft_summary.id;
+            }
             this._render();
         }
 
@@ -1191,13 +1543,12 @@
                 return this.state.workspace.draft_summary.id;
             }
 
-            const sourceSummary = this._currentSummary();
             const response = await fetch(`/api/recordings/${this.state.sessionId}/summary-draft`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     source_type: sourceType,
-                    source_summary_id: sourceSummary?.status === 'saved' ? sourceSummary.id : null,
+                    source_summary_id: null,
                 }),
             });
             if (!response.ok) {
@@ -1206,6 +1557,7 @@
             }
             const payload = await response.json();
             await this._loadWorkspace();
+            this.state.selectedSavedSummaryId = payload.draft_summary_id;
             return payload.draft_summary_id;
         }
 
@@ -1227,6 +1579,7 @@
                     throw new Error(error.detail || 'Failed to save draft');
                 }
                 await this._loadWorkspace();
+                this.state.selectedSavedSummaryId = this.state.workspace?.saved_summaries?.[0]?.id || null;
                 this.state.activeTab = 'summary';
                 this._render();
                 this._showBanner('Saved to Obsidian.', 'success');
@@ -1253,25 +1606,188 @@
             if (!workspace) {
                 return null;
             }
-            if (workspace.draft_summary) {
+            if (workspace.draft_summary?.id === this.state.selectedSavedSummaryId) {
                 return workspace.draft_summary;
             }
-            if (!workspace.saved_summaries || workspace.saved_summaries.length === 0) {
+            const savedSummary = (workspace.saved_summaries || []).find(
+                (summary) => summary.id === this.state.selectedSavedSummaryId
+            );
+            if (savedSummary) {
+                return savedSummary;
+            }
+            return workspace.draft_summary || workspace.saved_summaries?.[0] || null;
+        }
+
+        _currentSummaryIsOutOfDate() {
+            return Boolean(this._currentSummaryOutOfDateReason());
+        }
+
+        _currentSummaryOutOfDateReason() {
+            const localReason = this._localSummaryOutOfDateReason();
+            if (localReason) {
+                return localReason;
+            }
+            return this._selectedSummaryServerOutOfDateReason();
+        }
+
+        _localSummaryOutOfDateReason() {
+            if (this.state.settingsViewMode !== 'workspace') {
                 return null;
             }
-            return (
-                workspace.saved_summaries.find((summary) => summary.id === this.state.selectedSavedSummaryId) ||
-                workspace.saved_summaries[0]
-            );
+            const currentSummary = this._currentSummary();
+            const currentSettings = this.state.workspace?.settings;
+            if (!currentSummary || !currentSettings) {
+                return null;
+            }
+
+            const currentTemplateKey = currentSettings.template_key || 'meeting';
+            const summaryTemplateKey = currentSummary.template_key || 'meeting';
+            if (currentTemplateKey !== summaryTemplateKey) {
+                return 'Summary settings changed to a different template.';
+            }
+
+            const currentPrompt = this._normalizeOptionalText(currentSettings.custom_prompt);
+            const summaryPrompt = this._normalizeOptionalText(currentSummary.custom_prompt);
+            if (currentPrompt !== summaryPrompt) {
+                return 'Summary prompt settings changed after this summary was generated.';
+            }
+
+            return null;
+        }
+
+        _selectedSummaryServerOutOfDateReason() {
+            const currentSummary = this._currentSummary();
+            const staleReason = currentSummary?.summary_out_of_date_reason
+                || this.state.workspace?.state?.summary_out_of_date_reason
+                || null;
+            if (!staleReason) {
+                return null;
+            }
+            if (staleReason.startsWith('Speaker assignments changed')) {
+                return staleReason;
+            }
+            return null;
         }
 
         _selectTemplate(templateKey) {
+            this._beginSettingsEditSession();
             const current = this.state.workspace?.settings || {};
-            this.state.workspace.settings = {
+            const nextSettings = {
                 ...current,
                 template_key: templateKey,
             };
+
+            this.state.promptEditMode = false;
+            this.state.promptEditValue = '';
+            this.state.promptEditInitialValue = '';
+
+            if (templateKey === 'custom') {
+                nextSettings.custom_prompt = current.custom_prompt || this.templates.custom?.prompt || '';
+            } else if (current.template_key !== templateKey) {
+                nextSettings.custom_prompt = null;
+            }
+
+            this.state.workspace.settings = {
+                ...nextSettings,
+            };
             this._renderSettings();
+            this._renderHeader();
+            this._renderSummary();
+            this._renderFooter();
+            this._queueSettingsSave();
+        }
+
+        _togglePromptEditMode() {
+            if (!this.state.workspace) {
+                return;
+            }
+
+            if (!this.state.promptEditMode) {
+                this._beginSettingsEditSession();
+                const promptText = this._currentPromptDisplayText();
+                this.state.promptEditMode = true;
+                this.state.promptEditInitialValue = promptText;
+                this.state.promptEditValue = promptText;
+                this._renderSettings();
+                this.elements.customPrompt.focus();
+                this.elements.customPrompt.setSelectionRange(
+                    this.elements.customPrompt.value.length,
+                    this.elements.customPrompt.value.length
+                );
+                return;
+            }
+
+            this.state.promptEditMode = false;
+            this.state.promptEditValue = '';
+            this.state.promptEditInitialValue = '';
+            this._renderSettings();
+            this._renderFooter();
+        }
+
+        _resetPromptSettings() {
+            const summary = this._currentSummary();
+            if (!summary || !this.state.workspace) {
+                return;
+            }
+
+            const hadSettingsDifference = this._hasSummarySettingsToRestore();
+            if (!hadSettingsDifference) {
+                const staleReason = this._currentSummaryOutOfDateReason();
+                if (staleReason) {
+                    this._showBanner(`Reset does not clear this: ${staleReason}`, 'error');
+                } else {
+                    this._showBanner('Settings already match this summary.', 'success');
+                }
+                return;
+            }
+
+            this.state.settingsViewMode = 'workspace';
+            this.state.promptEditMode = false;
+            this.state.promptEditValue = '';
+            this.state.promptEditInitialValue = '';
+            this.state.pendingResetSummaryId = summary.id;
+            this.state.workspace.settings = {
+                ...this.state.workspace.settings,
+                template_key: summary.template_key || 'meeting',
+                custom_prompt: summary.custom_prompt || null,
+            };
+            this._renderSettings();
+            this._renderHeader();
+            this._renderSummary();
+            this._renderFooter();
+            this._queueSettingsSave();
+        }
+
+        _handlePromptInput() {
+            this._beginSettingsEditSession();
+            this._autoResizeTextarea(this.elements.customPrompt);
+            const value = this.elements.customPrompt.value;
+
+            if (!this.state.promptEditMode) {
+                this.state.promptEditMode = true;
+            }
+
+            if (
+                this.state.workspace?.settings?.template_key !== 'custom'
+                && value !== this.state.promptEditInitialValue
+            ) {
+                this.state.workspace.settings = {
+                    ...this.state.workspace.settings,
+                    template_key: 'custom',
+                    custom_prompt: value.trim() || null,
+                };
+            } else if (this.state.workspace?.settings?.template_key === 'custom') {
+                this.state.workspace.settings = {
+                    ...this.state.workspace.settings,
+                    custom_prompt: value.trim() || null,
+                };
+            }
+
+            this.state.promptEditValue = value;
+            this._renderSettings();
+            this._renderHeader();
+            this._renderSummary();
+            this._renderFooter();
             this._queueSettingsSave();
         }
 
@@ -1282,7 +1798,7 @@
             this.state.workspace.settings = {
                 ...this.state.workspace.settings,
                 title: this.elements.titleInput.value.trim() || null,
-                custom_prompt: this.elements.customPrompt.value.trim() || null,
+                custom_prompt: this._settingsCustomPromptValue(),
             };
             this.elements.footerStatus.textContent = 'Saving settings...';
             if (this._settingsSaveTimer) {
@@ -1302,7 +1818,7 @@
             const payload = {
                 title: this.elements.titleInput.value.trim() || null,
                 template_key: this.state.workspace?.settings?.template_key || 'meeting',
-                custom_prompt: this.elements.customPrompt.value.trim() || null,
+                custom_prompt: this._settingsCustomPromptValue(),
             };
 
             const response = await fetch(`/api/recordings/${this.state.sessionId}/settings`, {
@@ -1312,11 +1828,13 @@
             });
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
+                this.state.pendingResetSummaryId = null;
                 this._showBanner(error.detail || 'Failed to save settings.', 'error');
                 return false;
             }
 
             await this._loadWorkspace();
+            this._handlePostSettingsSave();
             return true;
         }
 
@@ -1357,6 +1875,214 @@
             element.textContent = markdown || '';
         }
 
+        _currentPromptDisplayText() {
+            const settings = this._settingsFormValues();
+            const templateKey = settings.template_key || 'meeting';
+            const selectedTemplate = this.templates[templateKey];
+            const basePrompt = selectedTemplate?.prompt || '';
+
+            if (templateKey === 'custom') {
+                return settings.custom_prompt || basePrompt || '';
+            }
+
+            const extraInstructions = (settings.custom_prompt || '').trim();
+            if (!extraInstructions) {
+                return basePrompt;
+            }
+
+            return `${basePrompt}\n\n## Additional Instructions\n\n${extraInstructions}`;
+        }
+
+        _promptSourceLabel() {
+            const settings = this._settingsFormValues();
+            const templateKey = settings.template_key || 'meeting';
+            const templateName = this.templates[templateKey]?.name || 'Prompt';
+
+            if (templateKey === 'custom') {
+                return 'Custom prompt';
+            }
+
+            if ((settings.custom_prompt || '').trim()) {
+                return `${templateName} prompt with additional instructions`;
+            }
+
+            return `${templateName} prompt`;
+        }
+
+        _settingsCustomPromptValue() {
+            const settings = this.state.workspace?.settings || {};
+            if ((settings.template_key || 'meeting') !== 'custom') {
+                return settings.custom_prompt || null;
+            }
+
+            if (this.state.promptEditMode) {
+                return this.state.promptEditValue.trim() || null;
+            }
+
+            return settings.custom_prompt || null;
+        }
+
+        _speakerColorForLabel(label) {
+            const palette = [
+                '#7dd3fc',
+                '#86efac',
+                '#fca5a5',
+                '#fcd34d',
+                '#c4b5fd',
+                '#fdba74',
+                '#67e8f9',
+                '#f9a8d4',
+                '#bef264',
+                '#93c5fd',
+            ];
+            let hash = 0;
+            const value = String(label || '');
+            for (let index = 0; index < value.length; index += 1) {
+                hash = ((hash << 5) - hash) + value.charCodeAt(index);
+                hash |= 0;
+            }
+            return palette[Math.abs(hash) % palette.length];
+        }
+
+        _measureTranscriptTimestampWidth(transcript) {
+            const labels = transcript.map((segment) => String(segment.timestamp || '[00:00]'));
+            const longestLabel = labels.reduce((longest, label) => (
+                label.length > longest.length ? label : longest
+            ), '[00:00]');
+            const transcriptStyles = window.getComputedStyle(this.elements.transcript);
+            const fontSize = '11px';
+            const fontFamily = transcriptStyles.fontFamily || 'inherit';
+            const fontWeight = '400';
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            if (!context) {
+                return Math.max((longestLabel.length * 7) + 4, 42);
+            }
+
+            context.font = `${fontWeight} ${fontSize} ${fontFamily}`;
+            const width = Math.ceil(context.measureText(longestLabel).width);
+            return Math.max(width + 4, 42);
+        }
+
+        _measureTranscriptSpeakerWidth(transcript) {
+            const labels = transcript.map((segment) => `[${String(segment.speaker || '?')}]:`);
+            const longestLabel = labels.reduce((longest, label) => (
+                label.length > longest.length ? label : longest
+            ), '[?]:');
+            const transcriptStyles = window.getComputedStyle(this.elements.transcript);
+            const fontSize = transcriptStyles.fontSize || '16px';
+            const fontFamily = transcriptStyles.fontFamily || 'inherit';
+            const fontWeight = '500';
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            if (!context) {
+                return Math.max((longestLabel.length * 8) + 4, 44);
+            }
+
+            context.font = `${fontWeight} ${fontSize} ${fontFamily}`;
+            const width = Math.ceil(context.measureText(longestLabel).width);
+            return Math.max(width + 4, 44);
+        }
+
+        _hasSummarySettingsToRestore() {
+            const summary = this._currentSummary();
+            if (!summary) {
+                return false;
+            }
+
+            const currentSettings = this.state.workspace?.settings || {};
+            const currentTemplateKey = currentSettings.template_key || 'meeting';
+            const currentCustomPrompt = currentSettings.custom_prompt || null;
+            const summaryTemplateKey = summary.template_key || 'meeting';
+            const summaryCustomPrompt = summary.custom_prompt || null;
+
+            return currentTemplateKey !== summaryTemplateKey || currentCustomPrompt !== summaryCustomPrompt;
+        }
+
+        _canResetSummarySettings() {
+            return Boolean(this._currentSummary());
+        }
+
+        _handlePostSettingsSave() {
+            const resetSummaryId = this.state.pendingResetSummaryId;
+            this.state.pendingResetSummaryId = null;
+            if (!resetSummaryId) {
+                return;
+            }
+
+            const currentSummary = this._currentSummary();
+            if (!currentSummary || currentSummary.id !== resetSummaryId) {
+                return;
+            }
+
+            if (this._hasSummarySettingsToRestore()) {
+                this._showBanner('Failed to restore the settings used for this summary.', 'error');
+                return;
+            }
+
+            const staleReason = this._currentSummaryOutOfDateReason();
+            if (staleReason) {
+                this._showBanner(`Settings restored. Still out of date: ${staleReason}`, 'success');
+                return;
+            }
+
+            this._showBanner('Restored the settings used for this summary.', 'success');
+        }
+
+        _settingsFormValues() {
+            const workspaceSettings = this.state.workspace?.settings || {};
+            if (this.state.settingsViewMode === 'workspace') {
+                return workspaceSettings;
+            }
+
+            const currentSummary = this._currentSummary();
+            if (!currentSummary) {
+                return workspaceSettings;
+            }
+
+            return {
+                ...workspaceSettings,
+                template_key: currentSummary.template_key || workspaceSettings.template_key || 'meeting',
+                custom_prompt: currentSummary.custom_prompt ?? null,
+            };
+        }
+
+        _beginSettingsEditSession() {
+            if (!this.state.workspace || this.state.settingsViewMode === 'workspace') {
+                return;
+            }
+
+            const displayedSettings = this._settingsFormValues();
+            this.state.workspace.settings = {
+                ...this.state.workspace.settings,
+                template_key: displayedSettings.template_key || 'meeting',
+                custom_prompt: displayedSettings.custom_prompt ?? null,
+            };
+            this.state.settingsViewMode = 'workspace';
+        }
+
+        _resetSettingsEditSession() {
+            if (!this.state.workspace) {
+                return;
+            }
+
+            const currentSummary = this._currentSummary();
+            this.state.settingsViewMode = 'selected';
+            this.state.promptEditMode = false;
+            this.state.promptEditValue = '';
+            this.state.promptEditInitialValue = '';
+
+            if (!currentSummary) {
+                return;
+            }
+
+            this.state.workspace.settings = {
+                ...this.state.workspace.settings,
+                template_key: currentSummary.template_key || 'meeting',
+                custom_prompt: currentSummary.custom_prompt ?? null,
+            };
+        }
+
         _formatStage(stage) {
             const map = {
                 queued: 'Queued',
@@ -1386,6 +2112,10 @@
             const div = document.createElement('div');
             div.textContent = value == null ? '' : String(value);
             return div.innerHTML;
+        }
+
+        _normalizeOptionalText(value) {
+            return String(value || '').trim();
         }
 
         _sleep(ms) {

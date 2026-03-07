@@ -71,14 +71,6 @@ class RecordingsPage {
         this.elements.recordingsList.querySelectorAll('.delete-btn').forEach((button) => {
             button.addEventListener('click', () => this._deleteRecording(button.dataset.id));
         });
-
-        this.elements.recordingsList.querySelectorAll('.rename-btn').forEach((button) => {
-            button.addEventListener('click', (event) => {
-                event.stopPropagation();
-                const recording = this.recordings.find((item) => item.id === button.dataset.id);
-                this._startRename(button.dataset.id, recording?.title || '');
-            });
-        });
     }
 
     _renderCard(recording) {
@@ -108,11 +100,9 @@ class RecordingsPage {
                 <div class="recording-date">${dateStr} ${timeStr}</div>
                 <div class="recording-title-row">
                     <span class="recording-title">${this._escapeHtml(title)}</span>
-                    <button class="rename-btn" data-id="${recording.id}" title="Rename">✎</button>
                 </div>
                 <div class="recording-meta">
                     <span>Duration: ${this._formatDuration(recording.duration_seconds)}</span>
-                    <span>${recording.segment_count} segments</span>
                 </div>
                 <div class="recording-badges">${badges.join('')}</div>
                 <div class="recording-actions">
@@ -142,57 +132,6 @@ class RecordingsPage {
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
             alert(error.detail || 'Failed to delete recording');
-            return;
-        }
-
-        await this._loadRecordings();
-    }
-
-    _startRename(id, currentTitle) {
-        const card = this.elements.recordingsList.querySelector(`.recording-card[data-id="${id}"] .recording-title-row`);
-        if (!card) {
-            return;
-        }
-
-        card.innerHTML = `
-            <input type="text" class="rename-input" value="${this._escapeHtml(currentTitle)}" placeholder="Untitled Recording">
-            <button class="rename-save-btn">Save</button>
-            <button class="rename-cancel-btn">Cancel</button>
-        `;
-
-        const input = card.querySelector('.rename-input');
-        const saveBtn = card.querySelector('.rename-save-btn');
-        const cancelBtn = card.querySelector('.rename-cancel-btn');
-        input.focus();
-        input.select();
-
-        saveBtn.addEventListener('click', () => this._saveRename(id, input.value));
-        cancelBtn.addEventListener('click', () => this._loadRecordings());
-        input.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') {
-                this._saveRename(id, input.value);
-            }
-            if (event.key === 'Escape') {
-                this._loadRecordings();
-            }
-        });
-    }
-
-    async _saveRename(id, title) {
-        const trimmedTitle = title.trim();
-        if (!trimmedTitle) {
-            alert('Title cannot be empty');
-            return;
-        }
-
-        const response = await fetch(`/api/recordings/${id}/title`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: trimmedTitle }),
-        });
-        if (!response.ok) {
-            const error = await response.json().catch(() => ({}));
-            alert(error.detail || 'Failed to rename recording');
             return;
         }
 

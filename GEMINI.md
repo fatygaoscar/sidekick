@@ -7,6 +7,7 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **Obsidian First:** All summarization logic must prioritize scannability in Obsidian. Use bullet points (`-`), nested indentation (2 spaces), and blank lines between sections. **No long paragraphs.**
 - **Local AI Integrity:** Ensure all AI operations (transcription, diarization, summarization) remain compatible with local backends (faster-whisper, pyannote, Ollama).
 - **Mobile optimization:** Maintain the iPhone-friendly UI. Do not re-introduce internal scrollbars or oversized text. Modals must expand and scroll as a single unit.
+- **Workspace Motion Split:** Keep the current device-specific tab-row behavior: polished hide/reveal on desktop, simpler direct tracking on mobile for touch-scroll stability.
 - **Transactional DB:** Ensure all database updates (segments, summaries, items) are performed within transactions.
 - **Versioning:** Never overwrite existing Obsidian notes. Always append ` (v2)`, ` (v3)`, etc., if a summary already exists.
 
@@ -25,6 +26,7 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **Ollama Think:** Always pass `think: false` to Ollama for summarization. Note: this only works for `qwen3` models. `qwen3.5` models always think regardless.
 - **temperature=0.3:** Always pass `temperature: 0.3` to Ollama for consistent, factual summarization output.
 - **Speaker Labels:** Manual speaker mapping in the workspace is the source of truth. User-facing transcript and summary output must never expose raw `SPEAKER_XX`; use fallback labels like `Attendee`, `Attendee A`, `Attendee B` when unresolved.
+- **Rename Flow:** Recording rename lives in the workspace title after opening a recording; do not reintroduce card-level rename controls.
 - **Database Migrations:** Use the `init_db` pattern in `src/sessions/repository.py` to automatically backfill schema changes for existing users.
 
 ## Project Context

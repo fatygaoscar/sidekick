@@ -10,7 +10,7 @@ Browser-based meeting recorder that transcribes audio, identifies speakers, and 
 - **Manual-first speaker identification** — review speaker clips and assign names directly in the workspace
 - **Readable unresolved speakers** — transcript and summary views use `Attendee`, `Attendee A`, `Attendee B`, etc. instead of raw `SPEAKER_XX`
 - **Eager background processing** — transcription starts in the background as soon as recording stops, so export skips Whisper when you click Process
-- **Inline rename** — hover a recording card and click the pencil icon to rename without opening the view modal
+- **Workspace-first rename** — open a recording and click the workspace title to rename it
 - **History Summary View** — view and refine processed summaries directly in the recordings history
 - **Unified Review/View** — functionally identical modals for new and past recordings (Refine, Edit, Undo)
 - **Obsidian-Optimized Formatting** — summaries use nested bullet points and clean spacing for maximum scannability
@@ -291,7 +291,7 @@ Models download once (~1 GB total) and run locally from then on. Diarization run
 | **Working Session** | Technical work — decisions, SQL notes, open questions, high detail |
 | **Custom** | User-provided prompt — targeted extraction for a specific audience or artifact |
 
-All templates are editable before export (click "Show" to view and modify the prompt).
+All templates are editable before export from the workspace Settings tab.
 
 ## Usage
 
@@ -299,9 +299,17 @@ All templates are editable before export (click "Show" to view and modify the pr
 2. **Stop** — Click again to stop recording
 3. **Title** — Give the recording a name
 4. **Speakers** *(optional but recommended)* — In the workspace `Speakers` tab, name any detected speakers you recognize
-5. **Template** — Choose a template and edit the custom prompt if needed
+5. **Template** — Choose a template and edit or reset the prompt in the summary-only Settings tab if needed
 6. **Generate Summary** — Watch real-time progress through transcription and summarization
 7. **Save to Obsidian** — Save the draft and open the exported note
+
+## Workspace UX
+
+- Recording cards stay simple: `View` and `Delete` only.
+- Rename happens from the editable workspace title after opening a recording.
+- The Settings tab is summary-only and follows the currently selected summary version by default.
+- Summary versions are labeled `Draft`, `Latest`, then descending `vN`.
+- Desktop uses the polished tab-row hide/reveal motion; mobile uses a simpler direct-tracking path for smoother touch scrolling.
 
 ## API
 

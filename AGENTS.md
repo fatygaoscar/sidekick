@@ -192,11 +192,15 @@ Default template: `meeting`
 - Export / re-summarize initiated from the view modal, not from cards.
 - **Unified Modals:** History "View" matches post-recording "Review". Both support AI Refine, Manual Edit, and Undo.
 - **View Modal Title:** Plain meeting title. Date/time is in the Details section.
+- **Rename flow:** Rename from the editable workspace title after opening the recording. History cards stay `View` / `Delete` only.
+- **Workspace header metadata:** Simplified to date and time under the title.
 - **Details Section:** Two-column grid — Template (if stored), Recorded, Exported, Length, Processing Time. Updates on version change.
 - **Summary Version label:** "Summary Version" (not "Summary") in view modal.
+- **Summary Version labels:** `Draft`, `Latest`, then descending `vN`.
 - **Audio player** is at the bottom of the view modal.
 - **Card titles:** Plain meeting title (no date prefix); date shown separately.
 - **Mobile optimization:** `13px` text, `1.7` line height, single-unit scroll, Details grid uses `word-break` to prevent horizontal overflow.
+- **Workspace tab motion:** Desktop uses the polished hide/reveal motion. Mobile uses a simpler direct-tracking path to avoid touch-scroll jank.
 - Template chooser shows 4 templates in the order above.
 - `General Meeting` is default unless explicitly changed.
 
@@ -236,6 +240,7 @@ Default template: `meeting`
 - **Unresolved Speakers**: Raw `SPEAKER_XX` stays visible only in the `Speakers` tab. Transcript and summary views use stable fallback labels: `Attendee`, `Attendee A`, `Attendee B`, etc.
 - **Workspace Summary Gate**: Pending speaker review does not block summary generation. Users can summarize before naming every speaker.
 - **Settings Tab**: Summary-only. The workspace no longer shows a `People` or attendees field.
+- **Settings / Summary coupling**: The Settings tab reflects the selected summary version by default. `Reset` restores that version's template/prompt baseline.
 - **Workspace State Isolation**: Opening a different recording clears unsaved speaker assignments from the previous workspace, and closing the workspace flushes pending settings edits before dismissing the modal.
 - **Pipeline Optimizations**:
   - Speech-Aware Diarization: stops at last Whisper timestamp + 5s.

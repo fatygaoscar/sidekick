@@ -30,6 +30,7 @@ from src.core.markdown_utils import (
 )
 from src.core.speaker_labels import (
     build_user_facing_speaker_map,
+    infer_strict_segment_speakers,
     resolve_user_facing_speaker_name,
 )
 from src.sessions.repository import Repository
@@ -386,14 +387,28 @@ def _segments_to_transcript(segments: list) -> tuple[str, float]:
     """Format transcript segments into a timestamped string and the max end time."""
     lines = []
     duration = 0.0
-    fallback_map = build_user_facing_speaker_map(_speaker_identity(segment) for segment in segments)
-    for segment in segments:
+    inferred_speakers = infer_strict_segment_speakers(segments)
+    fallback_map = build_user_facing_speaker_map(
+        (
+            (inferred or {}).get("speaker_cluster")
+            or _speaker_identity(segment)
+            or (inferred or {}).get("speaker")
+        )
+        for segment, inferred in zip(segments, inferred_speakers)
+    )
+    for segment, inferred in zip(segments, inferred_speakers):
         mins = int(segment.start_time // 60)
         secs = int(segment.start_time % 60)
         marker = " [IMPORTANT]" if segment.is_important else ""
+        effective_speaker = getattr(segment, "speaker", None) or (inferred or {}).get("speaker")
+        effective_raw_label = (
+            _speaker_identity(segment)
+            or (inferred or {}).get("speaker_cluster")
+            or (inferred or {}).get("speaker")
+        )
         speaker = resolve_user_facing_speaker_name(
-            getattr(segment, "speaker", None),
-            _speaker_identity(segment),
+            effective_speaker,
+            effective_raw_label,
             fallback_map,
         )
         speaker_prefix = f"{speaker}: " if speaker else ""

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from typing import Iterable, Sequence
 
 _GENERIC_SPEAKER_RE = re.compile(r"^SPEAKER_(\d+)$")
 _GENERIC_SPEAKER_TOKEN_RE = re.compile(r"\bSPEAKER_\d+\b")
@@ -65,6 +65,103 @@ def humanize_transcript_speaker_labels(transcript: str) -> tuple[str, dict[str, 
         return speaker_map.get(match.group(0), match.group(0))
 
     return _GENERIC_SPEAKER_TOKEN_RE.sub(replace, transcript), speaker_map
+
+
+def infer_strict_segment_speakers(
+    segments: Sequence[object],
+    *,
+    max_duration_seconds: float = 2.0,
+    max_gap_seconds: float = 1.0,
+) -> list[dict[str, str | None] | None]:
+    """Infer only very high-confidence missing speaker labels from surrounding context.
+
+    This is intentionally output-only and conservative: it only fills completely
+    unlabeled segments when the nearest labeled segment on each side points to
+    the same identity and the unlabeled segment is short with small gaps.
+    """
+
+    segment_list = list(segments)
+    inferred: list[dict[str, str | None] | None] = [None] * len(segment_list)
+
+    for index, segment in enumerate(segment_list):
+        if not _is_unlabeled_segment(segment):
+            continue
+
+        start_time = float(getattr(segment, "start_time", 0.0) or 0.0)
+        end_time = float(getattr(segment, "end_time", 0.0) or 0.0)
+        duration_seconds = end_time - start_time
+        if duration_seconds <= 0 or duration_seconds > max_duration_seconds:
+            continue
+
+        previous = _previous_labeled_segment(segment_list, index)
+        following = _next_labeled_segment(segment_list, index)
+        if previous is None or following is None:
+            continue
+
+        if not _same_identity(previous, following):
+            continue
+
+        left_gap = max(0.0, start_time - float(getattr(previous, "end_time", start_time) or start_time))
+        right_gap = max(0.0, float(getattr(following, "start_time", end_time) or end_time) - end_time)
+        if left_gap > max_gap_seconds or right_gap > max_gap_seconds:
+            continue
+
+        inferred[index] = {
+            "speaker": _preferred_display_name(previous) or _preferred_display_name(following),
+            "speaker_cluster": _preferred_raw_label(previous) or _preferred_raw_label(following),
+            "reason": "same_identity_on_both_sides_short_gap",
+        }
+
+    return inferred
+
+
+def _is_unlabeled_segment(segment: object) -> bool:
+    return not str(getattr(segment, "speaker", "") or "").strip() and not str(
+        getattr(segment, "speaker_cluster", "") or ""
+    ).strip()
+
+
+def _previous_labeled_segment(segments: Sequence[object], start_index: int) -> object | None:
+    for index in range(start_index - 1, -1, -1):
+        if not _is_unlabeled_segment(segments[index]):
+            return segments[index]
+    return None
+
+
+def _next_labeled_segment(segments: Sequence[object], start_index: int) -> object | None:
+    for index in range(start_index + 1, len(segments)):
+        if not _is_unlabeled_segment(segments[index]):
+            return segments[index]
+    return None
+
+
+def _same_identity(left: object, right: object) -> bool:
+    left_raw = _preferred_raw_label(left)
+    right_raw = _preferred_raw_label(right)
+    if left_raw and right_raw:
+        return left_raw == right_raw
+
+    left_name = _preferred_display_name(left)
+    right_name = _preferred_display_name(right)
+    return bool(left_name and right_name and left_name == right_name)
+
+
+def _preferred_raw_label(segment: object) -> str | None:
+    raw_label = str(getattr(segment, "speaker_cluster", None) or "").strip()
+    if raw_label:
+        return raw_label
+
+    fallback = str(getattr(segment, "speaker", None) or "").strip()
+    if fallback and not is_generic_speaker(fallback):
+        return None
+    return fallback or None
+
+
+def _preferred_display_name(segment: object) -> str | None:
+    display_name = str(getattr(segment, "speaker", None) or "").strip()
+    if display_name and not is_generic_speaker(display_name):
+        return display_name
+    return None
 
 
 def _alpha_suffix(index: int) -> str:

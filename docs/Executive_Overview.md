@@ -51,6 +51,7 @@ The final notes are saved as **Markdown files** directly into your Obsidian vaul
 | **GPU accelerated** | Uses your graphics card for fast transcription (a 30-minute meeting processes quickly) |
 | **Template-based** | 4 built-in meeting types (general meeting, strategic review, working session, custom) — each produces appropriately structured notes |
 | **Real-time progress** | You see transcription and summarization progress live |
+| **Human review controls** | You can name speakers manually, revise summaries, and choose between draft and saved versions before exporting |
 | **Works remotely** | Optional secure tunneling lets you use it from your phone or another location |
 
 ---
@@ -65,8 +66,9 @@ More specifically:
 1. **Record** in browser (works on desktop or mobile)
 2. **Audio saves** to your computer
 3. **Whisper AI** converts speech to text; speaker diarization identifies who said what
-4. **Local AI** generates structured meeting notes following your chosen template
-5. **Markdown file** lands in your Obsidian vault with summary, decisions, action items table, and full transcript
+4. **You can optionally review speakers and summary settings** in the workspace before finalizing output
+5. **Local AI** generates structured meeting notes following your chosen template
+6. **Markdown file** lands in your Obsidian vault with summary, decisions, action items table, and full transcript
 
 ---
 
