@@ -41,7 +41,7 @@ Thumbs.db
 
 # Project-specific
 data/
-src/data/
+src/data/*.db
 *.log
 logs/
 PLAN.md
@@ -61,4 +61,5 @@ htmlcov/
 .mypy_cache/
 
 # Local ops docs
-docs/HOST_OLLAMA_SETUP.md
+how-to-use-git.md
+scripts/backup_to_dropbox.sh

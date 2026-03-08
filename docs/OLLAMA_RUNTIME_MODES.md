@@ -71,7 +71,7 @@ If WSL Ollama is working well, keep it simple:
 
 If you want Windows-host Ollama instead:
 
-- follow [HOST_OLLAMA_SETUP.md](/home/ozzfa/sidekick/docs/HOST_OLLAMA_SETUP.md)
+- follow [host_ollama_setup.md](/home/ozzfa/sidekick/docs/host_ollama_setup.md)
 - make sure WSL is not also serving Ollama on the same port
 - verify from both WSL and PowerShell after the change
 

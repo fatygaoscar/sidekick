@@ -266,7 +266,7 @@ powershell.exe -NoProfile -Command "ollama ps"
 Detailed runtime guidance:
 
 - [Ollama Runtime Modes](/home/ozzfa/sidekick/docs/OLLAMA_RUNTIME_MODES.md)
-- [Host Ollama Setup](/home/ozzfa/sidekick/docs/HOST_OLLAMA_SETUP.md)
+- [Host Ollama Setup](/home/ozzfa/sidekick/docs/host_ollama_setup.md)
 
 ### Speaker Diarization Setup
 
@@ -316,6 +316,28 @@ All templates are editable before export from the workspace Settings tab.
 - The Settings tab is summary-only and follows the currently selected summary version by default.
 - Summary versions are labeled `vN (Draft)`, `vN (Latest)`, then descending `vN-1 ... v1`.
 - Desktop uses the polished tab-row hide/reveal motion; mobile uses a simpler direct-tracking path for smoother touch scrolling.
+
+## Backups
+
+If you want reliable recovery, the most important things to back up are:
+
+- `data/sidekick.db` — meetings, transcripts, summaries, speaker mappings, version history, and prompt audit fields
+- `data/audio/` — finalized source recordings for playback and reprocessing
+- your Obsidian vault — exported notes
+- `.env` — only in a private secure backup
+
+Things you usually do not need to back up:
+
+- `data/audio/chunks/`
+- `data/*.log`
+- `data/*.pid`
+- tunnel runtime files such as Cloudflare / ngrok state
+
+Recommended approach:
+
+- keep Sidekick's live `data/` folder where it is
+- back up copies or snapshots into Dropbox, another private repo, or encrypted cloud storage
+- avoid syncing the live SQLite file directly while the app is writing to it
 
 ## API
 
