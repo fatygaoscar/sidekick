@@ -192,7 +192,7 @@ class SidekickApp {
 
     _onDisconnected() {
         this.elements.connectionDot.classList.remove('connected');
-        this.elements.connectionText.textContent = 'Disconnected';
+        this.elements.connectionText.textContent = 'Ready';
     }
 
     _onState(state) {
@@ -417,7 +417,7 @@ class SidekickApp {
         this.resolveCaptureStopped = null;
         this.fallbackBlob = null;
         this.fallbackMimeType = null;
-        this.elements.statusText.textContent = 'Ready';
+        this.elements.statusText.textContent = '';
     }
 
     _resetLivePreview() {

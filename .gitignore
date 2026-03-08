@@ -38,6 +38,7 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+*:Zone.Identifier
 
 # Project-specific
 data/

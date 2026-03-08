@@ -262,10 +262,15 @@ body.main-page .status-bar {
     color: var(--text-dim);
 }
 
+.status-left:empty {
+    display: none;
+}
+
 .status-right {
     display: flex;
     align-items: center;
     gap: 8px;
+    margin-left: auto;
 }
 
 .connection-dot {
