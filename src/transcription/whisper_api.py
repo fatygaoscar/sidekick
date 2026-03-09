@@ -1,6 +1,7 @@
 """Cloud transcription using OpenAI Whisper API."""
 
 import io
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -8,7 +9,12 @@ from scipy.io import wavfile
 
 from config.settings import get_settings
 
-from .base import TranscriptionEngine, TranscriptionResult
+from .base import (
+    AlignedTranscriptSegment,
+    FileTranscriptionResult,
+    TranscriptionEngine,
+    TranscriptionResult,
+)
 
 ProgressCallback = Callable[[float, str], None]
 
@@ -113,6 +119,61 @@ class WhisperAPIEngine(TranscriptionEngine):
             end_time=end_time,
             language=response.language if hasattr(response, "language") else language,
             words=words,
+        )
+
+    async def transcribe_file(
+        self,
+        file_path: str | Path,
+        language: str | None = None,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> FileTranscriptionResult:
+        """Transcribe an audio file and normalize it into authoritative segment form."""
+        from faster_whisper.audio import decode_audio
+
+        resolved = Path(file_path)
+        audio = decode_audio(str(resolved), sampling_rate=16000)
+        duration_seconds = len(audio) / 16000 if len(audio) else 0.0
+        result = await self.transcribe(
+            audio=audio,
+            sample_rate=16000,
+            language=language,
+            progress_callback=progress_callback,
+            audio_duration=duration_seconds,
+        )
+
+        segments: list[AlignedTranscriptSegment] = []
+        if result.words:
+            words = [word for word in result.words if str(word.get("word", "")).strip()]
+            if words:
+                segments.append(
+                    AlignedTranscriptSegment(
+                        start=float(words[0].get("start", 0.0)),
+                        end=float(words[-1].get("end", duration_seconds)),
+                        text=result.text.strip(),
+                        speaker=None,
+                        speaker_cluster=None,
+                        words=words,
+                    )
+                )
+
+        if not segments and result.text.strip():
+            segments.append(
+                AlignedTranscriptSegment(
+                    start=result.start_time,
+                    end=result.end_time or duration_seconds,
+                    text=result.text.strip(),
+                    speaker=None,
+                    speaker_cluster=None,
+                    words=result.words,
+                )
+            )
+
+        return FileTranscriptionResult(
+            text=result.text.strip(),
+            duration_seconds=duration_seconds,
+            segments=segments,
+            confidence=result.confidence,
+            language=result.language,
         )
 
     def _array_to_wav_bytes(self, audio: np.ndarray, sample_rate: int) -> bytes:

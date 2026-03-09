@@ -1,6 +1,8 @@
 """Speaker diarization via pyannote.audio 3.1."""
 import logging
 
+from .audio_decode import decode_audio_to_waveform_dict
+
 logger = logging.getLogger(__name__)
 _pipeline = None
 
@@ -41,32 +43,36 @@ def _load_waveform(audio_path: str, duration_limit: float | None = None) -> dict
 
     Avoids the system-FFmpeg dependency that torchcodec requires.
     """
+    if duration_limit is None:
+        return decode_audio_to_waveform_dict(audio_path, sample_rate=_TARGET_SR)
+
     import av
-    import numpy as np
-    import torch
 
     resampler = av.audio.resampler.AudioResampler(
         format="fltp", layout="mono", rate=_TARGET_SR
     )
     chunks = []
-    total_samples = 0
-    
+
     with av.open(audio_path) as container:
+        last_frame_time = None
         for frame in container.decode(audio=0):
             # If duration limit is reached, stop decoding
             if duration_limit is not None and frame.time > duration_limit:
                 break
-                
+            last_frame_time = frame.time
             for out in resampler.resample(frame):
                 chunks.append(out.to_ndarray())
-        
+
         # Flush resampler unless we hit the limit
-        if duration_limit is None or frame.time <= duration_limit:
+        if last_frame_time is None or last_frame_time <= duration_limit:
             for out in resampler.resample(None):
                 chunks.append(out.to_ndarray())
 
     if not chunks:
         raise RuntimeError(f"No audio decoded from {audio_path}")
+
+    import numpy as np
+    import torch
 
     waveform = torch.from_numpy(np.concatenate(chunks, axis=1))
     return {"waveform": waveform, "sample_rate": _TARGET_SR}

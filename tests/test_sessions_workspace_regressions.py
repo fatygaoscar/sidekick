@@ -1,9 +1,16 @@
 """Regression tests for sessions workspace behavior."""
 
+import asyncio
 import importlib
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import AsyncMock
+import wave
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+
+from fastapi import HTTPException
 
 
 class SessionsWorkspaceRegressionTests(unittest.TestCase):
@@ -13,6 +20,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
     def setUpClass(cls):
         cls.sessions = importlib.import_module("src.api.routes.sessions")
         cls.export = importlib.import_module("src.api.routes.export")
+        cls.audio_clips = importlib.import_module("src.audio.clips")
 
     def test_sessions_router_imports_cleanly(self):
         self.assertTrue(hasattr(self.sessions, "UpdateRecordingSettingsRequest"))
@@ -150,6 +158,125 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
 
         self.assertFalse(self.export._speaker_review_blocks_summary(meeting))
 
+    def test_active_transcription_job_lookup_ignores_completed_jobs(self):
+        original_jobs = dict(self.export._TRANSCRIPTION_JOBS)
+        try:
+            self.export._TRANSCRIPTION_JOBS.clear()
+            active_job = self.export._create_transcription_job("session-1")
+            self.export._update_transcription_job(
+                active_job["job_id"],
+                status="running",
+                stage="transcribing",
+                message="Transcribing",
+            )
+
+            self.assertEqual(
+                self.export._find_active_transcription_job("session-1")["job_id"],
+                active_job["job_id"],
+            )
+
+            self.export._update_transcription_job(
+                active_job["job_id"],
+                status="completed",
+                stage="completed",
+                message="Transcription complete",
+            )
+
+            self.assertIsNone(self.export._find_active_transcription_job("session-1"))
+        finally:
+            self.export._TRANSCRIPTION_JOBS.clear()
+            self.export._TRANSCRIPTION_JOBS.update(original_jobs)
+
+    def test_start_transcription_job_reuses_existing_active_job(self):
+        original_jobs = dict(self.export._TRANSCRIPTION_JOBS)
+        try:
+            self.export._TRANSCRIPTION_JOBS.clear()
+            active_job = self.export._create_transcription_job("session-1")
+            self.export._update_transcription_job(
+                active_job["job_id"],
+                status="running",
+                stage="transcribing",
+                message="Transcribing",
+            )
+
+            async def get_session(_session_id):
+                return SimpleNamespace(id="session-1", meetings=[])
+
+            response = asyncio.run(
+                self.export.start_transcription_job(
+                    "session-1",
+                    repository=SimpleNamespace(get_session=get_session),
+                    transcription_manager=SimpleNamespace(),
+                )
+            )
+
+            self.assertEqual(response.job_id, active_job["job_id"])
+            self.assertEqual(response.status, "running")
+            self.assertEqual(len(self.export._TRANSCRIPTION_JOBS), 1)
+        finally:
+            self.export._TRANSCRIPTION_JOBS.clear()
+            self.export._TRANSCRIPTION_JOBS.update(original_jobs)
+
+    def test_revise_summary_draft_returns_updated_draft(self):
+        draft = SimpleNamespace(id="draft-1", status="draft", content="Original summary")
+        updated = SimpleNamespace(id="draft-1", content="Revised summary")
+        repository = SimpleNamespace(
+            get_summary=AsyncMock(return_value=draft),
+            update_summary=AsyncMock(return_value=updated),
+        )
+        summarization_manager = SimpleNamespace(
+            refine_summary=AsyncMock(return_value="Revised summary")
+        )
+
+        payload = asyncio.run(
+            self.export.revise_summary_draft(
+                "draft-1",
+                self.export.DraftReviseRequest(instruction="Tighten the takeaways."),
+                repository=repository,
+                summarization_manager=summarization_manager,
+            )
+        )
+
+        self.assertEqual(
+            payload,
+            {"draft_summary_id": "draft-1", "content": "Revised summary"},
+        )
+        summarization_manager.refine_summary.assert_awaited_once_with(
+            instruction="Tighten the takeaways.",
+            current_summary="Original summary",
+        )
+        repository.update_summary.assert_awaited_once_with(
+            "draft-1",
+            content="Revised summary",
+            source_type="ai_revised",
+        )
+
+    def test_revise_summary_draft_returns_conflict_when_draft_disappears(self):
+        draft = SimpleNamespace(id="draft-1", status="draft", content="Original summary")
+        repository = SimpleNamespace(
+            get_summary=AsyncMock(return_value=draft),
+            update_summary=AsyncMock(return_value=None),
+        )
+        summarization_manager = SimpleNamespace(
+            refine_summary=AsyncMock(return_value="Revised summary")
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(
+                self.export.revise_summary_draft(
+                    "draft-1",
+                    self.export.DraftReviseRequest(instruction="Tighten the takeaways."),
+                    repository=repository,
+                    summarization_manager=summarization_manager,
+                )
+            )
+
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(
+            ctx.exception.detail,
+            "Draft changed while AI revision was running. Reload the workspace and try again.",
+        )
+
     def test_workspace_transcript_humanizes_unresolved_speakers(self):
         segments = [
             SimpleNamespace(
@@ -176,6 +303,65 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
 
         self.assertEqual(transcript[0]["speaker"], "Attendee A")
         self.assertEqual(transcript[1]["speaker"], "Attendee B")
+
+    def test_speaker_cards_include_clip_url(self):
+        segments = [
+            SimpleNamespace(
+                id="seg-1",
+                start_time=12.5,
+                end_time=14.0,
+                text="Let's ship this Friday.",
+                speaker="SPEAKER_00",
+                speaker_cluster="SPEAKER_00",
+                is_important=False,
+            )
+        ]
+
+        cards = self.sessions._build_speaker_cards(segments, "session-1", "tv-1")
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(
+            cards[0]["clip_url"],
+            "/api/recordings/session-1/speaker-clips/SPEAKER_00/audio?transcript_version_id=tv-1",
+        )
+
+    def test_ensure_speaker_clip_generates_cached_wav(self):
+        session_id = "clip-test-session"
+        self.audio_clips.cleanup_speaker_clip_cache(session_id)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                source_path = Path(tmpdir) / "source.wav"
+                with wave.open(str(source_path), "wb") as wav_file:
+                    wav_file.setnchannels(1)
+                    wav_file.setsampwidth(2)
+                    wav_file.setframerate(16000)
+                    wav_file.writeframes(b"\x00\x00" * 16000)
+
+                clip_path = self.audio_clips.ensure_speaker_clip(
+                    audio_path=source_path,
+                    session_id=session_id,
+                    transcript_version_id="tv-1",
+                    speaker_key="SPEAKER_00",
+                    start_time=0.10,
+                    end_time=0.35,
+                )
+                cached_path = self.audio_clips.ensure_speaker_clip(
+                    audio_path=source_path,
+                    session_id=session_id,
+                    transcript_version_id="tv-1",
+                    speaker_key="SPEAKER_00",
+                    start_time=0.10,
+                    end_time=0.35,
+                )
+
+                self.assertEqual(clip_path, cached_path)
+                self.assertTrue(clip_path.exists())
+                with wave.open(str(clip_path), "rb") as wav_file:
+                    self.assertEqual(wav_file.getnchannels(), 1)
+                    self.assertEqual(wav_file.getframerate(), 16000)
+                    self.assertGreater(wav_file.getnframes(), 0)
+        finally:
+            self.audio_clips.cleanup_speaker_clip_cache(session_id)
 
     def test_workspace_transcript_marks_truly_unresolved_speakers_with_question_mark(self):
         segments = [

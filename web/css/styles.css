@@ -50,6 +50,18 @@ body {
     line-height: 1.6;
 }
 
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 body.main-page {
     position: fixed;
     inset: 0;
@@ -150,6 +162,10 @@ body.main-page .main-content {
     flex-direction: column;
     align-items: center;
     gap: 32px;
+}
+
+.main-upload-btn {
+    min-width: 168px;
 }
 
 .record-btn {
@@ -790,6 +806,202 @@ textarea.form-input {
     text-transform: uppercase;
 }
 
+.recordings-search-region {
+    padding: 24px 24px 0;
+}
+
+.recordings-search-shell {
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.recordings-search-form {
+    display: block;
+    margin: 0;
+}
+
+.recordings-search-group {
+    margin-bottom: 0;
+}
+
+.recordings-search-actions {
+    margin-top: 12px;
+}
+
+.recordings-search-input {
+    padding: 10px 12px;
+    font-size: 13px;
+}
+
+.recordings-search-input::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    cursor: pointer;
+    opacity: 0.7;
+    background:
+        linear-gradient(45deg, transparent 44%, var(--text-dim) 44%, var(--text-dim) 56%, transparent 56%),
+        linear-gradient(-45deg, transparent 44%, var(--text-dim) 44%, var(--text-dim) 56%, transparent 56%);
+}
+
+.recordings-search-button {
+    min-width: 120px;
+}
+
+.recordings-filter-toggle {
+    min-width: 96px;
+    white-space: nowrap;
+}
+
+.recordings-search-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    margin: 0;
+}
+
+.recordings-search-results {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.recordings-search-status,
+.recordings-search-answer,
+.recordings-search-error,
+.recordings-search-empty {
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg) 74%, var(--bg-elevated));
+    padding: 16px;
+}
+
+.recordings-search-status {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.recordings-search-status-title,
+.recordings-search-answer-label {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+}
+
+.recordings-search-status-copy,
+.recordings-search-answer-copy,
+.recordings-search-card-snippet,
+.recordings-search-empty,
+.recordings-search-error {
+    color: var(--text-dim);
+}
+
+.recordings-search-answer {
+    background: color-mix(in srgb, var(--bg) 76%, var(--bg-elevated));
+}
+
+.recordings-search-answer-muted {
+    background: color-mix(in srgb, var(--bg) 74%, var(--bg-elevated));
+}
+
+.recordings-search-answer-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.recordings-search-answer-confidence {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+
+.recordings-search-answer-copy {
+    color: var(--text);
+    line-height: 1.7;
+}
+
+.recordings-search-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.recordings-search-card {
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg) 78%, var(--bg-elevated));
+    padding: 10px 12px;
+}
+
+.recordings-search-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.recordings-search-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    align-items: center;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+
+.recordings-search-card-badges .workspace-badge {
+    padding: 2px 6px;
+    font-size: 10px;
+    line-height: 1.1;
+}
+
+.recordings-search-card-title {
+    margin-top: 0;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+}
+
+.recordings-search-card-snippet {
+    margin-top: 6px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text-dim);
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.recordings-search-card-footer {
+    margin-top: 10px;
+    display: flex;
+    justify-content: flex-start;
+}
+
+.search-open-btn {
+    color: var(--text-dim);
+    background: transparent;
+}
+
+.search-open-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
 .recordings-list {
     padding: 24px;
     display: flex;
@@ -1011,6 +1223,13 @@ textarea.form-input {
 .transcript-segment.important {
     border-left: 2px solid var(--recording);
     padding-left: 8px;
+}
+
+.transcript-segment-highlight {
+    background: color-mix(in srgb, #1d3a25 26%, transparent);
+    outline: 1px solid color-mix(in srgb, #7ce28d 42%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in srgb, #7ce28d 18%, transparent);
+    transition: background 0.2s ease, outline-color 0.2s ease;
 }
 
 /* Scrollbar */
@@ -1865,6 +2084,34 @@ textarea.form-input {
 }
 
 @media (max-width: 700px) {
+    .recordings-search-region {
+        padding: 16px 16px 0;
+    }
+
+    .recordings-search-shell {
+        padding: 12px 14px;
+    }
+
+    .recordings-search-filters {
+        grid-template-columns: 1fr;
+    }
+
+    .recordings-search-card-head {
+        flex-direction: column;
+    }
+
+    .recordings-search-actions {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
+
+    .recordings-search-card-footer .btn,
+    .recordings-search-button,
+    .recordings-filter-toggle {
+        width: 100%;
+    }
+
     .recordings-list {
         padding: 16px;
         gap: 10px;

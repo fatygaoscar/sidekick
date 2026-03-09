@@ -9,6 +9,7 @@ class SidekickApp {
     constructor() {
         this.state = {
             isRecording: false,
+            isUploadingFile: false,
             sessionId: null,
             lastSessionId: null,
             elapsedSeconds: 0,
@@ -39,6 +40,8 @@ class SidekickApp {
 
         this.elements = {
             recordBtn: document.getElementById('record-btn'),
+            uploadBtn: document.getElementById('upload-btn'),
+            uploadInput: document.getElementById('upload-input'),
             timer: document.getElementById('timer'),
             audioCanvas: document.getElementById('audio-canvas'),
             statusText: document.getElementById('status-text'),
@@ -63,6 +66,7 @@ class SidekickApp {
         this._initWebSocket();
         this._initAudioCapture();
         this._bindEvents();
+        this._syncPrimaryControls();
     }
 
     _initWebSocket() {
@@ -107,6 +111,8 @@ class SidekickApp {
 
     _bindEvents() {
         this.elements.recordBtn.addEventListener('click', () => this._toggleRecording());
+        this.elements.uploadBtn?.addEventListener('click', () => this._handleUploadClick());
+        this.elements.uploadInput?.addEventListener('change', (event) => this._handleUploadSelection(event));
 
         const armPageGuard = () => this._armMainPageHistoryGuard();
         window.addEventListener('pointerdown', armPageGuard, { passive: true, once: true });
@@ -114,7 +120,7 @@ class SidekickApp {
         window.addEventListener('keydown', armPageGuard, { once: true });
 
         window.addEventListener('beforeunload', (event) => {
-            if (!this.state.isRecording) {
+            if (!this.state.isRecording && !this.state.isUploadingFile) {
                 return;
             }
             event.preventDefault();
@@ -133,14 +139,16 @@ class SidekickApp {
 
         document.addEventListener('click', (event) => {
             const link = event.target.closest('a[href]');
-            if (!link || !this.state.isRecording) {
+            if (!link || (!this.state.isRecording && !this.state.isUploadingFile)) {
                 return;
             }
             if (link.target === '_blank' || link.hasAttribute('download')) {
                 return;
             }
             event.preventDefault();
-            this.elements.statusText.textContent = 'Stop recording before leaving this page';
+            this.elements.statusText.textContent = this.state.isUploadingFile
+                ? 'Wait for the upload to finish before leaving this page'
+                : 'Stop recording before leaving this page';
         });
 
         window.addEventListener('popstate', () => {
@@ -232,10 +240,51 @@ class SidekickApp {
     }
 
     async _toggleRecording() {
+        if (this.state.isUploadingFile) {
+            this.elements.statusText.textContent = 'Wait for the upload to finish';
+            return;
+        }
         if (this.state.isRecording) {
             await this._stopRecording();
         } else {
             await this._startRecording();
+        }
+    }
+
+    _syncPrimaryControls() {
+        if (this.elements.recordBtn) {
+            this.elements.recordBtn.disabled = this.state.isUploadingFile;
+        }
+        if (this.elements.uploadBtn) {
+            this.elements.uploadBtn.disabled = this.state.isRecording || this.state.isUploadingFile;
+            this.elements.uploadBtn.textContent = this.state.isUploadingFile ? 'Uploading...' : 'Upload File';
+        }
+    }
+
+    _handleUploadClick() {
+        if (this.state.isRecording) {
+            this.elements.statusText.textContent = 'Stop recording before uploading a file';
+            return;
+        }
+        if (this.state.isUploadingFile) {
+            return;
+        }
+        this.elements.uploadInput?.click();
+    }
+
+    async _handleUploadSelection(event) {
+        const input = event.target;
+        const file = input?.files?.[0];
+        if (!file) {
+            return;
+        }
+
+        try {
+            await this._startFileUpload(file);
+        } finally {
+            if (input) {
+                input.value = '';
+            }
         }
     }
 
@@ -249,6 +298,7 @@ class SidekickApp {
             await this.audioCapture.start();
             this.state.isRecording = true;
             this._armRecordingHistoryGuard();
+            this._syncPrimaryControls();
             this.elements.recordBtn.classList.add('recording');
             this.elements.recordBtn.textContent = 'Stop';
             this.elements.recordBtn.setAttribute('aria-pressed', 'true');
@@ -282,6 +332,7 @@ class SidekickApp {
             this.state.isRecording = false;
             this._disarmRecordingHistoryGuard();
             this.audioCapture.stop();
+            this._syncPrimaryControls();
             this.elements.recordBtn.classList.remove('recording');
             this.elements.recordBtn.textContent = 'Record';
             this.elements.recordBtn.setAttribute('aria-pressed', 'false');
@@ -307,6 +358,7 @@ class SidekickApp {
 
         this.state.isRecording = false;
         this._disarmRecordingHistoryGuard();
+        this._syncPrimaryControls();
         this.elements.recordBtn.classList.remove('recording');
         this.elements.recordBtn.textContent = 'Record';
         this.elements.recordBtn.setAttribute('aria-pressed', 'false');
@@ -339,6 +391,259 @@ class SidekickApp {
             });
             this._handleWorkspaceOpenFailure(sessionId, error);
         }
+    }
+
+    async _startFileUpload(file) {
+        if (this.state.isRecording) {
+            this.elements.statusText.textContent = 'Stop recording before uploading a file';
+            return;
+        }
+        if (this.state.isUploadingFile) {
+            return;
+        }
+
+        const extension = this._inferUploadExtension(file);
+        if (!this._isSupportedUpload(file, extension)) {
+            this.elements.statusText.textContent = 'Unsupported file type';
+            alert('Unsupported file type. Choose MP3, WAV, M4A, or MP4.');
+            return;
+        }
+
+        let sessionId = null;
+        this.state.isUploadingFile = true;
+        this._syncPrimaryControls();
+        this.elements.statusText.textContent = 'Preparing upload...';
+
+        try {
+            sessionId = await this._createUploadSession();
+            this.state.sessionId = sessionId;
+            this.state.lastSessionId = sessionId;
+
+            this.elements.statusText.textContent = 'Uploading file...';
+            await this._uploadImportedAudio(sessionId, file, extension);
+            await this._seedUploadedRecordingTitle(sessionId, file.name);
+            await this._finalizeUploadSession(sessionId);
+
+            this.elements.statusText.textContent = 'Opening workspace...';
+            await this.workspace.open(sessionId, {
+                autoStartTranscription: false,
+                transcriptionStartMode: 'manual',
+            });
+            this.elements.statusText.textContent = 'Review upload';
+        } catch (error) {
+            console.error('Failed to upload file:', error);
+            if (sessionId) {
+                await this._cleanupFailedUploadSession(sessionId);
+            }
+            this.elements.statusText.textContent = 'Upload failed';
+            alert(error?.message || 'Failed to upload file');
+        } finally {
+            this.state.isUploadingFile = false;
+            this._syncPrimaryControls();
+        }
+    }
+
+    async _createUploadSession() {
+        let timezoneName = null;
+        try {
+            timezoneName = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+        } catch (_error) {
+            timezoneName = null;
+        }
+
+        const payload = await window.SidekickNetwork.json('/api/sessions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                mode: 'work',
+                submode: null,
+                timezone_name: timezoneName,
+                timezone_offset_minutes: new Date().getTimezoneOffset(),
+            }),
+        }, {
+            timeoutMs: 15000,
+            retries: 1,
+            networkErrorMessage: 'Network request failed while creating upload session',
+            httpErrorMessage: 'Failed to create upload session',
+            logLabel: 'upload:create_session',
+        });
+
+        if (!payload?.id) {
+            throw new Error('Failed to create upload session');
+        }
+
+        return payload.id;
+    }
+
+    async _uploadImportedAudio(sessionId, file, extension) {
+        const mimeType = this._uploadMimeType(file, extension);
+        const response = await window.SidekickNetwork.request(`/api/recordings/${sessionId}/audio`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': mimeType,
+                'X-Upload-Extension': extension,
+            },
+            body: file,
+        }, {
+            timeoutMs: 600000,
+            retries: 0,
+            networkErrorMessage: 'Network request failed while uploading file',
+            logLabel: 'upload:file',
+        });
+
+        if (!response.ok) {
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload.detail || 'Failed to upload file');
+        }
+    }
+
+    async _seedUploadedRecordingTitle(sessionId, filename) {
+        const title = this._deriveTitleFromFilename(filename);
+        if (!title) {
+            return;
+        }
+
+        try {
+            await window.SidekickNetwork.json(`/api/recordings/${sessionId}/settings`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    title,
+                }),
+            }, {
+                timeoutMs: 10000,
+                retries: 0,
+                networkErrorMessage: 'Network request failed while naming uploaded file',
+                httpErrorMessage: 'Failed to update uploaded recording title',
+                logLabel: 'upload:title',
+            });
+        } catch (error) {
+            console.warn('Failed to seed uploaded recording title:', error?.message || error);
+        }
+    }
+
+    async _finalizeUploadSession(sessionId) {
+        try {
+            const response = await window.SidekickNetwork.request('/api/sessions/current', {
+                method: 'DELETE',
+            }, {
+                timeoutMs: 10000,
+                retries: 0,
+                networkErrorMessage: 'Network request failed while finalizing upload session',
+                logLabel: 'upload:end_session',
+            });
+            if (!response.ok && response.status !== 404) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            this.state.sessionId = null;
+        } catch (error) {
+            console.warn('Failed to end upload session cleanly:', {
+                sessionId,
+                message: error?.message || 'Failed to end upload session',
+            });
+        }
+    }
+
+    async _cleanupFailedUploadSession(sessionId) {
+        try {
+            const response = await window.SidekickNetwork.request(`/api/recordings/${sessionId}`, {
+                method: 'DELETE',
+            }, {
+                timeoutMs: 10000,
+                retries: 0,
+                networkErrorMessage: 'Network request failed while cleaning up failed upload',
+                logLabel: 'upload:cleanup',
+            });
+            if (!response.ok && response.status !== 404) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+        } catch (cleanupError) {
+            console.warn('Failed to clean up failed upload session:', {
+                sessionId,
+                message: cleanupError?.message || 'Cleanup failed',
+            });
+        }
+    }
+
+    _inferUploadExtension(file) {
+        const filename = String(file?.name || '').toLowerCase();
+        if (filename.endsWith('.wav')) {
+            return 'wav';
+        }
+        if (filename.endsWith('.mp3')) {
+            return 'mp3';
+        }
+        if (filename.endsWith('.m4a')) {
+            return 'm4a';
+        }
+        if (filename.endsWith('.mp4')) {
+            return 'mp4';
+        }
+
+        const fileType = String(file?.type || '').toLowerCase();
+        if (fileType.includes('audio/wav') || fileType.includes('audio/x-wav')) {
+            return 'wav';
+        }
+        if (fileType.includes('audio/mpeg') || fileType.includes('audio/mp3')) {
+            return 'mp3';
+        }
+        if (fileType.includes('video/mp4')) {
+            return 'mp4';
+        }
+        if (fileType.includes('audio/mp4') || fileType.includes('audio/x-m4a') || fileType.includes('audio/m4a')) {
+            return 'm4a';
+        }
+        return '';
+    }
+
+    _isSupportedUpload(file, extension) {
+        const supportedExtensions = new Set(['wav', 'mp3', 'm4a', 'mp4']);
+        if (supportedExtensions.has(extension)) {
+            return true;
+        }
+
+        const fileType = String(file?.type || '').toLowerCase();
+        return (
+            fileType.includes('audio/wav')
+            || fileType.includes('audio/x-wav')
+            || fileType.includes('audio/mpeg')
+            || fileType.includes('audio/mp3')
+            || fileType.includes('audio/mp4')
+            || fileType.includes('audio/x-m4a')
+            || fileType.includes('video/mp4')
+        );
+    }
+
+    _uploadMimeType(file, extension) {
+        const fileType = String(file?.type || '').trim();
+        if (fileType) {
+            return fileType;
+        }
+        if (extension === 'wav') {
+            return 'audio/wav';
+        }
+        if (extension === 'mp3') {
+            return 'audio/mpeg';
+        }
+        if (extension === 'mp4') {
+            return 'video/mp4';
+        }
+        if (extension === 'm4a') {
+            return 'audio/mp4';
+        }
+        return 'application/octet-stream';
+    }
+
+    _deriveTitleFromFilename(filename) {
+        const normalized = String(filename || '').trim();
+        if (!normalized) {
+            return '';
+        }
+        return normalized.replace(/\.[^.]+$/, '').trim();
     }
 
     _startTimer() {
@@ -416,6 +721,7 @@ class SidekickApp {
             preserveLastSessionId = false,
             statusText = '',
         } = options;
+        this.state.isUploadingFile = false;
         this.state.elapsedSeconds = 0;
         this.state.recordingStartTime = null;
         this._updateTimerDisplay();
@@ -435,6 +741,7 @@ class SidekickApp {
         this.fallbackBlob = null;
         this.fallbackMimeType = null;
         this.elements.statusText.textContent = statusText;
+        this._syncPrimaryControls();
     }
 
     _resetLivePreview() {

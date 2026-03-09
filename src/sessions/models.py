@@ -37,6 +37,9 @@ class Session(Base):
     segments: Mapped[list["TranscriptSegment"]] = relationship(
         "TranscriptSegment", back_populates="session", cascade="all, delete-orphan"
     )
+    transcript_versions: Mapped[list["TranscriptVersion"]] = relationship(
+        "TranscriptVersion", back_populates="session", cascade="all, delete-orphan"
+    )
     important_markers: Mapped[list["ImportantMarker"]] = relationship(
         "ImportantMarker", back_populates="session", cascade="all, delete-orphan"
     )
@@ -64,6 +67,46 @@ class Meeting(Base):
     summaries: Mapped[list["Summary"]] = relationship(
         "Summary", back_populates="meeting", cascade="all, delete-orphan"
     )
+    transcript_versions: Mapped[list["TranscriptVersion"]] = relationship(
+        "TranscriptVersion", back_populates="meeting", cascade="all, delete-orphan"
+    )
+
+
+class TranscriptVersion(Base):
+    """Versioned transcript workspace state for a recording."""
+
+    __tablename__ = "transcript_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), nullable=False)
+    meeting_id: Mapped[str] = mapped_column(String(36), ForeignKey("meetings.id"), nullable=False)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    parent_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("transcript_versions.id"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ready")
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="initial_transcription")
+    transcription_backend: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    transcription_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    diarization_backend: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    diarization_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    template_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    custom_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    speaker_review_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    speaker_review_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    session: Mapped["Session"] = relationship("Session", back_populates="transcript_versions")
+    meeting: Mapped["Meeting"] = relationship("Meeting", back_populates="transcript_versions")
+    segments: Mapped[list["TranscriptSegment"]] = relationship(
+        "TranscriptSegment", back_populates="transcript_version"
+    )
+    summaries: Mapped[list["Summary"]] = relationship(
+        "Summary", back_populates="transcript_version"
+    )
 
 
 class TranscriptSegment(Base):
@@ -76,6 +119,9 @@ class TranscriptSegment(Base):
     meeting_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("meetings.id"), nullable=True
     )
+    transcript_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("transcript_versions.id"), nullable=True
+    )
     text: Mapped[str] = mapped_column(Text, nullable=False)
     start_time: Mapped[float] = mapped_column(Float, nullable=False)
     end_time: Mapped[float] = mapped_column(Float, nullable=False)
@@ -87,6 +133,9 @@ class TranscriptSegment(Base):
 
     # Relationships
     session: Mapped["Session"] = relationship("Session", back_populates="segments")
+    transcript_version: Mapped[Optional["TranscriptVersion"]] = relationship(
+        "TranscriptVersion", back_populates="segments"
+    )
 
 
 class ImportantMarker(Base):
@@ -114,6 +163,9 @@ class Summary(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     meeting_id: Mapped[str] = mapped_column(String(36), ForeignKey("meetings.id"), nullable=False)
+    transcript_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("transcript_versions.id"), nullable=True
+    )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     backend: Mapped[str] = mapped_column(String(50), nullable=False)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -136,9 +188,13 @@ class Summary(Base):
     attendees_snapshot: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     saved_to_obsidian_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     obsidian_relative_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    workflow_data_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Relationships
     meeting: Mapped["Meeting"] = relationship("Meeting", back_populates="summaries")
+    transcript_version: Mapped[Optional["TranscriptVersion"]] = relationship(
+        "TranscriptVersion", back_populates="summaries"
+    )
 
 
 class StructuredItem(Base):

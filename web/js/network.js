@@ -45,47 +45,58 @@
         const resolvedUrl = resolveUrl(url);
         const method = options.method || 'GET';
         let lastError = null;
+        const requestUrls = [url];
+        if (resolvedUrl !== url) {
+            requestUrls.push(resolvedUrl);
+        }
 
         for (let attempt = 0; attempt <= retries; attempt += 1) {
-            const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-            const timeoutId = controller
-                ? window.setTimeout(() => controller.abort(), timeoutMs)
-                : null;
+            for (let urlIndex = 0; urlIndex < requestUrls.length; urlIndex += 1) {
+                const requestUrl = requestUrls[urlIndex];
+                const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+                const timeoutId = controller
+                    ? window.setTimeout(() => controller.abort(), timeoutMs)
+                    : null;
 
-            try {
-                const response = await fetch(resolvedUrl, {
-                    credentials: 'same-origin',
-                    cache: 'no-store',
-                    ...options,
-                    signal: controller ? controller.signal : options.signal,
-                });
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
+                try {
+                    const response = await fetch(requestUrl, {
+                        credentials: 'same-origin',
+                        cache: 'no-store',
+                        ...options,
+                        signal: controller ? controller.signal : options.signal,
+                    });
+                    if (timeoutId) {
+                        clearTimeout(timeoutId);
+                    }
+                    return response;
+                } catch (error) {
+                    if (timeoutId) {
+                        clearTimeout(timeoutId);
+                    }
+
+                    lastError = new Error(normalizeErrorMessage(error, networkErrorMessage));
+                    console.warn(`[${logLabel}] network failure`, {
+                        url,
+                        resolvedUrl: requestUrl,
+                        method,
+                        attempt: attempt + 1,
+                        retries,
+                        message: lastError.message,
+                    });
+
+                    if (urlIndex < requestUrls.length - 1) {
+                        continue;
+                    }
                 }
-                return response;
-            } catch (error) {
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
-                }
-
-                lastError = new Error(normalizeErrorMessage(error, networkErrorMessage));
-                console.warn(`[${logLabel}] network failure`, {
-                    url,
-                    resolvedUrl,
-                    method,
-                    attempt: attempt + 1,
-                    retries,
-                    message: lastError.message,
-                });
-
-                if (!retryOnNetworkError || attempt === retries) {
-                    throw lastError;
-                }
-
-                const backoffIndex = Math.min(attempt, retryBackoffMs.length - 1);
-                const delayMs = retryBackoffMs[backoffIndex] || retryBackoffMs[retryBackoffMs.length - 1] || 300;
-                await sleep(delayMs);
             }
+
+            if (!retryOnNetworkError || attempt === retries) {
+                throw lastError;
+            }
+
+            const backoffIndex = Math.min(attempt, retryBackoffMs.length - 1);
+            const delayMs = retryBackoffMs[backoffIndex] || retryBackoffMs[retryBackoffMs.length - 1] || 300;
+            await sleep(delayMs);
         }
 
         throw lastError || new Error(networkErrorMessage);

@@ -38,12 +38,15 @@ from src.audio.storage import (
     get_session_audio_candidates,
     get_session_audio_path,
     media_type_for_path,
+    normalize_audio_extension,
     write_chunk,
     write_session_chunk_meta,
 )
+from src.audio.clips import cleanup_speaker_clip_cache, ensure_speaker_clip
 from src.sessions.manager import SessionManager
 from src.sessions.repository import Repository, UNSET
 from src.summarization.manager import SummarizationManager
+from src.summarization.prompts import DEFAULT_TEMPLATE_KEY, normalize_template_key
 
 
 router = APIRouter()
@@ -164,11 +167,28 @@ def _transcript_requires_speaker_review(segments: list) -> bool:
     return len(unresolved) > 1
 
 
+def _serialize_transcript_version(version, latest_version_id: str | None) -> dict:
+    return {
+        "id": str(version.id),
+        "version_number": int(version.version_number),
+        "label": f"v{version.version_number}",
+        "is_latest": str(version.id) == str(latest_version_id) if latest_version_id else False,
+        "status": version.status,
+        "source_type": version.source_type,
+        "created_at": to_utc_iso(version.created_at),
+    }
+
+
 def _serialize_summary(summary, meeting=None) -> dict:
     out_of_date_reason = _summary_out_of_date_reason(meeting, summary) if meeting else None
     return {
         "id": str(summary.id),
         "meeting_id": str(summary.meeting_id),
+        "transcript_version_id": (
+            str(getattr(summary, "transcript_version_id", None))
+            if getattr(summary, "transcript_version_id", None)
+            else None
+        ),
         "content": summary.content,
         "backend": summary.backend,
         "model": summary.model,
@@ -228,7 +248,11 @@ def _serialize_transcript_segments(segments: list) -> list[dict]:
     return transcript_lines
 
 
-def _build_speaker_cards(segments: list, session_id: str) -> list[dict]:
+def _build_speaker_cards(
+    segments: list,
+    session_id: str,
+    transcript_version_id: str | None = None,
+) -> list[dict]:
     grouped: dict[str, list] = {}
     for segment in segments:
         speaker_cluster = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
@@ -250,7 +274,15 @@ def _build_speaker_cards(segments: list, session_id: str) -> list[dict]:
                 "preview_text": first.text[:160],
                 "clip_start": float(first.start_time),
                 "clip_end": float(first.start_time) + clip_duration,
-                "audio_url": f"/api/recordings/{session_id}/audio",
+                "clip_url": (
+                    f"/api/recordings/{session_id}/speaker-clips/"
+                    f"{urllib.parse.quote(str(speaker_cluster), safe='')}/audio"
+                    + (
+                        f"?transcript_version_id={urllib.parse.quote(str(transcript_version_id), safe='')}"
+                        if transcript_version_id
+                        else ""
+                    )
+                ),
                 "needs_name": is_generic_speaker(speaker_cluster)
                 and (not display_name or display_name == speaker_cluster),
             }
@@ -262,19 +294,22 @@ def _summary_out_of_date_reason(meeting, summary) -> str | None:
     if not summary:
         return None
     if (
-        meeting.speaker_review_required
+        meeting
+        and meeting.speaker_review_required
         and meeting.speaker_review_completed_at
         and summary.created_at < meeting.speaker_review_completed_at
     ):
         return "Speaker assignments changed after this summary was generated."
-    meeting_template_key = meeting.template_key or "meeting"
+    meeting_template_key = normalize_template_key(
+        (meeting.template_key or DEFAULT_TEMPLATE_KEY) if meeting else DEFAULT_TEMPLATE_KEY
+    )
     if summary.template_key:
-        if summary.template_key != meeting_template_key:
+        if normalize_template_key(summary.template_key) != meeting_template_key:
             return "Summary settings changed to a different template."
-    elif meeting_template_key != "meeting":
+    elif meeting_template_key != DEFAULT_TEMPLATE_KEY:
         return "Summary settings changed to a different template."
     summary_prompt = _normalize_optional_text(summary.custom_prompt)
-    meeting_prompt = _normalize_optional_text(meeting.custom_prompt)
+    meeting_prompt = _normalize_optional_text(meeting.custom_prompt if meeting else None)
     if (summary_prompt or meeting_prompt) and summary_prompt != meeting_prompt:
         return "Summary prompt settings changed after this summary was generated."
     return None
@@ -293,13 +328,19 @@ def _build_recording_workspace_state(
     latest_saved_summary,
 ) -> dict:
     current_summary = draft_summary or latest_saved_summary
-    summary_out_of_date_reason = _summary_out_of_date_reason(meeting, current_summary) if meeting else None
+    summary_out_of_date_reason = (
+        _summary_out_of_date_reason(meeting, current_summary)
+        if meeting
+        else None
+    )
     return {
-        "has_transcription": bool(session.has_transcription),
+        "has_transcription": bool(meeting and session.has_transcription),
         "requires_speaker_review": bool(
-            meeting and meeting.speaker_review_required and meeting.speaker_review_completed_at is None
+            meeting
+            and meeting.speaker_review_required
+            and meeting.speaker_review_completed_at is None
         ),
-        "can_generate_summary": bool(session.has_transcription),
+        "can_generate_summary": bool(meeting and session.has_transcription),
         "has_unsaved_draft": draft_summary is not None,
         "summary_out_of_date": summary_out_of_date_reason is not None,
         "summary_out_of_date_reason": summary_out_of_date_reason,
@@ -661,10 +702,12 @@ class UpdateRecordingSettingsRequest(BaseModel):
     title: Optional[str] = None
     template_key: Optional[str] = None
     custom_prompt: Optional[str] = None
+    transcript_version_id: Optional[str] = None
 
 
 class UpdateSpeakerAssignmentsRequest(BaseModel):
     assignments: dict[str, str]
+    transcript_version_id: Optional[str] = None
 
 
 @router.get("/recordings", response_model=List[RecordingResponse])
@@ -707,6 +750,7 @@ async def list_recordings(
 @router.get("/recordings/{session_id}/workspace")
 async def get_recording_workspace(
     session_id: str,
+    transcript_version_id: Optional[str] = None,
     repository: Repository = Depends(get_repository),
 ):
     """Return the unified recording workspace state for new and past recordings."""
@@ -718,16 +762,35 @@ async def get_recording_workspace(
     if not meeting:
         raise HTTPException(status_code=400, detail="No meeting found for this recording")
 
-    segments = await repository.get_segments(session_id=session_id)
-    if session.has_transcription and segments:
+    versions = await repository.ensure_transcript_versions(session_id)
+    active_version = None
+    if transcript_version_id:
+        active_version = await repository.get_transcript_version_for_session(session_id, transcript_version_id)
+    if active_version is None:
+        active_version = await repository.get_latest_transcript_version(session_id)
+    latest_version = await repository.get_latest_transcript_version(session_id, include_processing=True)
+
+    segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=active_version.id if active_version else None,
+    )
+    if active_version and session.has_transcription and segments:
         inferred_requires_review = _transcript_requires_speaker_review(segments)
-        if inferred_requires_review and not meeting.speaker_review_required:
-            meeting = await repository.update_meeting_settings(
-                meeting.id,
-                speaker_review_required=True,
+        if inferred_requires_review != bool(active_version.speaker_review_required):
+            active_version = await repository.update_transcript_version(
+                active_version.id,
+                speaker_review_required=inferred_requires_review,
             )
-    saved_summaries = await repository.get_summaries(meeting.id, status="saved")
-    draft_summary = await repository.get_draft_summary(meeting.id)
+
+    saved_summaries = await repository.get_summaries(
+        meeting.id,
+        status="saved",
+        transcript_version_id=active_version.id if active_version else None,
+    )
+    draft_summary = await repository.get_draft_summary(
+        meeting.id,
+        transcript_version_id=active_version.id if active_version else None,
+    )
     latest_saved_summary = saved_summaries[0] if saved_summaries else None
 
     duration_seconds = 0
@@ -790,7 +853,11 @@ async def get_recording_workspace(
                 f"query={urllib.parse.quote(search_query)}"
             )
 
-    speaker_cards = _build_speaker_cards(segments, session_id) if session.has_transcription else []
+    speaker_cards = _build_speaker_cards(
+        segments,
+        session_id,
+        active_version.id if active_version else None,
+    ) if session.has_transcription else []
 
     return {
         "recording": {
@@ -815,29 +882,54 @@ async def get_recording_workspace(
             "ended_at": to_utc_iso(session.ended_at),
             "duration_seconds": duration_seconds,
             "segment_count": len(segments),
-            "has_transcription": bool(session.has_transcription),
+            "has_transcription": bool(active_version and session.has_transcription),
             "has_audio": audio_path is not None,
             "audio_url": f"/api/recordings/{session.id}/audio" if audio_path else None,
             "audio_download_url": (
                 f"/api/recordings/{session.id}/audio?download=true" if audio_path else None
             ),
         },
+        "debug_retranscribe_enabled": bool(get_settings().enable_debug_retranscribe),
+        "transcript_versions": [
+            _serialize_transcript_version(version, latest_version.id if latest_version else None)
+            for version in versions
+            if version.status != "failed"
+        ],
+        "active_transcript_version": (
+            _serialize_transcript_version(active_version, latest_version.id if latest_version else None)
+            if active_version
+            else None
+        ),
         "settings": {
             "title": meeting.title,
-            "template_key": meeting.template_key or "meeting",
-            "custom_prompt": meeting.custom_prompt,
+            "template_key": (
+                normalize_template_key(
+                    (active_version.template_key if active_version else None)
+                    or meeting.template_key
+                    or DEFAULT_TEMPLATE_KEY
+                )
+            ),
+            "custom_prompt": active_version.custom_prompt if active_version else meeting.custom_prompt,
         },
         "speaker_review": {
-            "required": bool(meeting.speaker_review_required),
-            "completed": (not meeting.speaker_review_required)
-            or meeting.speaker_review_completed_at is not None,
-            "completed_at": to_utc_iso(meeting.speaker_review_completed_at),
-            "speakers": speaker_cards,
+            "required": bool(active_version.speaker_review_required) if active_version else False,
+            "completed": (
+                True
+                if not active_version
+                else (not active_version.speaker_review_required)
+                or active_version.speaker_review_completed_at is not None
+            ),
+            "completed_at": to_utc_iso(active_version.speaker_review_completed_at) if active_version else None,
+            "speakers": _build_speaker_cards(
+                segments,
+                session_id,
+                active_version.id if active_version else None,
+            ) if active_version and session.has_transcription else [],
         },
-        "transcript": _serialize_transcript_segments(segments) if session.has_transcription else [],
-        "draft_summary": _serialize_summary(draft_summary, meeting) if draft_summary else None,
-        "saved_summaries": [_serialize_summary(summary, meeting) for summary in saved_summaries],
-        "active_summary": _serialize_summary(draft_summary or latest_saved_summary, meeting)
+        "transcript": _serialize_transcript_segments(segments) if active_version and session.has_transcription else [],
+        "draft_summary": _serialize_summary(draft_summary, active_version) if draft_summary else None,
+        "saved_summaries": [_serialize_summary(summary, active_version) for summary in saved_summaries],
+        "active_summary": _serialize_summary(draft_summary or latest_saved_summary, active_version)
         if (draft_summary or latest_saved_summary)
         else None,
         "obsidian": {
@@ -848,7 +940,7 @@ async def get_recording_workspace(
         },
         "state": _build_recording_workspace_state(
             session,
-            meeting,
+            active_version,
             segments,
             saved_summaries,
             draft_summary,
@@ -886,34 +978,68 @@ async def update_recording_settings(
             else None
         )
 
-    updated = await repository.update_meeting_settings(
-        meeting.id,
-        title=normalized_title,
-        template_key=normalized_template_key,
-        custom_prompt=normalized_custom_prompt,
-    )
+    if request.transcript_version_id:
+        version = await repository.get_transcript_version_for_session(session_id, request.transcript_version_id)
+        if not version:
+            raise HTTPException(status_code=404, detail="Transcript version not found")
+    else:
+        version = await repository.get_latest_transcript_version(session_id)
+
+    if version:
+        updated = await repository.update_meeting_settings(
+            meeting.id,
+            title=normalized_title,
+        )
+        version = await repository.update_transcript_version(
+            version.id,
+            template_key=normalized_template_key if "template_key" in provided_fields else UNSET,
+            custom_prompt=normalized_custom_prompt if "custom_prompt" in provided_fields else UNSET,
+        )
+    else:
+        updated = await repository.update_meeting_settings(
+            meeting.id,
+            title=normalized_title,
+            template_key=normalized_template_key,
+            custom_prompt=normalized_custom_prompt,
+        )
     return {
         "success": True,
         "meeting_id": updated.id,
         "title": updated.title,
-        "template_key": updated.template_key,
-        "custom_prompt": updated.custom_prompt,
+        "template_key": (version.template_key if version else updated.template_key),
+        "custom_prompt": (version.custom_prompt if version else updated.custom_prompt),
     }
 
 
 @router.get("/recordings/{session_id}/speakers")
 async def get_recording_speakers(
     session_id: str,
+    transcript_version_id: Optional[str] = None,
     repository: Repository = Depends(get_repository),
 ):
     """Return speaker cards for the workspace speaker-review step."""
     session = await repository.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Recording not found")
-    segments = await repository.get_segments(session_id=session_id)
+    versions = await repository.ensure_transcript_versions(session_id)
+    active_version = None
+    if transcript_version_id:
+        active_version = await repository.get_transcript_version_for_session(session_id, transcript_version_id)
+        if active_version is None:
+            raise HTTPException(status_code=404, detail="Transcript version not found")
+    if active_version is None and versions:
+        active_version = await repository.get_latest_transcript_version(session_id)
+    segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=active_version.id if active_version else None,
+    )
     return {
         "audio_url": f"/api/recordings/{session_id}/audio",
-        "speakers": _build_speaker_cards(segments, session_id),
+        "speakers": _build_speaker_cards(
+            segments,
+            session_id,
+            active_version.id if active_version else None,
+        ),
     }
 
 
@@ -928,11 +1054,19 @@ async def update_recording_speakers(
     if not session:
         raise HTTPException(status_code=404, detail="Recording not found")
 
-    meeting = await repository.get_primary_meeting(session_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
+    versions = await repository.ensure_transcript_versions(session_id)
+    active_version = None
+    if request.transcript_version_id:
+        active_version = await repository.get_transcript_version_for_session(session_id, request.transcript_version_id)
+    if active_version is None and versions:
+        active_version = await repository.get_latest_transcript_version(session_id)
+    if not active_version:
+        raise HTTPException(status_code=404, detail="Transcript version not found")
 
-    segments = await repository.get_segments(session_id=session_id)
+    segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=active_version.id,
+    )
     updates: dict[str, str | None] = {}
     for segment in segments:
         speaker_cluster = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
@@ -945,8 +1079,8 @@ async def update_recording_speakers(
     if updates:
         await repository.update_segments_speakers(updates)
 
-    await repository.update_meeting_settings(
-        meeting.id,
+    await repository.update_transcript_version(
+        active_version.id,
         speaker_review_required=_transcript_requires_speaker_review(segments),
         speaker_review_completed_at=datetime.utcnow(),
     )
@@ -1117,6 +1251,7 @@ async def delete_recording(
     clear_session_chunk_upload_state(session_id)
     # Clear new chunk storage (all clients)
     cleanup_chunk_storage(session_id)
+    cleanup_speaker_clip_cache(session_id)
     return {"status": "deleted", "session_id": session_id}
 
 
@@ -1131,7 +1266,10 @@ async def get_recording(
         raise HTTPException(status_code=404, detail="Recording not found")
 
     # Get segments for this session
-    segments = await repository.get_segments(session_id=session_id)
+    segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=active_version.id if active_version else None,
+    )
 
     # Get meetings and their summaries
     meetings = session.meetings if hasattr(session, 'meetings') else []
@@ -1316,13 +1454,20 @@ async def upload_recording_audio(
     if not body:
         raise HTTPException(status_code=400, detail="Audio payload is empty")
 
-    extension = extension_from_content_type(request.headers.get("content-type", ""))
+    requested_extension = normalize_audio_extension(
+        request.headers.get("x-upload-extension"),
+        default="",
+    )
+    extension = requested_extension or extension_from_content_type(
+        request.headers.get("content-type", "")
+    )
 
     audio_dir = get_audio_dir()
     # Clear old sequential append state
     clear_session_chunk_upload_state(session_id)
     # Clear new chunk storage (all clients)
     cleanup_chunk_storage(session_id)
+    cleanup_speaker_clip_cache(session_id)
     # Remove any existing finalized audio
     for existing in get_session_audio_candidates(session_id):
         existing.unlink()
@@ -1435,6 +1580,8 @@ async def finalize_recording_audio(
     if not final_path:
         raise HTTPException(status_code=400, detail="Failed to assemble chunks")
 
+    cleanup_speaker_clip_cache(session_id)
+
     return {
         "status": "finalized",
         "session_id": session_id,
@@ -1493,6 +1640,7 @@ class SpeakerClip(BaseModel):
     start_time: float
     end_time: float
     text: str
+    clip_url: str
 
 
 class SpeakerClipsResponse(BaseModel):
@@ -1503,6 +1651,7 @@ class SpeakerClipsResponse(BaseModel):
 @router.get("/recordings/{session_id}/speaker-clips", response_model=SpeakerClipsResponse)
 async def get_speaker_clips(
     session_id: str,
+    transcript_version_id: Optional[str] = None,
     repository: Repository = Depends(get_repository),
 ):
     """Get audio clips for each unique speaker in the recording."""
@@ -1516,46 +1665,113 @@ async def get_speaker_clips(
     if not audio_path:
         raise HTTPException(status_code=404, detail="Recording audio not found")
 
-    segments = await repository.get_segments(session_id=session_id)
+    active_version = None
+    if transcript_version_id:
+        active_version = await repository.get_transcript_version_for_session(session_id, transcript_version_id)
+        if active_version is None:
+            raise HTTPException(status_code=404, detail="Transcript version not found")
+    if active_version is None:
+        active_version = await repository.get_latest_transcript_version(session_id)
+
+    segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=active_version.id if active_version else None,
+    )
     if not segments:
         raise HTTPException(status_code=404, detail="No transcript segments found")
 
-    # Group segments by speaker
-    speaker_segments: dict[str, list] = {}
-    for seg in segments:
-        spk = getattr(seg, "speaker", None)
-        if spk:
-            if spk not in speaker_segments:
-                speaker_segments[spk] = []
-            speaker_segments[spk].append(seg)
-
-    if not speaker_segments:
+    speaker_cards = _build_speaker_cards(
+        segments,
+        session_id,
+        active_version.id if active_version else None,
+    )
+    if not speaker_cards:
         raise HTTPException(status_code=400, detail="No speakers found in transcript. Run diarization first.")
 
-    # Build clips - first utterance from each speaker
-    clips = []
-    for speaker, segs in sorted(speaker_segments.items()):
-        # Sort by start time and get first segment
-        sorted_segs = sorted(segs, key=lambda s: s.start_time)
-        first_seg = sorted_segs[0]
-        
-        # Use 5 seconds of audio starting from segment start
-        clip_duration = min(5.0, float(first_seg.end_time) - float(first_seg.start_time))
-        if clip_duration < 0.5:
-            clip_duration = min(5.0, float(first_seg.end_time))
-        
-        clip = SpeakerClip(
-            speaker=speaker,
-            start_time=float(first_seg.start_time),
-            end_time=float(first_seg.start_time) + clip_duration,
-            text=first_seg.text[:100],
+    clips = [
+        SpeakerClip(
+            speaker=card["display_name"] or card["speaker_cluster"],
+            start_time=float(card["clip_start"]),
+            end_time=float(card["clip_end"]),
+            text=str(card["preview_text"])[:100],
+            clip_url=card["clip_url"],
         )
-        clips.append(clip)
+        for card in speaker_cards
+    ]
 
     return SpeakerClipsResponse(
         clips=clips,
         audio_url=f"/api/recordings/{session_id}/audio",
     )
+
+
+@router.get("/recordings/{session_id}/speaker-clips/{speaker_key}/audio")
+async def get_speaker_clip_audio(
+    session_id: str,
+    speaker_key: str,
+    transcript_version_id: Optional[str] = None,
+    repository: Repository = Depends(get_repository),
+):
+    """Return a cached standalone clip for one detected speaker."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    audio_path = get_session_audio_path(session_id)
+    if not audio_path and session.ended_at:
+        audio_path = ensure_session_audio_path(session_id)
+    if not audio_path:
+        raise HTTPException(status_code=404, detail="Recording audio not found")
+
+    active_version = None
+    if transcript_version_id:
+        active_version = await repository.get_transcript_version_for_session(session_id, transcript_version_id)
+        if active_version is None:
+            raise HTTPException(status_code=404, detail="Transcript version not found")
+    if active_version is None:
+        active_version = await repository.get_latest_transcript_version(session_id)
+
+    segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=active_version.id if active_version else None,
+    )
+    if not segments:
+        raise HTTPException(status_code=404, detail="No transcript segments found")
+
+    speaker_card = next(
+        (
+            card
+            for card in _build_speaker_cards(
+                segments,
+                session_id,
+                active_version.id if active_version else None,
+            )
+            if card["speaker_cluster"] == speaker_key
+        ),
+        None,
+    )
+    if not speaker_card:
+        raise HTTPException(status_code=404, detail="Speaker clip not found")
+
+    try:
+        clip_path = ensure_speaker_clip(
+            audio_path=audio_path,
+            session_id=session_id,
+            transcript_version_id=active_version.id if active_version else None,
+            speaker_key=speaker_key,
+            start_time=float(speaker_card["clip_start"]),
+            end_time=float(speaker_card["clip_end"]),
+        )
+    except Exception as exc:
+        logger.warning(
+            "speaker_clip: generation failed | session=%s speaker=%s error=%s",
+            session_id,
+            speaker_key,
+            exc,
+        )
+        raise HTTPException(status_code=500, detail="Failed to generate speaker clip")
+
+    return FileResponse(path=clip_path, media_type="audio/wav")
 
 
 class SpeakerMappingRequest(BaseModel):

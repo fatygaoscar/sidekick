@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Recordings - Sidekick</title>
     <link rel="icon" type="image/x-icon" href="/static/sidekick-logo-simple.ico">
-    <link rel="stylesheet" href="/static/css/styles.css?v=20260309a">
+    <link rel="stylesheet" href="/static/css/styles.css?v=20260309b">
 </head>
 <body>
     <div class="app">
@@ -14,6 +14,39 @@
             <a href="/" class="back-link">&larr; Back</a>
             <h1 class="page-title">Recordings</h1>
         </header>
+
+        <div class="recordings-search-region">
+            <section class="recordings-search-shell" aria-label="Recording search">
+                <form class="recordings-search-form" id="recordings-search-form">
+                    <div class="form-group recordings-search-group">
+                        <label class="sr-only" for="recordings-search-input">Search recordings</label>
+                        <input
+                            id="recordings-search-input"
+                            class="form-input recordings-search-input"
+                            type="search"
+                            placeholder="Search to summarize and find meeting information"
+                            maxlength="500"
+                            autocomplete="off"
+                        >
+                    </div>
+                    <div class="workspace-summary-actions recordings-search-actions">
+                        <button type="submit" class="btn btn-primary recordings-search-button" id="recordings-search-button">Search</button>
+                        <button type="button" class="btn recordings-filter-toggle" id="search-filters-toggle">Filters</button>
+                    </div>
+                </form>
+                <div class="recordings-search-filters hidden" id="recordings-search-filters">
+                    <div class="form-group">
+                        <label class="form-label" for="recordings-search-date-from">From</label>
+                        <input type="date" class="form-input" id="recordings-search-date-from">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="recordings-search-date-to">To</label>
+                        <input type="date" class="form-input" id="recordings-search-date-to">
+                    </div>
+                </div>
+                <div id="recordings-search-results" class="recordings-search-results hidden" aria-live="polite"></div>
+            </section>
+        </div>
 
         <!-- Recordings List -->
         <main class="recordings-list" id="recordings-list">
@@ -31,8 +64,8 @@
 
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script>window.__SIDEKICK_API_BASE = "__SIDEKICK_API_BASE__";</script>
-    <script src="/static/js/network.js?v=20260309h"></script>
-    <script src="/static/js/recording-workspace.js?v=20260309i"></script>
+    <script src="/static/js/network.js?v=20260309i"></script>
+    <script src="/static/js/recording-workspace.js?v=20260309n"></script>
     <script src="/static/js/recordings.js?v=20260309g"></script>
 </body>
 </html>

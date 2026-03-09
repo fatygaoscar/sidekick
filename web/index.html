@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Sidekick</title>
     <link rel="icon" type="image/x-icon" href="/static/sidekick-logo-simple.ico">
-    <link rel="stylesheet" href="/static/css/styles.css?v=20260309a">
+    <link rel="stylesheet" href="/static/css/styles.css?v=20260309b">
 </head>
 <body class="main-page">
     <div class="app">
@@ -26,6 +26,15 @@
             </div>
 
             <div class="record-support">
+                <button id="upload-btn" class="btn main-upload-btn" type="button">
+                    Upload File
+                </button>
+                <input
+                    id="upload-input"
+                    class="sr-only"
+                    type="file"
+                    accept=".mp3,.wav,.m4a,.mp4,audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/mp4,audio/x-m4a,video/mp4"
+                >
                 <div class="visualizer-section">
                     <canvas id="audio-canvas" width="400" height="60"></canvas>
                 </div>
@@ -56,10 +65,10 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script>window.__SIDEKICK_WS_URL = "__SIDEKICK_WS_URL__";</script>
     <script>window.__SIDEKICK_API_BASE = "__SIDEKICK_API_BASE__";</script>
-    <script src="/static/js/network.js?v=20260309h"></script>
+    <script src="/static/js/network.js?v=20260309i"></script>
     <script src="/static/js/audio.js?v=20260309o"></script>
     <script src="/static/js/websocket.js?v=20260309g"></script>
-    <script src="/static/js/recording-workspace.js?v=20260309i"></script>
-    <script src="/static/js/app.js?v=20260309g"></script>
+    <script src="/static/js/recording-workspace.js?v=20260309n"></script>
+    <script src="/static/js/app.js?v=20260309h"></script>
 </body>
 </html>

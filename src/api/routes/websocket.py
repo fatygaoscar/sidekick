@@ -9,6 +9,7 @@ import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from config.settings import get_settings
+from config.settings import TranscriptionBackend
 from src.audio.buffer import AudioBuffer
 from src.audio.vad import VoiceActivityDetector
 from src.core.events import EventType, get_event_bus
@@ -46,6 +47,11 @@ class AudioWebSocketHandler:
         self._is_running = False
         self._process_task: asyncio.Task | None = None
         print("[WebSocket] Handler initialized successfully")
+
+    def _live_preview_enabled(self) -> bool:
+        if self._settings.transcription_backend == TranscriptionBackend.LOCAL:
+            return False
+        return self._settings.live_transcription_preview
 
     async def handle(self) -> None:
         """Main handler for WebSocket connection."""
@@ -190,7 +196,7 @@ class AudioWebSocketHandler:
             "type": "state",
             "session": None,
             "meeting": None,
-            "live_preview_enabled": self._settings.live_transcription_preview,
+            "live_preview_enabled": self._live_preview_enabled(),
         }
 
         if session:
@@ -221,7 +227,7 @@ class AudioWebSocketHandler:
         if not self._session_manager.current_session:
             return
 
-        if not self._settings.live_transcription_preview:
+        if not self._live_preview_enabled():
             return
 
         try:

@@ -8,9 +8,9 @@ import numpy as np
 from config.settings import Settings, TranscriptionBackend, get_settings
 from src.core.events import EventType, get_event_bus
 
-from .base import TranscriptionEngine, TranscriptionResult
+from .base import FileTranscriptionResult, TranscriptionEngine, TranscriptionResult
 from .whisper_api import WhisperAPIEngine
-from .whisper_local import WhisperLocalEngine
+from .whisperx_local import WhisperXLocalEngine
 
 # Progress callback type: (progress: float, message: str) -> None
 ProgressCallback = Callable[[float, str], None]
@@ -186,39 +186,65 @@ class TranscriptionManager:
         self,
         file_path: str | Path,
         language: str | None = None,
-        start_offset: float = 0.0,
         progress_callback: Optional[ProgressCallback] = None,
-    ) -> tuple[TranscriptionResult, float]:
+    ) -> FileTranscriptionResult:
         """
         Transcribe an audio file from disk.
 
         Args:
             file_path: Path to audio file
             language: Language code or None for auto-detect
-            start_offset: Time offset (seconds)
             progress_callback: Optional callback for progress updates
 
         Returns:
-            Tuple of (TranscriptionResult, duration_seconds)
+            Structured authoritative file transcription result
         """
-        from faster_whisper.audio import decode_audio
+        if not self._initialized or self._active_engine is None:
+            await self.initialize()
 
         resolved = Path(file_path)
-        audio = decode_audio(str(resolved), sampling_rate=16000)
-        duration_seconds = len(audio) / 16000
-        result = await self.transcribe(
-            audio=audio,
-            sample_rate=16000,
-            language=language,
-            start_offset=start_offset,
-            progress_callback=progress_callback,
+
+        await self._event_bus.emit(
+            EventType.TRANSCRIPTION_STARTED,
+            {
+                "engine": self._active_engine.name,
+                "file_path": str(resolved),
+            },
+            source="transcription_manager",
         )
-        return result, duration_seconds
+
+        try:
+            result = await self._active_engine.transcribe_file(
+                resolved,
+                language=language,
+                progress_callback=progress_callback,
+            )
+            await self._event_bus.emit(
+                EventType.TRANSCRIPTION_COMPLETED,
+                {
+                    "engine": self._active_engine.name,
+                    "text": result.text,
+                    "duration": result.duration_seconds,
+                    "segments": len(result.segments),
+                },
+                source="transcription_manager",
+            )
+            return result
+        except Exception as e:
+            await self._event_bus.emit(
+                EventType.TRANSCRIPTION_ERROR,
+                {
+                    "engine": self._active_engine.name if self._active_engine else "unknown",
+                    "error": str(e),
+                },
+                source="transcription_manager",
+            )
+            raise
 
     def _create_engine(self, backend: TranscriptionBackend) -> TranscriptionEngine:
         """Create a transcription engine for the specified backend."""
         if backend == TranscriptionBackend.LOCAL:
-            return WhisperLocalEngine()
+            return WhisperXLocalEngine()
         elif backend == TranscriptionBackend.OPENAI:
             return WhisperAPIEngine()
         else:

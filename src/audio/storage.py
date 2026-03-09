@@ -7,7 +7,15 @@ from pathlib import Path
 from config.settings import get_settings
 
 
-_KNOWN_AUDIO_EXTENSIONS = ("webm", "wav", "mp3", "ogg", "m4a")
+_KNOWN_AUDIO_EXTENSIONS = ("webm", "wav", "mp3", "ogg", "m4a", "mp4")
+
+
+def normalize_audio_extension(value: str | None, default: str = "webm") -> str:
+    """Normalize a user- or browser-provided audio extension."""
+    normalized = str(value or "").strip().lower().lstrip(".")
+    if normalized in _KNOWN_AUDIO_EXTENSIONS:
+        return normalized
+    return default
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +235,8 @@ def extension_from_content_type(content_type: str) -> str:
         return "mp3"
     if "audio/ogg" in lowered:
         return "ogg"
+    if "video/mp4" in lowered:
+        return "mp4"
     if "audio/mp4" in lowered or "audio/m4a" in lowered:
         return "m4a"
     return "webm"
@@ -242,6 +252,8 @@ def media_type_for_path(path: Path) -> str:
     if suffix == ".ogg":
         return "audio/ogg"
     if suffix == ".m4a":
+        return "audio/mp4"
+    if suffix == ".mp4":
         return "audio/mp4"
     return "audio/webm"
 

@@ -1,4 +1,8 @@
 (function () {
+    const SUMMARY_REVISE_TIMEOUT_MS = 45000;
+    const SUMMARY_REVISE_TIMEOUT_MESSAGE = 'AI revision timed out. Please try again.';
+    const SUMMARY_REVISE_NETWORK_MESSAGE = 'AI revision failed to reach the server. Please try again.';
+
     class RecordingWorkspace {
         constructor(options = {}) {
             this.baseOptions = { ...options };
@@ -9,6 +13,7 @@
             this._bannerTimer = null;
             this._metaTooltipTimer = null;
             this._bodyScrollLocked = false;
+            this._speakerAudio = null;
             this._speakerPlayback = null;
             this._useNativeScrollTimeline = false;
             this._useSimpleMobileTabMotion = this._detectSimpleMobileTabMotion();
@@ -26,6 +31,8 @@
             this.state = {
                 sessionId: null,
                 workspace: null,
+                transcriptVersions: [],
+                selectedTranscriptVersionId: null,
                 activeTab: 'summary',
                 jobStatus: null,
                 speakerAssignments: {},
@@ -38,6 +45,7 @@
                 editMode: false,
                 editBuffer: '',
                 showRefineInput: false,
+                isRefiningSummary: false,
                 summaryHistory: [],
                 selectedSavedSummaryId: null,
                 banner: null,
@@ -56,10 +64,20 @@
             return window.matchMedia('(max-width: 700px), (hover: none) and (pointer: coarse)').matches;
         }
 
+        _ensureSpeakerAudio() {
+            if (!this._speakerAudio) {
+                this._speakerAudio = new Audio();
+                this._speakerAudio.preload = 'auto';
+            }
+            return this._speakerAudio;
+        }
+
         async open(sessionId, options = {}) {
             this.options = { ...this.baseOptions, ...options };
             this.state.sessionId = sessionId;
             this.state.jobStatus = null;
+            this.state.transcriptVersions = [];
+            this.state.selectedTranscriptVersionId = options.workspaceVersionId || null;
             this.state.speakerAssignments = {};
             this.state.speakerDirty = false;
             this.state.speakerEditMode = false;
@@ -70,6 +88,7 @@
             this.state.editMode = false;
             this.state.editBuffer = '';
             this.state.showRefineInput = false;
+            this.state.isRefiningSummary = false;
             this.state.summaryHistory = [];
             this.state.selectedSavedSummaryId = null;
             this.state.banner = null;
@@ -112,6 +131,10 @@
         }
 
         async close() {
+            if (this.state.isRefiningSummary) {
+                return;
+            }
+
             const saved = await this._flushSettingsSave();
             if (saved === false) {
                 return;
@@ -122,6 +145,8 @@
             this.state.jobStatus = null;
             this.state.workspace = null;
             this.state.sessionId = null;
+            this.state.transcriptVersions = [];
+            this.state.selectedTranscriptVersionId = null;
             this.state.speakerAssignments = {};
             this.state.speakerDirty = false;
             this.state.speakerEditMode = false;
@@ -132,6 +157,7 @@
             this.state.editMode = false;
             this.state.editBuffer = '';
             this.state.showRefineInput = false;
+            this.state.isRefiningSummary = false;
             this.state.summaryHistory = [];
             this.state.selectedSavedSummaryId = null;
             this.state.pendingResetSummaryId = null;
@@ -168,7 +194,11 @@
             }
 
             console.info('[workspace_open:data:start]', { sessionId: this.state.sessionId });
-            const payload = await this._jsonRequest(`/api/recordings/${this.state.sessionId}/workspace`, {}, {
+            const workspaceUrl = new URL(`/api/recordings/${this.state.sessionId}/workspace`, window.location.origin);
+            if (this.state.selectedTranscriptVersionId) {
+                workspaceUrl.searchParams.set('transcript_version_id', this.state.selectedTranscriptVersionId);
+            }
+            const payload = await this._jsonRequest(`${workspaceUrl.pathname}${workspaceUrl.search}`, {}, {
                 timeoutMs: 8000,
                 retries: 2,
                 networkErrorMessage: 'Workspace network request failed',
@@ -177,6 +207,10 @@
             });
             const previousTab = this.state.activeTab;
             this.state.workspace = payload;
+            this.state.transcriptVersions = Array.isArray(payload.transcript_versions)
+                ? payload.transcript_versions
+                : [];
+            this.state.selectedTranscriptVersionId = payload.active_transcript_version?.id || null;
             const draftId = payload.draft_summary?.id || null;
             const savedIds = (payload.saved_summaries || []).map((summary) => summary.id);
             const availableSummaryIds = [draftId, ...savedIds].filter(Boolean);
@@ -333,6 +367,10 @@
                                         <h3>Transcript</h3>
                                         <p class="workspace-copy">The transcript stays available while you review speakers and summary changes.</p>
                                     </div>
+                                    <div id="workspace-transcript-version-row" class="summary-version-row hidden">
+                                        <select id="workspace-transcript-version-select" class="version-select"></select>
+                                        <button type="button" class="btn btn-small" id="workspace-retranscribe-btn">Re-transcribe</button>
+                                    </div>
                                     <div id="workspace-transcript" class="transcript-view"></div>
                                 </section>
                                 <section class="workspace-panel hidden" id="workspace-panel-settings" data-panel="settings" role="tabpanel" aria-labelledby="workspace-tab-settings" aria-hidden="true">
@@ -401,6 +439,9 @@
                 summaryMeta: modal.querySelector('#workspace-summary-meta'),
                 summaryVersionRow: modal.querySelector('#workspace-summary-version-row'),
                 summaryVersionSelect: modal.querySelector('#workspace-summary-version-select'),
+                transcriptVersionRow: modal.querySelector('#workspace-transcript-version-row'),
+                transcriptVersionSelect: modal.querySelector('#workspace-transcript-version-select'),
+                retranscribeBtn: modal.querySelector('#workspace-retranscribe-btn'),
                 summaryDisplay: modal.querySelector('#workspace-summary-display'),
                 summaryEditNotice: modal.querySelector('#workspace-summary-edit-notice'),
                 summaryEdit: modal.querySelector('#workspace-summary-edit'),
@@ -515,6 +556,12 @@
                 this._renderSummary();
                 this._renderSettings();
                 this._renderFooter();
+            });
+            this.elements.transcriptVersionSelect.addEventListener('change', (event) => {
+                void this._handleTranscriptVersionChange(event.target.value);
+            });
+            this.elements.retranscribeBtn.addEventListener('click', () => {
+                void this._startRetranscription();
             });
 
             this.elements.editBtn.addEventListener('click', () => this._toggleEditMode());
@@ -841,7 +888,9 @@
             this._stopSpeakerPlayback();
 
             if (!workspace?.recording?.has_transcription) {
-                this.elements.speakersCopy.textContent = 'Transcription will start automatically once the recording is ready.';
+                this.elements.speakersCopy.textContent = this.options.transcriptionStartMode === 'manual'
+                    ? 'Recording uploaded. Click Transcribe Recording when you are ready.'
+                    : 'Transcription will start automatically once the recording is ready.';
                 this.elements.speakersList.innerHTML = '<div class="workspace-empty">No transcript yet.</div>';
                 this.elements.speakerActions.classList.add('hidden');
                 return;
@@ -872,13 +921,11 @@
                                 </div>
                             </div>
                             <div class="speaker-card-controls">
-                                <audio id="workspace-speaker-audio-${index}" preload="none" src="${this._escapeHtml(this._resolveApiMediaUrl(speaker.audio_url))}"></audio>
                                 <button
                                     type="button"
                                     class="btn btn-small speaker-audio-btn"
-                                    data-audio-id="workspace-speaker-audio-${index}"
-                                    data-start="${speaker.clip_start}"
-                                    data-end="${speaker.clip_end}"
+                                    data-speaker-cluster="${this._escapeHtml(speaker.speaker_cluster)}"
+                                    data-clip-url="${this._escapeHtml(speaker.clip_url || '')}"
                                 >
                                     Play Clip
                                 </button>
@@ -902,18 +949,18 @@
 
             this.elements.speakersList.querySelectorAll('.speaker-audio-btn').forEach((button) => {
                 button.addEventListener('click', () => {
-                    const audio = document.getElementById(button.dataset.audioId);
-                    if (!audio) {
-                        return;
-                    }
-                    const start = Number(button.dataset.start || 0);
-                    const end = Number(button.dataset.end || 0);
-                    const isCurrent = this._speakerPlayback?.audio === audio && !audio.paused;
+                    const clipUrl = this._resolveApiMediaUrl(button.dataset.clipUrl || '');
+                    const isCurrent = this._speakerPlayback?.button === button
+                        && this._speakerPlayback?.clipUrl === clipUrl;
                     if (isCurrent) {
                         this._stopSpeakerPlayback();
                         return;
                     }
-                    this._playSpeakerClip({ button, audio, start, end });
+                    this._playSpeakerClip({
+                        button,
+                        clipUrl,
+                        speakerCluster: button.dataset.speakerCluster || '',
+                    });
                 });
             });
         }
@@ -959,36 +1006,76 @@
             this._renderFooter();
         }
 
-        _playSpeakerClip({ button, audio, start, end }) {
+        async _playSpeakerClip({ button, clipUrl, speakerCluster }) {
+            if (!clipUrl) {
+                this._showBanner('Unable to play speaker clip.', 'error');
+                return;
+            }
+
             this._stopSpeakerPlayback();
-
-            audio.currentTime = start;
-            button.textContent = 'Stop Clip';
-
-            const stopAtEnd = () => {
-                if (audio.currentTime >= end) {
-                    this._stopSpeakerPlayback();
-                }
+            const audio = this._ensureSpeakerAudio();
+            const handleEnded = () => {
+                this._stopSpeakerPlayback();
             };
-            const handlePause = () => {
-                if (this._speakerPlayback?.audio === audio) {
-                    this._stopSpeakerPlayback();
-                }
+            const handleError = () => {
+                console.warn('[speaker_clip:play:fail]', {
+                    sessionId: this.state.sessionId,
+                    speakerCluster,
+                    url: clipUrl,
+                    mediaError: audio.error?.message || audio.error?.code || 'unknown',
+                });
+                this._stopSpeakerPlayback();
+                this._showBanner('Unable to play speaker clip.', 'error');
             };
-
-            audio.addEventListener('timeupdate', stopAtEnd);
-            audio.addEventListener('pause', handlePause);
 
             this._speakerPlayback = {
                 audio,
                 button,
-                stopAtEnd,
-                handlePause,
+                clipUrl,
+                speakerCluster,
+                handleEnded,
+                handleError,
             };
+            button.disabled = true;
+            button.textContent = 'Loading...';
+            audio.addEventListener('ended', handleEnded);
+            audio.addEventListener('error', handleError);
 
-            audio.play().catch(() => {
+            try {
+                console.info('[speaker_clip:play:start]', {
+                    sessionId: this.state.sessionId,
+                    speakerCluster,
+                    url: clipUrl,
+                });
+                audio.pause();
+                if (audio.src !== clipUrl) {
+                    audio.src = clipUrl;
+                }
+                audio.currentTime = 0;
+                audio.load();
+                await audio.play();
+                if (this._speakerPlayback?.button === button) {
+                    button.disabled = false;
+                    button.textContent = 'Stop Clip';
+                }
+                console.info('[speaker_clip:play:ok]', {
+                    sessionId: this.state.sessionId,
+                    speakerCluster,
+                    url: clipUrl,
+                });
+            } catch (error) {
+                const aborted = error?.name === 'AbortError';
                 this._stopSpeakerPlayback();
-            });
+                if (!aborted) {
+                    console.warn('[speaker_clip:play:fail]', {
+                        sessionId: this.state.sessionId,
+                        speakerCluster,
+                        url: clipUrl,
+                        message: error?.message || 'Unable to play clip',
+                    });
+                    this._showBanner('Unable to play speaker clip.', 'error');
+                }
+            }
         }
 
         _stopSpeakerPlayback() {
@@ -996,13 +1083,14 @@
                 return;
             }
 
-            const { audio, button, stopAtEnd, handlePause } = this._speakerPlayback;
-            audio.removeEventListener('timeupdate', stopAtEnd);
-            audio.removeEventListener('pause', handlePause);
+            const { audio, button, handleEnded, handleError } = this._speakerPlayback;
+            audio.removeEventListener('ended', handleEnded);
+            audio.removeEventListener('error', handleError);
             if (!audio.paused) {
                 audio.pause();
             }
             if (button?.isConnected) {
+                button.disabled = false;
                 button.textContent = 'Play Clip';
             }
             this._speakerPlayback = null;
@@ -1011,11 +1099,13 @@
         _renderSummary() {
             const workspace = this.state.workspace;
             const summary = this._currentSummary();
+            const refineLocked = this.state.isRefiningSummary;
 
             this.elements.summaryVersionRow.classList.toggle(
                 'hidden',
                 !workspace || (!workspace.draft_summary && (workspace.saved_summaries || []).length <= 1)
             );
+            this.elements.summaryVersionSelect.disabled = refineLocked;
 
             if (workspace?.draft_summary || (workspace?.saved_summaries || []).length > 1) {
                 const totalSavedVersions = workspace.saved_summaries.length;
@@ -1065,13 +1155,15 @@
                 this.elements.editBtn.disabled = true;
                 this.elements.reviseBtn.disabled = true;
                 this.elements.undoBtn.classList.toggle('hidden', this.state.summaryHistory.length === 0);
+                this.elements.undoBtn.disabled = true;
                 this.elements.refineSection.classList.add('hidden');
                 return;
             }
 
-            this.elements.editBtn.disabled = false;
-            this.elements.reviseBtn.disabled = false;
+            this.elements.editBtn.disabled = refineLocked;
+            this.elements.reviseBtn.disabled = refineLocked;
             this.elements.undoBtn.classList.toggle('hidden', this.state.summaryHistory.length === 0);
+            this.elements.undoBtn.disabled = refineLocked || this.state.summaryHistory.length === 0;
             this.elements.editBtn.textContent = this.state.editMode ? 'Done Editing' : 'Edit';
             this.elements.editBtn.classList.toggle('workspace-done-btn', this.state.editMode);
             this.elements.summaryEditNotice.classList.toggle('hidden', !this.state.editMode);
@@ -1093,10 +1185,46 @@
             }
 
             this.elements.refineSection.classList.toggle('hidden', !this.state.showRefineInput);
+            this.elements.refineCancel.disabled = refineLocked;
+            this.elements.refineSubmit.disabled = refineLocked;
+            this.elements.refineSubmit.textContent = refineLocked ? 'Revising...' : 'Revise';
         }
 
         _renderTranscript() {
+            const workspace = this.state.workspace;
             const transcript = this.state.workspace?.transcript || [];
+            const transcriptVersions = Array.isArray(this.state.transcriptVersions)
+                ? this.state.transcriptVersions
+                : [];
+            const showTranscriptControls = Boolean(
+                workspace?.debug_retranscribe_enabled
+                && transcriptVersions.length > 0
+            );
+
+            this.elements.transcriptVersionRow.classList.toggle('hidden', !showTranscriptControls);
+            if (showTranscriptControls) {
+                const options = transcriptVersions.map((version) => {
+                    const selected = version.id === this.state.selectedTranscriptVersionId ? 'selected' : '';
+                    let label = version.label || `v${version.version_number}`;
+                    if (version.status === 'processing') {
+                        label += ' (Processing)';
+                    } else if (version.is_latest) {
+                        label += ' (Latest)';
+                    }
+                    return `<option value="${this._escapeHtml(version.id)}" ${selected}>${this._escapeHtml(label)}</option>`;
+                });
+                this.elements.transcriptVersionSelect.innerHTML = options.join('');
+                this.elements.transcriptVersionSelect.disabled = Boolean(this.state.jobStatus);
+                this.elements.retranscribeBtn.disabled = Boolean(this.state.jobStatus);
+                this.elements.retranscribeBtn.classList.toggle(
+                    'hidden',
+                    !workspace?.recording?.has_audio || !workspace?.recording?.has_transcription
+                );
+            } else {
+                this.elements.transcriptVersionSelect.innerHTML = '';
+                this.elements.retranscribeBtn.classList.add('hidden');
+            }
+
             if (!transcript.length) {
                 this.elements.transcript.innerHTML = '<div class="workspace-empty">Transcript not available yet.</div>';
                 this.elements.transcript.style.removeProperty('--transcript-time-width');
@@ -1129,6 +1257,31 @@
                     `;
                 })
                 .join('');
+        }
+
+        async _handleTranscriptVersionChange(versionId) {
+            if (!versionId || versionId === this.state.selectedTranscriptVersionId || this.state.jobStatus) {
+                return;
+            }
+            this.state.selectedTranscriptVersionId = versionId;
+            await this._loadWorkspace();
+            this._render();
+        }
+
+        async _startRetranscription() {
+            if (!this.state.sessionId || !this.state.workspace?.debug_retranscribe_enabled || this.state.jobStatus) {
+                return;
+            }
+            const confirmed = window.confirm(
+                'Create a new transcript version from this recording audio? Older transcript and summary versions will be preserved.'
+            );
+            if (!confirmed) {
+                return;
+            }
+            await this._startTranscriptionJob({
+                mode: 'retranscribe',
+                sourceTranscriptVersionId: this.state.selectedTranscriptVersionId,
+            });
         }
 
         _applySearchFocus() {
@@ -1165,7 +1318,7 @@
         _renderSettings() {
             const workspace = this.state.workspace;
             const settings = this._settingsFormValues();
-            const selectedTemplate = settings.template_key || 'meeting';
+            const selectedTemplate = this._normalizeTemplateKey(settings.template_key);
             const order = ['meeting', 'strategic_review', 'working_session', 'custom'];
 
             this._syncTemplateGrid(order, selectedTemplate);
@@ -1223,10 +1376,15 @@
             const workspace = this.state.workspace;
             const currentSummary = this._currentSummary();
             const primaryAction = this._getPrimaryAction();
+            const refining = this.state.isRefiningSummary;
 
             this.elements.footerStatus.textContent = this._footerStatusText();
-            this.elements.primaryBtn.textContent = primaryAction.label;
-            this.elements.primaryBtn.disabled = !!primaryAction.disabled;
+            this.elements.primaryBtn.textContent = refining && primaryAction.action === 'save_draft'
+                ? 'Revising...'
+                : primaryAction.label;
+            this.elements.primaryBtn.disabled = refining || !!primaryAction.disabled;
+            this.elements.secondaryBtn.disabled = refining;
+            this.elements.close.disabled = refining;
 
             const showOpenButton = Boolean(workspace?.obsidian?.open_uri)
                 && currentSummary?.status === 'saved'
@@ -1240,6 +1398,9 @@
             const currentSummary = this._currentSummary();
             if (!workspace) {
                 return 'Loading workspace...';
+            }
+            if (this.state.isRefiningSummary) {
+                return 'Revising summary...';
             }
             if (this.state.jobStatus) {
                 return this.state.jobStatus.message || 'Working...';
@@ -1356,54 +1517,110 @@
             }
         }
 
-        async _startTranscriptionJob() {
-            if (!this.state.sessionId) {
+        async _startTranscriptionJob(options = {}) {
+            if (!this.state.sessionId || this.state.jobStatus?.kind === 'transcription') {
                 return;
             }
-            const saved = await this._flushSettingsSave();
-            if (saved === false) {
-                return;
-            }
-
-            console.info('[workspace_open:auto_transcription:start]', { sessionId: this.state.sessionId });
-            const response = await window.SidekickNetwork.request(`/api/recordings/${this.state.sessionId}/transcription-job`, {
-                method: 'POST',
-            }, {
-                timeoutMs: 10000,
-                retries: 1,
-                networkErrorMessage: 'Workspace network request failed',
-                logLabel: 'workspace_open:auto_transcription',
-            });
-            if (!response.ok) {
-                const error = await response.json().catch(() => ({}));
-                this._showBanner(error.detail || 'Failed to start transcription.', 'error');
-                return;
-            }
-
-            const payload = await response.json();
-            await this._pollJob('transcription', payload.job_id, `/api/transcription-jobs/${payload.job_id}`);
-        }
-
-        async _startSummaryJob() {
-            if (!this.state.sessionId) {
-                return;
-            }
+            const mode = options.mode || 'initial';
+            const sourceTranscriptVersionId = options.sourceTranscriptVersionId || null;
+            this.state.jobStatus = {
+                kind: 'transcription',
+                status: 'queued',
+                stage: 'queued',
+                message: 'Starting transcription',
+                transcription_progress: 0,
+                summarization_progress: 0,
+                overall_progress: 0,
+            };
+            this._renderProgress();
+            this._renderFooter();
 
             try {
                 const saved = await this._flushSettingsSave();
                 if (saved === false) {
+                    this.state.jobStatus = null;
+                    this._render();
+                    return;
+                }
+
+                console.info('[workspace_open:auto_transcription:start]', { sessionId: this.state.sessionId });
+                const response = await window.SidekickNetwork.request(`/api/recordings/${this.state.sessionId}/transcription-job`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        mode,
+                        source_transcript_version_id: sourceTranscriptVersionId,
+                    }),
+                }, {
+                    timeoutMs: 10000,
+                    retries: 1,
+                    networkErrorMessage: 'Workspace network request failed',
+                    logLabel: 'workspace_open:auto_transcription',
+                });
+                if (!response.ok) {
+                    const error = await response.json().catch(() => ({}));
+                    this.state.jobStatus = null;
+                    this._render();
+                    this._showBanner(error.detail || 'Failed to start transcription.', 'error');
+                    return;
+                }
+
+                const payload = await response.json();
+                this.state.jobStatus = {
+                    ...this.state.jobStatus,
+                    job_id: payload.job_id,
+                    status: payload.status || 'queued',
+                };
+                this._renderProgress();
+                this._renderFooter();
+                await this._pollJob('transcription', payload.job_id, `/api/transcription-jobs/${payload.job_id}`);
+            } catch (error) {
+                this.state.jobStatus = null;
+                this._render();
+                this._showBanner(error?.message || 'Failed to start transcription.', 'error');
+            }
+        }
+
+        async _startSummaryJob() {
+            if (!this.state.sessionId || this.state.jobStatus?.kind === 'summary') {
+                return;
+            }
+
+            try {
+                this.state.jobStatus = {
+                    kind: 'summary',
+                    status: 'queued',
+                    stage: 'queued',
+                    message: 'Starting summary generation',
+                    transcription_progress: 1,
+                    summarization_progress: 0,
+                    overall_progress: 0,
+                };
+                this._renderProgress();
+                this._renderFooter();
+
+                const saved = await this._flushSettingsSave();
+                if (saved === false) {
+                    this.state.jobStatus = null;
+                    this._render();
                     return;
                 }
                 if (this.state.speakerDirty) {
                     await this._saveSpeakerAssignments();
                 }
             } catch (error) {
+                this.state.jobStatus = null;
+                this._render();
                 this._showBanner(error.message || 'Failed to save workspace changes.', 'error');
                 return;
             }
 
             const response = await window.SidekickNetwork.request(`/api/recordings/${this.state.sessionId}/summary-job`, {
                 method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    transcript_version_id: this.state.selectedTranscriptVersionId,
+                }),
             }, {
                 timeoutMs: 10000,
                 retries: 1,
@@ -1412,11 +1629,20 @@
             });
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
+                this.state.jobStatus = null;
+                this._render();
                 this._showBanner(error.detail || 'Failed to start summary generation.', 'error');
                 return;
             }
 
             const payload = await response.json();
+            this.state.jobStatus = {
+                ...this.state.jobStatus,
+                job_id: payload.job_id,
+                status: payload.status || 'queued',
+            };
+            this._renderProgress();
+            this._renderFooter();
             await this._pollJob('summary', payload.job_id, `/api/summary-jobs/${payload.job_id}`);
         }
 
@@ -1439,6 +1665,9 @@
 
                     if (job.status === 'completed') {
                         this.state.jobStatus = null;
+                        if (kind === 'transcription' && job.transcript_version_id) {
+                            this.state.selectedTranscriptVersionId = job.transcript_version_id;
+                        }
                         await this._loadWorkspace({ keepTab: false });
                         if (kind === 'summary' && this.state.workspace?.draft_summary?.id) {
                             this.state.selectedSavedSummaryId = this.state.workspace.draft_summary.id;
@@ -1492,7 +1721,10 @@
             await this._jsonRequest(`/api/recordings/${this.state.sessionId}/speakers`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ assignments }),
+                body: JSON.stringify({
+                    assignments,
+                    transcript_version_id: this.state.selectedTranscriptVersionId,
+                }),
             }, {
                 timeoutMs: 10000,
                 retries: 1,
@@ -1506,6 +1738,9 @@
         }
 
         _showRefineInput() {
+            if (this.state.isRefiningSummary) {
+                return;
+            }
             if (this.state.workspace?.draft_summary?.id) {
                 this.state.selectedSavedSummaryId = this.state.workspace.draft_summary.id;
             }
@@ -1516,11 +1751,18 @@
         }
 
         _hideRefineInput() {
+            if (this.state.isRefiningSummary) {
+                return;
+            }
             this.state.showRefineInput = false;
             this._renderSummary();
         }
 
         async _submitRefine() {
+            if (this.state.isRefiningSummary) {
+                return;
+            }
+
             const instruction = this.elements.refineInput.value.trim();
             if (!instruction) {
                 this.elements.refineInput.focus();
@@ -1534,17 +1776,19 @@
                 this.state.summaryHistory.push(currentSummary.content);
             }
 
-            this.elements.refineSubmit.disabled = true;
-            this.elements.refineSubmit.textContent = 'Revising...';
+            this.state.isRefiningSummary = true;
+            this._renderSummary();
+            this._renderFooter();
             try {
                 await this._jsonRequest(`/api/summary-drafts/${draftId}/revise`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ instruction }),
                 }, {
-                    timeoutMs: 10000,
-                    retries: 1,
-                    networkErrorMessage: 'Workspace network request failed',
+                    timeoutMs: SUMMARY_REVISE_TIMEOUT_MS,
+                    retries: 0,
+                    retryOnNetworkError: false,
+                    networkErrorMessage: SUMMARY_REVISE_NETWORK_MESSAGE,
                     httpErrorMessage: 'Revision failed',
                     logLabel: 'workspace_summary:revise',
                 });
@@ -1556,14 +1800,24 @@
                 this.state.activeTab = 'summary';
                 this._render();
             } catch (error) {
-                this._showBanner(error.message, 'error');
+                let message = error?.message || 'Revision failed';
+                if (message === 'Network request timed out') {
+                    message = SUMMARY_REVISE_TIMEOUT_MESSAGE;
+                } else if (message === 'Network request failed' || message === 'Workspace network request failed') {
+                    message = SUMMARY_REVISE_NETWORK_MESSAGE;
+                }
+                this._showBanner(message, 'error');
             } finally {
-                this.elements.refineSubmit.disabled = false;
-                this.elements.refineSubmit.textContent = 'Revise';
+                this.state.isRefiningSummary = false;
+                this._renderSummary();
+                this._renderFooter();
             }
         }
 
         async _toggleEditMode() {
+            if (this.state.isRefiningSummary) {
+                return;
+            }
             if (!this.state.editMode) {
                 let draftId;
                 try {
@@ -1624,6 +1878,9 @@
         }
 
         async _undoSummaryChange() {
+            if (this.state.isRefiningSummary) {
+                return;
+            }
             if (this.state.summaryHistory.length === 0) {
                 return;
             }
@@ -1669,6 +1926,7 @@
                 body: JSON.stringify({
                     source_type: sourceType,
                     source_summary_id: null,
+                    transcript_version_id: this.state.selectedTranscriptVersionId,
                 }),
             }, {
                 timeoutMs: 10000,
@@ -1683,6 +1941,9 @@
         }
 
         async _saveDraft() {
+            if (this.state.isRefiningSummary) {
+                return;
+            }
             const draft = this.state.workspace?.draft_summary;
             if (!draft) {
                 return;
@@ -1763,8 +2024,8 @@
                 return null;
             }
 
-            const currentTemplateKey = currentSettings.template_key || 'meeting';
-            const summaryTemplateKey = currentSummary.template_key || 'meeting';
+            const currentTemplateKey = this._normalizeTemplateKey(currentSettings.template_key);
+            const summaryTemplateKey = this._normalizeTemplateKey(currentSummary.template_key);
             if (currentTemplateKey !== summaryTemplateKey) {
                 return 'Summary settings changed to a different template.';
             }
@@ -1876,7 +2137,7 @@
             this.state.pendingResetSummaryId = summary.id;
             this.state.workspace.settings = {
                 ...this.state.workspace.settings,
-                template_key: summary.template_key || 'meeting',
+                template_key: this._normalizeTemplateKey(summary.template_key),
                 custom_prompt: summary.custom_prompt || null,
             };
             this._syncLastCustomPrompt();
@@ -1949,8 +2210,9 @@
 
             const payload = {
                 title: this.elements.titleInput.value.trim() || null,
-                template_key: this.state.workspace?.settings?.template_key || 'meeting',
+                template_key: this._normalizeTemplateKey(this.state.workspace?.settings?.template_key),
                 custom_prompt: this._settingsCustomPromptValue(),
+                transcript_version_id: this.state.selectedTranscriptVersionId,
             };
 
             try {
@@ -2038,7 +2300,7 @@
 
         _currentPromptDisplayText() {
             const settings = this._settingsFormValues();
-            const templateKey = settings.template_key || 'meeting';
+            const templateKey = this._normalizeTemplateKey(settings.template_key);
             const selectedTemplate = this.templates[templateKey];
             const basePrompt = selectedTemplate?.prompt || '';
 
@@ -2056,7 +2318,7 @@
 
         _promptSourceLabel() {
             const settings = this._settingsFormValues();
-            const templateKey = settings.template_key || 'meeting';
+            const templateKey = this._normalizeTemplateKey(settings.template_key);
             const templateName = this.templates[templateKey]?.name || 'Prompt';
 
             if (templateKey === 'custom') {
@@ -2072,7 +2334,7 @@
 
         _settingsCustomPromptValue() {
             const settings = this.state.workspace?.settings || {};
-            if ((settings.template_key || 'meeting') !== 'custom') {
+            if (this._normalizeTemplateKey(settings.template_key) !== 'custom') {
                 return settings.custom_prompt || null;
             }
 
@@ -2167,9 +2429,9 @@
             }
 
             const currentSettings = this.state.workspace?.settings || {};
-            const currentTemplateKey = currentSettings.template_key || 'meeting';
+            const currentTemplateKey = this._normalizeTemplateKey(currentSettings.template_key);
             const currentCustomPrompt = currentSettings.custom_prompt || null;
-            const summaryTemplateKey = summary.template_key || 'meeting';
+            const summaryTemplateKey = this._normalizeTemplateKey(summary.template_key);
             const summaryCustomPrompt = summary.custom_prompt || null;
 
             return currentTemplateKey !== summaryTemplateKey || currentCustomPrompt !== summaryCustomPrompt;
@@ -2218,7 +2480,9 @@
 
             return {
                 ...workspaceSettings,
-                template_key: currentSummary.template_key || workspaceSettings.template_key || 'meeting',
+                template_key: this._normalizeTemplateKey(
+                    currentSummary.template_key || workspaceSettings.template_key
+                ),
                 custom_prompt: currentSummary.custom_prompt ?? null,
             };
         }
@@ -2231,7 +2495,7 @@
             const displayedSettings = this._settingsFormValues();
             this.state.workspace.settings = {
                 ...this.state.workspace.settings,
-                template_key: displayedSettings.template_key || 'meeting',
+                template_key: this._normalizeTemplateKey(displayedSettings.template_key),
                 custom_prompt: displayedSettings.custom_prompt ?? null,
             };
             this._syncLastCustomPrompt();
@@ -2255,10 +2519,18 @@
 
             this.state.workspace.settings = {
                 ...this.state.workspace.settings,
-                template_key: currentSummary.template_key || 'meeting',
+                template_key: this._normalizeTemplateKey(currentSummary.template_key),
                 custom_prompt: currentSummary.custom_prompt ?? null,
             };
             this._syncLastCustomPrompt();
+        }
+
+        _normalizeTemplateKey(templateKey) {
+            const key = (templateKey || '').trim();
+            if (!key || key === 'auto') {
+                return 'meeting';
+            }
+            return key;
         }
 
         _formatStage(stage) {

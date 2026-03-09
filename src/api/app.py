@@ -91,11 +91,12 @@ def create_app() -> FastAPI:
     )
 
     # Include routers
-    from src.api.routes import sessions, modes, websocket, export
+    from src.api.routes import sessions, modes, websocket, export, search
 
     app.include_router(sessions.router, prefix="/api", tags=["sessions"])
     app.include_router(modes.router, prefix="/api", tags=["modes"])
     app.include_router(export.router, prefix="/api", tags=["export"])
+    app.include_router(search.router, prefix="/api", tags=["search"])
     app.include_router(websocket.router, tags=["websocket"])
 
     # Mount static files for web UI

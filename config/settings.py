@@ -38,10 +38,12 @@ class Settings(BaseSettings):
     # Transcription
     transcription_backend: TranscriptionBackend = TranscriptionBackend.LOCAL
 
-    # faster-whisper settings
+    # local Whisper model settings
     whisper_model_size: str = "base"
     whisper_device: str = "auto"
     whisper_compute_type: str = "auto"
+    whisperx_batch_size: int = 16
+    enable_debug_retranscribe: bool = True
 
     # OpenAI API
     openai_api_key: str = ""
@@ -52,6 +54,7 @@ class Settings(BaseSettings):
     # Summarization
     summarization_backend: SummarizationBackend = SummarizationBackend.OLLAMA
     summarization_timeout_seconds: int = 600
+    summarization_meeting_structured_enabled: bool = False
 
     # Ollama settings
     ollama_host: str = "http://localhost:11434"

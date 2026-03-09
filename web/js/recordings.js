@@ -9,6 +9,15 @@ class RecordingsPage {
     constructor() {
         this.recordings = [];
         this.deletingIds = new Set();
+        this.searchState = {
+            query: '',
+            answer: null,
+            confidence: 'low',
+            results: [],
+            loading: false,
+            error: null,
+            filtersOpen: false,
+        };
         this.workspace = new window.RecordingWorkspace({
             onClose: () => this._loadRecordings(),
         });
@@ -16,13 +25,45 @@ class RecordingsPage {
         this.elements = {
             recordingsList: document.getElementById('recordings-list'),
             loadingState: document.getElementById('loading-state'),
+            searchForm: document.getElementById('recordings-search-form'),
+            searchInput: document.getElementById('recordings-search-input'),
+            searchButton: document.getElementById('recordings-search-button'),
+            searchResults: document.getElementById('recordings-search-results'),
+            searchFilters: document.getElementById('recordings-search-filters'),
+            searchFiltersToggle: document.getElementById('search-filters-toggle'),
+            searchDateFrom: document.getElementById('recordings-search-date-from'),
+            searchDateTo: document.getElementById('recordings-search-date-to'),
         };
 
         this._init();
     }
 
     async _init() {
+        this._bindSearchEvents();
+        this._renderSearch();
         await this._loadRecordings();
+    }
+
+    _bindSearchEvents() {
+        this.elements.searchForm?.addEventListener('submit', (event) => {
+            event.preventDefault();
+            void this._runSearch();
+        });
+        this.elements.searchInput?.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                void this._runSearch();
+            }
+        });
+        this.elements.searchInput?.addEventListener('input', () => {
+            this.searchState.query = this.elements.searchInput.value;
+            this._syncSearchControls();
+        });
+        this.elements.searchFiltersToggle?.addEventListener('click', (event) => {
+            event.preventDefault();
+            this.searchState.filtersOpen = !this.searchState.filtersOpen;
+            this._renderSearch();
+        });
     }
 
     async _loadRecordings(options = {}) {
@@ -49,6 +90,196 @@ class RecordingsPage {
             if (renderErrorOnFailure) {
                 this._renderError();
             }
+        }
+    }
+
+    async _runSearch() {
+        const query = (this.elements.searchInput?.value || '').trim();
+        if (!query || this.searchState.loading) {
+            return;
+        }
+
+        this.searchState.loading = true;
+        this.searchState.error = null;
+        this.searchState.query = query;
+        this._renderSearch();
+
+        try {
+            console.info('[recordings:search:start]', { query });
+            const payload = await window.SidekickNetwork.json('/api/search/recordings', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    query,
+                    date_from: this.elements.searchDateFrom?.value || null,
+                    date_to: this.elements.searchDateTo?.value || null,
+                    limit: 8,
+                }),
+            }, {
+                timeoutMs: 10000,
+                retries: 1,
+                networkErrorMessage: 'Recordings search network request failed',
+                httpErrorMessage: 'Search failed',
+                logLabel: 'recordings:search',
+            });
+
+            this.searchState.answer = payload.answer || null;
+            this.searchState.confidence = payload.confidence || 'low';
+            this.searchState.results = Array.isArray(payload.results) ? payload.results : [];
+            console.info('[recordings:search:ok]', {
+                query,
+                resultCount: this.searchState.results.length,
+            });
+        } catch (error) {
+            console.error('Failed to search recordings:', error);
+            console.warn('[recordings:search:fail]', {
+                query,
+                message: error?.message || 'Search failed',
+            });
+            this.searchState.error = error.message || 'Search failed';
+            this.searchState.answer = null;
+            this.searchState.results = [];
+        } finally {
+            this.searchState.loading = false;
+            this._renderSearch();
+        }
+    }
+
+    _renderSearch() {
+        if (!this.elements.searchResults || !this.elements.searchFiltersToggle || !this.elements.searchFilters) {
+            return;
+        }
+
+        const hasContent = this.searchState.loading
+            || this.searchState.error
+            || this.searchState.answer
+            || this.searchState.results.length > 0;
+
+        this.elements.searchFilters.classList.toggle('hidden', !this.searchState.filtersOpen);
+        this.elements.searchFiltersToggle.classList.toggle('btn-primary', this.searchState.filtersOpen);
+        this.elements.searchFiltersToggle.textContent = this.searchState.filtersOpen ? 'Hide Filters' : 'Filters';
+        this.elements.searchResults.classList.toggle('hidden', !hasContent);
+
+        this._syncSearchControls();
+
+        if (!hasContent) {
+            this.elements.searchResults.innerHTML = '';
+            return;
+        }
+
+        if (this.searchState.loading) {
+            this.elements.searchResults.innerHTML = `
+                <div class="recordings-search-status">
+                    <div class="processing-spinner"></div>
+                    <div>
+                        <div class="recordings-search-status-title">Searching recordings</div>
+                        <div class="recordings-search-status-copy">Retrieving transcript evidence and building an answer.</div>
+                    </div>
+                </div>
+            `;
+            return;
+        }
+
+        if (this.searchState.error) {
+            this.elements.searchResults.innerHTML = `
+                <div class="recordings-search-error">${this._escapeHtml(this.searchState.error)}</div>
+            `;
+            return;
+        }
+
+        const answerBlock = this.searchState.answer
+            ? `
+                <div class="recordings-search-answer">
+                    <div class="recordings-search-answer-meta">
+                        <span class="recordings-search-answer-label">Answer</span>
+                        <span class="recordings-search-answer-confidence">${this._escapeHtml(this.searchState.confidence)}</span>
+                    </div>
+                    <p class="recordings-search-answer-copy">${this._escapeHtml(this.searchState.answer)}</p>
+                </div>
+            `
+            : `
+                <div class="recordings-search-answer recordings-search-answer-muted">
+                    <div class="recordings-search-answer-meta">
+                        <span class="recordings-search-answer-label">Evidence Only</span>
+                    </div>
+                    <p class="recordings-search-answer-copy">Showing transcript evidence because the AI answer was unavailable.</p>
+                </div>
+            `;
+
+        const results = this.searchState.results.length > 0
+            ? this.searchState.results.map((result) => this._renderSearchResult(result)).join('')
+            : `
+                <div class="recordings-search-empty">
+                    No grounded matches found across your recordings. Try fewer specifics or a shorter question.
+                </div>
+            `;
+
+        this.elements.searchResults.innerHTML = `
+            ${answerBlock}
+            <div class="recordings-search-list">${results}</div>
+        `;
+
+        this.elements.searchResults.querySelectorAll('.search-open-btn').forEach((button) => {
+            button.addEventListener('click', () => {
+                const result = this.searchState.results.find((item) => item.citation_id === button.dataset.citationId);
+                if (!result) {
+                    return;
+                }
+                void this._openWorkspaceFromCitation(result);
+            });
+        });
+    }
+
+    _syncSearchControls() {
+        if (!this.elements.searchButton) {
+            return;
+        }
+        const hasQuery = Boolean((this.elements.searchInput?.value || '').trim());
+        this.elements.searchButton.disabled = !hasQuery || this.searchState.loading;
+    }
+
+    _renderSearchResult(result) {
+        const speaker = result.speaker ? `<span>${this._escapeHtml(result.speaker)}</span>` : '';
+        const speakerDivider = result.speaker ? '<span aria-hidden="true">&middot;</span>' : '';
+        const citedBadge = result.is_cited
+            ? '<span class="workspace-badge workspace-badge-accent">Cited</span>'
+            : '<span class="workspace-badge">Evidence</span>';
+
+        return `
+            <article class="recordings-search-card">
+                <div class="recordings-search-card-head">
+                    <div class="recordings-search-card-meta">
+                        <span>${this._escapeHtml(result.recorded_date_label)}</span>
+                        <span aria-hidden="true">&middot;</span>
+                        <span>${this._escapeHtml(result.recorded_time_label)}</span>
+                        ${speakerDivider}
+                        ${speaker}
+                        <span aria-hidden="true">&middot;</span>
+                        <span>${this._escapeHtml(result.timestamp)}</span>
+                    </div>
+                    <div class="recordings-search-card-badges">${citedBadge}</div>
+                </div>
+                <div class="recordings-search-card-title">${this._escapeHtml(result.recording_title || 'Untitled Recording')}</div>
+                <p class="recordings-search-card-snippet">${this._escapeHtml(result.snippet)}</p>
+                <div class="recordings-search-card-footer">
+                    <button class="btn btn-small search-open-btn" data-citation-id="${this._escapeHtml(result.citation_id)}">Open Transcript</button>
+                </div>
+            </article>
+        `;
+    }
+
+    async _openWorkspaceFromCitation(result) {
+        try {
+            await this.workspace.open(result.session_id, {
+                initialTab: 'transcript',
+                workspaceVersionId: result.transcript_version_id || null,
+                highlightSegmentIds: result.transcript_segment_ids || [],
+                focusStartTime: result.start_time,
+            });
+        } catch (error) {
+            alert(error.message || 'Failed to open recording workspace');
         }
     }
 

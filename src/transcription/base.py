@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import AsyncIterator
 
 import numpy as np
@@ -17,6 +18,29 @@ class TranscriptionResult:
     confidence: float | None = None
     language: str | None = None
     words: list[dict] | None = None  # Word-level timestamps if available
+
+
+@dataclass
+class AlignedTranscriptSegment:
+    """Authoritative file-transcription segment with optional speaker attribution."""
+
+    start: float
+    end: float
+    text: str
+    speaker: str | None = None
+    speaker_cluster: str | None = None
+    words: list[dict] | None = None
+
+
+@dataclass
+class FileTranscriptionResult:
+    """Result from authoritative file transcription."""
+
+    text: str
+    duration_seconds: float
+    segments: list[AlignedTranscriptSegment]
+    confidence: float | None = None
+    language: str | None = None
 
 
 class TranscriptionEngine(ABC):
@@ -50,6 +74,8 @@ class TranscriptionEngine(ABC):
         audio: np.ndarray,
         sample_rate: int = 16000,
         language: str | None = None,
+        progress_callback=None,
+        audio_duration: float | None = None,
     ) -> TranscriptionResult:
         """
         Transcribe audio data.
@@ -63,6 +89,15 @@ class TranscriptionEngine(ABC):
             TranscriptionResult with text and metadata
         """
         pass
+
+    async def transcribe_file(
+        self,
+        file_path: str | Path,
+        language: str | None = None,
+        progress_callback=None,
+    ) -> FileTranscriptionResult:
+        """Transcribe an audio file from disk."""
+        raise NotImplementedError(f"{self.__class__.__name__} does not support file transcription")
 
     async def transcribe_stream(
         self,

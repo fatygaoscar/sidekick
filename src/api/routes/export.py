@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -35,7 +36,13 @@ from src.core.speaker_labels import (
 )
 from src.sessions.repository import Repository
 from src.summarization.manager import SummarizationManager
-from src.summarization.prompts import PUBLIC_TEMPLATE_KEYS, TEMPLATE_INFO, get_template_content
+from src.summarization.prompts import (
+    DEFAULT_TEMPLATE_KEY,
+    PUBLIC_TEMPLATE_KEYS,
+    TEMPLATE_INFO,
+    get_template_content,
+    normalize_template_key,
+)
 from src.transcription.manager import TranscriptionManager
 
 
@@ -59,7 +66,7 @@ def get_transcription_manager(request: Request) -> TranscriptionManager:
 
 class ExportRequest(BaseModel):
     title: str
-    template: str = "meeting"
+    template: str = DEFAULT_TEMPLATE_KEY
     custom_prompt: Optional[str] = None
     attendees: Optional[str] = None
 
@@ -116,12 +123,24 @@ class DraftReviseRequest(BaseModel):
 class CreateDraftRequest(BaseModel):
     source_summary_id: Optional[str] = None
     source_type: str = "manual_edit"
+    transcript_version_id: Optional[str] = None
+
+
+class StartTranscriptionJobRequest(BaseModel):
+    mode: str = "initial"
+    source_transcript_version_id: Optional[str] = None
+
+
+class StartSummaryJobRequest(BaseModel):
+    transcript_version_id: Optional[str] = None
 
 
 class TranscriptionJobCreateResponse(BaseModel):
     job_id: str
     status: str
     poll_url: str
+    transcript_version_id: Optional[str] = None
+    transcript_version_number: Optional[int] = None
 
 
 class TranscriptionJobStatus(BaseModel):
@@ -135,12 +154,15 @@ class TranscriptionJobStatus(BaseModel):
     created_at: str
     updated_at: str
     error: Optional[str] = None
+    transcript_version_id: Optional[str] = None
+    transcript_version_number: Optional[int] = None
 
 
 class SummaryJobCreateResponse(BaseModel):
     job_id: str
     status: str
     poll_url: str
+    transcript_version_id: Optional[str] = None
 
 
 class SummaryJobResult(BaseModel):
@@ -162,6 +184,7 @@ class SummaryJobStatus(BaseModel):
     updated_at: str
     result: Optional[SummaryJobResult] = None
     error: Optional[str] = None
+    transcript_version_id: Optional[str] = None
 
 
 ProgressCallback = Callable[[str, str, Optional[float], Optional[float]], Awaitable[None] | None]
@@ -248,15 +271,15 @@ def _speaker_review_blocks_summary(meeting) -> bool:
     return False
 
 
-async def _update_meeting_speaker_review_state(
+async def _update_transcript_version_speaker_review_state(
     repository: Repository,
-    meeting_id: str,
+    transcript_version_id: str,
     segments: list,
 ) -> None:
     required = _speaker_review_required(segments)
     completed_at = None if required else datetime.utcnow()
-    await repository.update_meeting_settings(
-        meeting_id,
+    await repository.update_transcript_version(
+        transcript_version_id,
         speaker_review_required=required,
         speaker_review_completed_at=completed_at,
     )
@@ -283,7 +306,12 @@ def _create_export_job(session_id: str) -> dict:
     return payload
 
 
-def _create_transcription_job(session_id: str) -> dict:
+def _create_transcription_job(
+    session_id: str,
+    *,
+    transcript_version_id: str | None = None,
+    transcript_version_number: int | None = None,
+) -> dict:
     job_id = str(uuid.uuid4())
     now = _utc_now_iso()
     payload = {
@@ -295,6 +323,8 @@ def _create_transcription_job(session_id: str) -> dict:
         "transcription_progress": 0.0,
         "overall_progress": 0.0,
         "error": None,
+        "transcript_version_id": transcript_version_id,
+        "transcript_version_number": transcript_version_number,
         "created_at": now,
         "updated_at": now,
     }
@@ -302,7 +332,19 @@ def _create_transcription_job(session_id: str) -> dict:
     return payload
 
 
-def _create_summary_job(session_id: str) -> dict:
+def _find_active_transcription_job(session_id: str) -> dict | None:
+    active_jobs = [
+        job
+        for job in _TRANSCRIPTION_JOBS.values()
+        if job.get("session_id") == session_id
+        and str(job.get("status")) in {"queued", "running"}
+    ]
+    if not active_jobs:
+        return None
+    return max(active_jobs, key=lambda job: str(job.get("updated_at", "")))
+
+
+def _create_summary_job(session_id: str, *, transcript_version_id: str | None = None) -> dict:
     job_id = str(uuid.uuid4())
     now = _utc_now_iso()
     payload = {
@@ -316,6 +358,7 @@ def _create_summary_job(session_id: str) -> dict:
         "overall_progress": 0.0,
         "result": None,
         "error": None,
+        "transcript_version_id": transcript_version_id,
         "created_at": now,
         "updated_at": now,
     }
@@ -423,6 +466,7 @@ async def _transcribe_and_persist_session(
     repository: Repository,
     transcription_manager: TranscriptionManager,
     primary_meeting_id: str,
+    transcript_version_id: str,
     progress_callback: Optional[TranscriptionProgressCallback] = None,
 ) -> tuple[str, float]:
     audio_path = get_session_audio_path(session_id)
@@ -438,11 +482,10 @@ async def _transcribe_and_persist_session(
 
     def on_transcription_progress(progress: float, message: str) -> None:
         if progress_callback:
-            adjusted = 0.05 + (progress * 0.90)
-            progress_callback("transcribing", message, adjusted)
+            progress_callback("transcribing", message, progress)
 
     try:
-        transcription_result, audio_duration_seconds = await transcription_manager.transcribe_file(
+        transcription_result = await transcription_manager.transcribe_file(
             audio_path,
             progress_callback=on_transcription_progress,
         )
@@ -453,114 +496,47 @@ async def _transcribe_and_persist_session(
     if not full_text:
         raise HTTPException(status_code=400, detail="No speech detected in recording audio")
 
-    # Run speaker diarization if enabled (non-blocking on failure)
-    from src.transcription.diarize import assign_speaker, diarize
-    diarization_spans: list[tuple[float, float, str]] = []
-    _settings = get_settings()
-
-    if _settings.diarization_enabled and _settings.hf_token:
-        try:
-            with pipeline_step(logger, "diarization") as step:
-                diarization_spans = await asyncio.to_thread(
-                    diarize,
-                    str(audio_path),
-                    _settings.hf_token,
-                )
-                step["spans"] = len(diarization_spans)
-        except Exception as exc:
-            logger.warning(f"Diarization failed, continuing without speaker labels: {exc}")
-
     segment_count = 0
-    with pipeline_step(logger, "segment_building", words=len(transcription_result.words or [])) as step:
-        await repository.delete_segments_for_session(session_id)
+    with pipeline_step(logger, "segment_building", segments=len(transcription_result.segments)) as step:
+        await repository.delete_segments_for_transcript_version(transcript_version_id)
+        for segment in transcription_result.segments:
+            text = str(segment.text).strip()
+            start = float(segment.start)
+            end = float(segment.end)
+            if not text or end <= start:
+                continue
 
-        if transcription_result.words:
-            buffer_words: list[dict] = []
-            max_words_per_segment = 24
-            max_segment_duration = 14.0
-
-            def flush_words(words: list[dict]) -> tuple[str, float, float] | None:
-                if not words:
-                    return None
-                text = " ".join(str(w.get("word", "")).strip() for w in words).strip()
-                if not text:
-                    return None
-                start = float(words[0].get("start", 0.0))
-                end = float(words[-1].get("end", start))
-                return text, start, end
-
-            for word in transcription_result.words:
-                token = str(word.get("word", "")).strip()
-                if not token:
-                    continue
-
-                if not buffer_words:
-                    buffer_words.append(word)
-                    continue
-
-                first_start = float(buffer_words[0].get("start", 0.0))
-                segment_elapsed = float(word.get("end", first_start)) - first_start
-                hit_limit = len(buffer_words) >= max_words_per_segment or segment_elapsed >= max_segment_duration
-                sentence_end = token.endswith((".", "!", "?"))
-
-                buffer_words.append(word)
-                if hit_limit or sentence_end:
-                    parsed = flush_words(buffer_words)
-                    if parsed:
-                        text, start, end = parsed
-                        await repository.add_segment(
-                            session_id=session_id,
-                            meeting_id=primary_meeting_id,
-                            text=text,
-                            start_time=start,
-                            end_time=end,
-                            confidence=transcription_result.confidence,
-                            speaker=assign_speaker(start, end, diarization_spans) if diarization_spans else None,
-                            speaker_cluster=(
-                                assign_speaker(start, end, diarization_spans) if diarization_spans else None
-                            ),
-                        )
-                        segment_count += 1
-                    buffer_words = []
-
-            parsed = flush_words(buffer_words)
-            if parsed:
-                text, start, end = parsed
-                await repository.add_segment(
-                    session_id=session_id,
-                    meeting_id=primary_meeting_id,
-                    text=text,
-                    start_time=start,
-                    end_time=end,
-                    confidence=transcription_result.confidence,
-                    speaker=assign_speaker(start, end, diarization_spans) if diarization_spans else None,
-                    speaker_cluster=assign_speaker(start, end, diarization_spans) if diarization_spans else None,
-                )
-                segment_count += 1
-        else:
             await repository.add_segment(
                 session_id=session_id,
                 meeting_id=primary_meeting_id,
-                text=full_text,
-                start_time=0.0,
-                end_time=audio_duration_seconds,
+                text=text,
+                start_time=start,
+                end_time=end,
                 confidence=transcription_result.confidence,
-                speaker=assign_speaker(0.0, audio_duration_seconds, diarization_spans) if diarization_spans else None,
-                speaker_cluster=(
-                    assign_speaker(0.0, audio_duration_seconds, diarization_spans)
-                    if diarization_spans
-                    else None
-                ),
+                speaker=segment.speaker,
+                speaker_cluster=segment.speaker_cluster,
+                transcript_version_id=transcript_version_id,
             )
-            segment_count = 1
+            segment_count += 1
+
+        if segment_count == 0:
+            raise HTTPException(status_code=500, detail="Failed to build transcript segments from recording audio")
 
         await repository.set_session_has_transcription(session_id, True)
+        await repository.reindex_session_transcript_search(session_id)
         step["segments"] = segment_count
 
-    segments = await repository.get_segments(session_id=session_id)
+    segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=transcript_version_id,
+    )
     if not segments:
         raise HTTPException(status_code=500, detail="Failed to build transcript segments from recording audio")
-    await _update_meeting_speaker_review_state(repository, primary_meeting_id, segments)
+    await _update_transcript_version_speaker_review_state(
+        repository,
+        transcript_version_id,
+        segments,
+    )
 
     transcript, _ = _segments_to_transcript(segments)
 
@@ -569,7 +545,7 @@ async def _transcribe_and_persist_session(
         if asyncio.iscoroutine(maybe_awaitable):
             await maybe_awaitable
 
-    return transcript, audio_duration_seconds
+    return transcript, transcription_result.duration_seconds
 
 
 def _build_transcript_from_segments(segments: list) -> tuple[str, float]:
@@ -647,7 +623,7 @@ async def _run_export_pipeline(
         await repository.update_meeting_settings(
             primary_meeting.id,
             title=request_payload.title,
-            template_key=request_payload.template,
+            template_key=normalize_template_key(request_payload.template),
             custom_prompt=request_payload.custom_prompt,
         )
     else:
@@ -655,7 +631,7 @@ async def _run_export_pipeline(
         primary_meeting_id = primary_meeting.id
         await repository.update_meeting_settings(
             primary_meeting_id,
-            template_key=request_payload.template,
+            template_key=normalize_template_key(request_payload.template),
             custom_prompt=request_payload.custom_prompt,
         )
 
@@ -666,62 +642,22 @@ async def _run_export_pipeline(
         logger.info("[step] transcription | start | reuse=True | segments=%d", len(existing_segments))
         _tx_t0 = time.monotonic()
 
-        # Run diarization on existing segments if enabled and not yet applied.
-        _settings = get_settings()
-        has_speaker_clusters = any(_speaker_identity(seg) for seg in existing_segments)
-        should_diarize = _settings.diarization_enabled and _settings.hf_token
-        # Do not overwrite reviewed speaker assignments during re-summarization.
-        if primary_meeting and primary_meeting.speaker_review_completed_at:
-            should_diarize = False
-        else:
-            should_diarize = should_diarize and not has_speaker_clusters
-        
-        if should_diarize:
-            audio_path = get_session_audio_path(session_id)
-            if not audio_path and session.ended_at:
-                audio_path = ensure_session_audio_path(session_id)
-            if audio_path:
-                await _emit_progress(progress_callback, "transcribing", "Running speaker diarization", 0.5, 0.0)
-                try:
-                    # Calculate speech end time to limit diarization processing
-                    speech_end_time = max((seg.end_time for seg in existing_segments), default=None)
-                    diarization_limit = speech_end_time + 5.0 if speech_end_time else None
-                    from src.transcription.diarize import assign_speaker, diarize
-                    limit_str = f"{diarization_limit:.1f}s" if diarization_limit else "none"
-                    with pipeline_step(logger, "diarization", limit=limit_str) as step:
-                        diarization_spans = await asyncio.to_thread(
-                            diarize,
-                            str(audio_path),
-                            _settings.hf_token,
-                            duration_limit=diarization_limit,
-                        )
-                        step["spans"] = len(diarization_spans)
-
-                    speaker_updates = {
-                        seg.id: {
-                            "speaker": assign_speaker(seg.start_time, seg.end_time, diarization_spans),
-                            "speaker_cluster": assign_speaker(
-                                seg.start_time,
-                                seg.end_time,
-                                diarization_spans,
-                            ),
-                        }
-                        for seg in existing_segments
-                    }
-                    await repository.update_segments_speaker_metadata(speaker_updates)
-                    existing_segments = await repository.get_segments(session_id=session_id)
-                    await _update_meeting_speaker_review_state(
-                        repository,
-                        primary_meeting_id,
-                        existing_segments,
-                    )
-                except Exception as exc:
-                    logger.warning(f"Diarization failed on existing segments, continuing: {exc}")
-
         full_transcript, audio_duration_seconds = _build_transcript_from_segments(existing_segments)
         logger.info("[step] transcription | done | elapsed=%.1fs | chars=%d", time.monotonic() - _tx_t0, len(full_transcript))
         await _emit_progress(progress_callback, "transcribing", "Transcription complete", 1.0, 0.0)
     else:
+        await repository.ensure_transcript_versions(session_id)
+        transcript_version = await repository.get_latest_transcript_version(session_id, include_processing=True)
+        if transcript_version is None:
+            transcript_version = await repository.create_transcript_version(
+                session_id=session_id,
+                meeting_id=primary_meeting_id,
+                version_number=1,
+                status="processing",
+                source_type="initial_transcription",
+                template_key=request_payload.template,
+                custom_prompt=request_payload.custom_prompt,
+            )
         with pipeline_step(logger, "transcription") as step:
             full_transcript, audio_duration_seconds = await _transcribe_and_persist_session(
                 session_id=session_id,
@@ -729,11 +665,18 @@ async def _run_export_pipeline(
                 repository=repository,
                 transcription_manager=transcription_manager,
                 primary_meeting_id=primary_meeting_id,
+                transcript_version_id=str(transcript_version.id),
                 progress_callback=(
                     lambda stage, message, progress: (
                         progress_callback(stage, message, progress, 0.0) if progress_callback else None
                     )
                 ),
+            )
+            await repository.update_transcript_version(
+                str(transcript_version.id),
+                status="ready",
+                transcription_backend=str(get_settings().transcription_backend),
+                transcription_model=getattr(transcription_manager.active_engine, "name", None),
             )
             step["chars"] = len(full_transcript)
 
@@ -742,7 +685,7 @@ async def _run_export_pipeline(
     logger.info("[step] transcription | unloaded model to free VRAM")
 
     # Generate summary
-    template = request_payload.template
+    template = normalize_template_key(request_payload.template)
 
     await _emit_progress(progress_callback, "summarizing", "Generating summary", 1.0, 0.02)
     _sum_t0 = time.monotonic()
@@ -792,6 +735,7 @@ async def _run_export_pipeline(
         pass2_system_prompt=summary_result.prompt_audit.get("pass2_system_prompt"),
         pass2_user_prompt=summary_result.prompt_audit.get("pass2_user_prompt"),
         attendees_snapshot=None,
+        workflow_data_json=json.dumps(summary_result.workflow_data) if summary_result.workflow_data else None,
     )
 
     summary_content = summary_result.content
@@ -941,6 +885,8 @@ async def _run_transcription_job(
     session_id: str,
     repository: Repository,
     transcription_manager: TranscriptionManager,
+    mode: str = "initial",
+    source_transcript_version_id: str | None = None,
 ) -> None:
     def update_progress(stage: str, message: str, transcription_progress: Optional[float]) -> None:
         updates = {
@@ -964,13 +910,81 @@ async def _run_transcription_job(
             meeting = await repository.create_meeting(session_id=session.id, title="Untitled Recording")
             primary_meeting_id = meeting.id
 
+        await repository.ensure_transcript_versions(session_id)
+        latest_version = await repository.get_latest_transcript_version(
+            session_id,
+            include_processing=True,
+        )
+        source_version = None
+        if source_transcript_version_id:
+            source_version = await repository.get_transcript_version_for_session(
+                session_id,
+                source_transcript_version_id,
+            )
+        if source_version is None:
+            source_version = latest_version
+
+        created_version_id: str | None = None
+        if mode == "retranscribe":
+            next_version_number = (latest_version.version_number if latest_version else 0) + 1
+            created_version = await repository.create_transcript_version(
+                session_id=session_id,
+                meeting_id=primary_meeting_id,
+                version_number=next_version_number,
+                parent_version_id=source_version.id if source_version else None,
+                status="processing",
+                source_type="retranscription",
+                template_key=normalize_template_key(
+                    source_version.template_key if source_version and source_version.template_key else DEFAULT_TEMPLATE_KEY
+                ),
+                custom_prompt=source_version.custom_prompt if source_version else None,
+            )
+            transcript_version = created_version
+            created_version_id = created_version.id
+        elif latest_version:
+            transcript_version = latest_version
+            if transcript_version.status != "processing":
+                transcript_version = await repository.update_transcript_version(
+                    latest_version.id,
+                    status="processing",
+                )
+        else:
+            transcript_version = await repository.create_transcript_version(
+                session_id=session_id,
+                meeting_id=primary_meeting_id,
+                version_number=1,
+                status="processing",
+                source_type="initial_transcription",
+                template_key=normalize_template_key(meeting.template_key or DEFAULT_TEMPLATE_KEY),
+                custom_prompt=meeting.custom_prompt,
+            )
+            created_version_id = transcript_version.id
+
+        _update_transcription_job(
+            job_id,
+            transcript_version_id=str(transcript_version.id),
+            transcript_version_number=int(transcript_version.version_number),
+        )
+
         await _transcribe_and_persist_session(
             session_id=session_id,
             session=session,
             repository=repository,
             transcription_manager=transcription_manager,
             primary_meeting_id=primary_meeting_id,
+            transcript_version_id=str(transcript_version.id),
             progress_callback=update_progress,
+        )
+
+        await repository.update_transcript_version(
+            str(transcript_version.id),
+            status="ready",
+            transcription_backend=str(get_settings().transcription_backend),
+            transcription_model=getattr(transcription_manager.active_engine, "name", None),
+            diarization_backend="whisperx" if get_settings().diarization_enabled else None,
+            diarization_model="pyannote/speaker-diarization-community-1"
+            if get_settings().diarization_enabled
+            else None,
         )
 
         _update_transcription_job(
@@ -982,6 +996,8 @@ async def _run_transcription_job(
             error=None,
         )
     except HTTPException as exc:
+        if 'created_version_id' in locals() and created_version_id:
+            await repository.update_transcript_version(created_version_id, status="failed")
         _update_transcription_job(
             job_id,
             status="failed",
@@ -990,6 +1006,8 @@ async def _run_transcription_job(
             error=str(exc.detail),
         )
     except Exception as exc:
+        if 'created_version_id' in locals() and created_version_id:
+            await repository.update_transcript_version(created_version_id, status="failed")
         _update_transcription_job(
             job_id,
             status="failed",
@@ -1004,6 +1022,7 @@ async def _build_summary_save_params(
     session,
     meeting,
     *,
+    transcript_version_id: str | None,
     summary_content: str,
     template_label: str,
     processing_duration_seconds: float | None,
@@ -1013,7 +1032,10 @@ async def _build_summary_save_params(
     pass2_user_prompt: str | None = None,
 ) -> dict:
     """Assemble markdown and path metadata for saving a summary draft."""
-    segments = await repository.get_segments(session_id=session.id)
+    segments = await repository.get_segments(
+        session_id=session.id,
+        transcript_version_id=transcript_version_id,
+    )
     transcript, audio_duration_seconds = _segments_to_transcript(segments)
 
     local_started_at = localize_datetime(
@@ -1026,7 +1048,10 @@ async def _build_summary_save_params(
     dow = local_started_at.strftime("%a")
     time_hhmm = local_started_at.strftime("%H%M")
     base_filename = f"{local_started_at.day:02d} {dow} {time_hhmm} - {safe_title or 'Untitled Recording'}"
-    existing_summaries = await repository.get_summaries(meeting.id, status="saved")
+    existing_summaries = await repository.get_summaries(
+        meeting.id,
+        status="saved",
+    )
     version_suffix = f" (v{len(existing_summaries) + 1})" if existing_summaries else ""
     filename = f"{base_filename}{version_suffix}.md"
     week_folder_name = week_folder(local_started_at)
@@ -1063,6 +1088,7 @@ async def _run_summary_job(
     session_id: str,
     summarization_manager: SummarizationManager,
     repository: Repository,
+    transcript_version_id: str | None = None,
 ) -> None:
     """Generate or regenerate a draft summary from an existing reviewed transcript."""
 
@@ -1092,14 +1118,29 @@ async def _run_summary_job(
         if not meeting:
             raise HTTPException(status_code=400, detail="No meeting found for this recording")
 
-        segments = await repository.get_segments(session_id=session_id)
+        await repository.ensure_transcript_versions(session_id)
+        transcript_version = None
+        if transcript_version_id:
+            transcript_version = await repository.get_transcript_version_for_session(
+                session_id,
+                transcript_version_id,
+            )
+        if transcript_version is None:
+            transcript_version = await repository.get_latest_transcript_version(session_id)
+        if not transcript_version:
+            raise HTTPException(status_code=409, detail="Transcription must complete before generating a summary")
+
+        segments = await repository.get_segments(
+            session_id=session_id,
+            transcript_version_id=str(transcript_version.id),
+        )
         if not session.has_transcription or not segments:
             raise HTTPException(
                 status_code=409,
                 detail="Transcription must complete before generating a summary",
             )
         transcript, _ = _build_transcript_from_segments(segments)
-        template_key = meeting.template_key or "meeting"
+        template_key = normalize_template_key(transcript_version.template_key or DEFAULT_TEMPLATE_KEY)
         await _emit_progress(update_progress, "summarizing", "Generating summary", 1.0, 0.02)
         started_at = time.monotonic()
 
@@ -1109,14 +1150,19 @@ async def _run_summary_job(
         summary_result = await summarization_manager.summarize(
             transcript=transcript,
             prompt_type=template_key,
-            custom_instructions=meeting.custom_prompt,
+            custom_instructions=transcript_version.custom_prompt,
             progress_callback=on_progress,
         )
         processing_duration = time.monotonic() - started_at
         template_label = TEMPLATE_INFO.get(template_key, {}).get("name", template_key.title())
-        latest_saved = await repository.get_latest_summary(meeting.id, status="saved")
+        latest_saved = await repository.get_latest_summary(
+            meeting.id,
+            status="saved",
+            transcript_version_id=str(transcript_version.id),
+        )
         draft = await repository.replace_draft_summary(
             meeting_id=meeting.id,
+            transcript_version_id=str(transcript_version.id),
             content=summary_result.content,
             backend=summary_result.backend,
             model=summary_result.model,
@@ -1127,12 +1173,13 @@ async def _run_summary_job(
             source_type="resummarized" if latest_saved else "generated",
             parent_summary_id=latest_saved.id if latest_saved else None,
             template_key=template_key,
-            custom_prompt=meeting.custom_prompt,
+            custom_prompt=transcript_version.custom_prompt,
             pass1_system_prompt=summary_result.prompt_audit.get("pass1_system_prompt"),
             pass1_user_prompt=summary_result.prompt_audit.get("pass1_user_prompt"),
             pass2_system_prompt=summary_result.prompt_audit.get("pass2_system_prompt"),
             pass2_user_prompt=summary_result.prompt_audit.get("pass2_user_prompt"),
             attendees_snapshot=None,
+            workflow_data_json=json.dumps(summary_result.workflow_data) if summary_result.workflow_data else None,
         )
         preview = (
             summary_result.content[:200] + "..."
@@ -1151,6 +1198,7 @@ async def _run_summary_job(
                 "summary_preview": preview,
                 "summary_content": summary_result.content,
             },
+            transcript_version_id=str(transcript_version.id),
             error=None,
         )
     except HTTPException as exc:
@@ -1218,6 +1266,7 @@ async def export_to_obsidian(
 @router.post("/recordings/{session_id}/transcription-job", response_model=TranscriptionJobCreateResponse)
 async def start_transcription_job(
     session_id: str,
+    request: StartTranscriptionJobRequest | None = None,
     repository: Repository = Depends(get_repository),
     transcription_manager: TranscriptionManager = Depends(get_transcription_manager),
 ):
@@ -1226,6 +1275,18 @@ async def start_transcription_job(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    active_job = _find_active_transcription_job(session_id)
+    if active_job:
+        job_id = str(active_job["job_id"])
+        return TranscriptionJobCreateResponse(
+            job_id=job_id,
+            status=str(active_job.get("status", "queued")),
+            poll_url=f"/api/transcription-jobs/{job_id}",
+            transcript_version_id=active_job.get("transcript_version_id"),
+            transcript_version_number=active_job.get("transcript_version_number"),
+        )
+
+    request = request or StartTranscriptionJobRequest()
     job = _create_transcription_job(session_id)
     job_id = str(job["job_id"])
     _update_transcription_job(job_id, message="Starting transcription")
@@ -1236,6 +1297,8 @@ async def start_transcription_job(
             session_id=session_id,
             repository=repository,
             transcription_manager=transcription_manager,
+            mode=request.mode,
+            source_transcript_version_id=request.source_transcript_version_id,
         )
     )
     _TRANSCRIPTION_TASKS[job_id] = task
@@ -1245,12 +1308,15 @@ async def start_transcription_job(
         job_id=job_id,
         status="queued",
         poll_url=f"/api/transcription-jobs/{job_id}",
+        transcript_version_id=job.get("transcript_version_id"),
+        transcript_version_number=job.get("transcript_version_number"),
     )
 
 
 @router.post("/recordings/{session_id}/summary-job", response_model=SummaryJobCreateResponse)
 async def start_summary_job(
     session_id: str,
+    request: StartSummaryJobRequest | None = None,
     repository: Repository = Depends(get_repository),
     summarization_manager: SummarizationManager = Depends(get_summarization_manager),
 ):
@@ -1259,7 +1325,11 @@ async def start_summary_job(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    job = _create_summary_job(session_id)
+    request = request or StartSummaryJobRequest()
+    job = _create_summary_job(
+        session_id,
+        transcript_version_id=request.transcript_version_id,
+    )
     job_id = str(job["job_id"])
     _update_summary_job(job_id, message="Starting summary generation")
 
@@ -1269,6 +1339,7 @@ async def start_summary_job(
             session_id=session_id,
             summarization_manager=summarization_manager,
             repository=repository,
+            transcript_version_id=request.transcript_version_id,
         )
     )
     _SUMMARY_TASKS[job_id] = task
@@ -1278,6 +1349,7 @@ async def start_summary_job(
         job_id=job_id,
         status="queued",
         poll_url=f"/api/summary-jobs/{job_id}",
+        transcript_version_id=request.transcript_version_id,
     )
 
 
@@ -1468,13 +1540,28 @@ async def create_summary_draft(
     if not meeting:
         raise HTTPException(status_code=404, detail="Recording not found")
 
-    existing_draft = await repository.get_draft_summary(meeting.id)
+    transcript_version_id = request.transcript_version_id
+    if transcript_version_id:
+        version = await repository.get_transcript_version_for_session(session_id, transcript_version_id)
+        if not version:
+            raise HTTPException(status_code=404, detail="Transcript version not found")
+    else:
+        version = await repository.get_latest_transcript_version(session_id)
+
+    existing_draft = await repository.get_draft_summary(
+        meeting.id,
+        transcript_version_id=str(version.id) if version else None,
+    )
     if existing_draft:
         return {"draft_summary_id": existing_draft.id}
 
     source_summary_id = request.source_summary_id
     if not source_summary_id:
-        latest_saved = await repository.get_latest_summary(meeting.id, status="saved")
+        latest_saved = await repository.get_latest_summary(
+            meeting.id,
+            status="saved",
+            transcript_version_id=str(version.id) if version else None,
+        )
         if not latest_saved:
             raise HTTPException(status_code=404, detail="No saved summary available to revise")
         source_summary_id = latest_saved.id
@@ -1534,6 +1621,11 @@ async def revise_summary_draft(
         content=revised,
         source_type="ai_revised",
     )
+    if updated is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Draft changed while AI revision was running. Reload the workspace and try again.",
+        )
     return {"draft_summary_id": updated.id, "content": updated.content}
 
 
@@ -1559,9 +1651,10 @@ async def save_summary_draft(
         repository,
         session,
         meeting,
+        transcript_version_id=draft.transcript_version_id,
         summary_content=draft.content,
         template_label=draft.template or TEMPLATE_INFO.get(
-            draft.template_key or meeting.template_key or "meeting",
+            normalize_template_key(draft.template_key or meeting.template_key or DEFAULT_TEMPLATE_KEY),
             {},
         ).get("name", "Meeting"),
         processing_duration_seconds=draft.processing_duration_seconds,
