@@ -169,12 +169,13 @@ sidekick/
 │
 ├── web/
 │   ├── index.html                    # Main recording UI
-│   ├── recordings.html               # History / re-summarize UI
+│   ├── recordings.html               # History / search / shared workspace UI
 │   ├── css/styles.css
 │   └── js/
 │       ├── app.js                    # Recording + export flow
-│       ├── recordings.js             # History + re-summarize flow
+│       ├── recordings.js             # History list, search, optimistic delete, workspace launch
 │       ├── audio.js                  # AudioCapture, visualizer
+│       ├── network.js                # Shared API/media URL resolver + fetch wrapper
 │       └── websocket.js              # WebSocket client, 25s keepalive ping
 │
 ├── data/                             # Runtime data (gitignored)
@@ -313,6 +314,7 @@ All templates are editable before export from the workspace Settings tab.
 - Main page uses a single centered `Record` action; mobile surfaces easy bottom CTAs for `History` and `Record`.
 - Main page prevents page scrolling / pull-to-refresh and guards against leaving while recording.
 - Rename happens from the editable workspace title after opening a recording.
+- History delete removes the card locally first, then does a non-blocking background refresh.
 - The Settings tab is summary-only and follows the currently selected summary version by default.
 - Summary versions are labeled `vN (Draft)`, `vN (Latest)`, then descending `vN-1 ... v1`.
 - Desktop uses the polished tab-row hide/reveal motion; mobile uses a simpler direct-tracking path for smoother touch scrolling.
@@ -397,7 +399,7 @@ Recommended approach:
 ## Gotchas
 
 - `get_settings()` is LRU-cached — restart required to pick up `.env` changes
-- Remote recording through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The app injects fallback `wss://` and `https://*.trycloudflare.com` transport targets into the HTML at render time, so restart Sidekick after the tunnel changes or if the custom domain starts loading UI but recorder/workspace requests stop reaching the app.
+- Remote use through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The app injects fallback `wss://` and `https://*.trycloudflare.com` transport targets into rendered HTML, and `web/js/network.js` rewrites browser `/api/...` plus recording-media URLs onto that fallback when present. Restart Sidekick after the tunnel changes or if the custom domain starts loading UI but recorder/workspace requests stop reaching the app.
 - **`qwen3` vs `qwen3.5` thinking**: `qwen3:8b` properly respects `OLLAMA_THINK=false`. `qwen3.5` models always generate internal thinking tokens regardless of this setting — not suppressable.
 - **`OLLAMA_NUM_GPU=99`**: required to prevent Ollama's conservative auto-estimate from offloading layers to CPU.
 - `SUMMARIZATION_TIMEOUT_SECONDS` is only a per-call timeout. It does not control model unloading.

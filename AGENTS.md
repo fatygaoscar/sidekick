@@ -64,12 +64,13 @@ sidekick/
 │
 ├── web/
 │   ├── index.html                    # Main recording UI
-│   ├── recordings.html               # History UI (opens the shared workspace)
+│   ├── recordings.html               # History / search UI (opens the shared workspace)
 │   ├── css/styles.css                # Mobile-optimized (13px text, no double scroll)
 │   └── js/
 │       ├── app.js                    # Recording + export flow + main-page navigation guards
-│       ├── recordings.js             # History cards + workspace launch
+│       ├── recordings.js             # History cards, search, optimistic delete, workspace launch
 │       ├── audio.js                  # AudioCapture + DAW-style spectrum analyzer
+│       ├── network.js                # Shared API/media URL resolver + fetch wrapper for go.sidekickgo.app
 │       └── websocket.js              # WebSocket client, 25s keepalive ping
 │
 ├── data/                             # Runtime data (gitignored)
@@ -199,6 +200,7 @@ Default template: `meeting`
 - **Summary Version labels:** `vN (Draft)`, `vN (Latest)`, then descending `vN-1 ... v1`.
 - **Audio player** is at the bottom of the view modal.
 - **Card titles:** Plain meeting title (no date prefix); date shown separately.
+- **History delete:** Optimistic local removal first, then a non-blocking background refresh. Do not reintroduce a blocking full-list refetch requirement after delete.
 - **Mobile optimization:** `13px` text, `1.7` line height, single-unit scroll, Details grid uses `word-break` to prevent horizontal overflow.
 - **Workspace tab motion:** Desktop uses the polished hide/reveal motion. Mobile uses a simpler direct-tracking path to avoid touch-scroll jank.
 - **Main page guards:** The recording page disables page scroll / pull-to-refresh and blocks in-app navigation while recording.
@@ -266,6 +268,9 @@ Default template: `meeting`
 ## Gotchas
 
 - `get_settings()` is LRU-cached — restart required to pick up `.env` changes.
+- Remote use through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The app injects fallback `wss://` and `https://*.trycloudflare.com` transport targets into rendered HTML, and `web/js/network.js` rewrites browser `/api/...` plus recording-media URLs onto that fallback when present.
+- **PWA planning doc:** The current PWA/app-store transition plan lives in `docs/pwa-plan.md` and is mirrored in the Obsidian vault under `Sidekick/pwa-plan.md`.
+- **Frontend cache busting:** If `web/index.html` or `web/recordings.html` changes do not appear after a refresh, bump the `?v=` query string on the referenced `/static/css/*.css` or `/static/js/*.js` asset in the HTML entrypoint you touched. This is the first thing to check when the browser appears stuck on old UI code.
 - **qwen3 vs qwen3.5 thinking**: `qwen3:8b` properly respects `OLLAMA_THINK=false`. `qwen3.5` models always generate 3000-5000 think tokens per call regardless of this setting — not suppressable at the application level.
 - `OLLAMA_NUM_GPU=99` is required — Ollama's auto-estimate offloads ~3 layers to CPU for qwen3:8b (shows 8%/92% split in `ollama ps`). This halves tok/s. Setting `num_gpu=99` forces all layers to GPU.
 - `temperature=0.3` is set in all Ollama call options for consistent, factual output (Ollama default is 0.8).

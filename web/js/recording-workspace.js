@@ -872,7 +872,7 @@
                                 </div>
                             </div>
                             <div class="speaker-card-controls">
-                                <audio id="workspace-speaker-audio-${index}" preload="none" src="${speaker.audio_url}"></audio>
+                                <audio id="workspace-speaker-audio-${index}" preload="none" src="${this._escapeHtml(this._resolveApiMediaUrl(speaker.audio_url))}"></audio>
                                 <button
                                     type="button"
                                     class="btn btn-small speaker-audio-btn"
@@ -1489,15 +1489,17 @@
                 }
             });
 
-            const response = await fetch(`/api/recordings/${this.state.sessionId}/speakers`, {
+            await this._jsonRequest(`/api/recordings/${this.state.sessionId}/speakers`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ assignments }),
+            }, {
+                timeoutMs: 10000,
+                retries: 1,
+                networkErrorMessage: 'Workspace network request failed',
+                httpErrorMessage: 'Failed to save speaker assignments',
+                logLabel: 'workspace_speakers:save',
             });
-            if (!response.ok) {
-                const error = await response.json().catch(() => ({}));
-                throw new Error(error.detail || 'Failed to save speaker assignments');
-            }
 
             this.state.speakerDirty = false;
             await this._loadWorkspace();
@@ -1535,15 +1537,17 @@
             this.elements.refineSubmit.disabled = true;
             this.elements.refineSubmit.textContent = 'Revising...';
             try {
-                const response = await fetch(`/api/summary-drafts/${draftId}/revise`, {
+                await this._jsonRequest(`/api/summary-drafts/${draftId}/revise`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ instruction }),
+                }, {
+                    timeoutMs: 10000,
+                    retries: 1,
+                    networkErrorMessage: 'Workspace network request failed',
+                    httpErrorMessage: 'Revision failed',
+                    logLabel: 'workspace_summary:revise',
                 });
-                if (!response.ok) {
-                    const error = await response.json().catch(() => ({}));
-                    throw new Error(error.detail || 'Revision failed');
-                }
                 this.state.showRefineInput = false;
                 await this._loadWorkspace();
                 if (this.state.workspace?.draft_summary?.id) {
@@ -1592,14 +1596,20 @@
             const nextContent = this.elements.summaryEdit.value;
             if (nextContent !== currentContent) {
                 this.state.summaryHistory.push(currentContent);
-                const response = await fetch(`/api/summary-drafts/${draft.id}`, {
-                    method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content: nextContent }),
-                });
-                if (!response.ok) {
-                    const error = await response.json().catch(() => ({}));
-                    this._showBanner(error.detail || 'Failed to save manual edits.', 'error');
+                try {
+                    await this._jsonRequest(`/api/summary-drafts/${draft.id}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ content: nextContent }),
+                    }, {
+                        timeoutMs: 10000,
+                        retries: 1,
+                        networkErrorMessage: 'Workspace network request failed',
+                        httpErrorMessage: 'Failed to save manual edits.',
+                        logLabel: 'workspace_summary:manual_edit',
+                    });
+                } catch (error) {
+                    this._showBanner(error.message || 'Failed to save manual edits.', 'error');
                     return;
                 }
                 await this._loadWorkspace();
@@ -1625,14 +1635,20 @@
                 this._showBanner(error.message || 'Failed to create summary draft.', 'error');
                 return;
             }
-            const response = await fetch(`/api/summary-drafts/${draftId}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: previous }),
-            });
-            if (!response.ok) {
-                const error = await response.json().catch(() => ({}));
-                this._showBanner(error.detail || 'Failed to undo summary change.', 'error');
+            try {
+                await this._jsonRequest(`/api/summary-drafts/${draftId}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content: previous }),
+                }, {
+                    timeoutMs: 10000,
+                    retries: 1,
+                    networkErrorMessage: 'Workspace network request failed',
+                    httpErrorMessage: 'Failed to undo summary change.',
+                    logLabel: 'workspace_summary:undo',
+                });
+            } catch (error) {
+                this._showBanner(error.message || 'Failed to undo summary change.', 'error');
                 return;
             }
             await this._loadWorkspace();
@@ -1647,19 +1663,20 @@
                 return this.state.workspace.draft_summary.id;
             }
 
-            const response = await fetch(`/api/recordings/${this.state.sessionId}/summary-draft`, {
+            const payload = await this._jsonRequest(`/api/recordings/${this.state.sessionId}/summary-draft`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     source_type: sourceType,
                     source_summary_id: null,
                 }),
+            }, {
+                timeoutMs: 10000,
+                retries: 1,
+                networkErrorMessage: 'Workspace network request failed',
+                httpErrorMessage: 'Failed to create summary draft',
+                logLabel: 'workspace_summary:create_draft',
             });
-            if (!response.ok) {
-                const error = await response.json().catch(() => ({}));
-                throw new Error(error.detail || 'Failed to create summary draft');
-            }
-            const payload = await response.json();
             await this._loadWorkspace();
             this.state.selectedSavedSummaryId = payload.draft_summary_id;
             return payload.draft_summary_id;
@@ -1675,13 +1692,15 @@
             this.elements.primaryBtn.disabled = true;
             this.elements.primaryBtn.textContent = 'Saving...';
             try {
-                const response = await fetch(`/api/summary-drafts/${draft.id}/save`, {
+                await this._jsonRequest(`/api/summary-drafts/${draft.id}/save`, {
                     method: 'POST',
+                }, {
+                    timeoutMs: 10000,
+                    retries: 1,
+                    networkErrorMessage: 'Workspace network request failed',
+                    httpErrorMessage: 'Failed to save draft',
+                    logLabel: 'workspace_summary:save_draft',
                 });
-                if (!response.ok) {
-                    const error = await response.json().catch(() => ({}));
-                    throw new Error(error.detail || 'Failed to save draft');
-                }
                 await this._loadWorkspace();
                 this.state.selectedSavedSummaryId = this.state.workspace?.saved_summaries?.[0]?.id || null;
                 this.state.activeTab = 'summary';
@@ -1934,15 +1953,21 @@
                 custom_prompt: this._settingsCustomPromptValue(),
             };
 
-            const response = await fetch(`/api/recordings/${this.state.sessionId}/settings`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-            });
-            if (!response.ok) {
-                const error = await response.json().catch(() => ({}));
+            try {
+                await this._jsonRequest(`/api/recordings/${this.state.sessionId}/settings`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                }, {
+                    timeoutMs: 10000,
+                    retries: 1,
+                    networkErrorMessage: 'Workspace network request failed',
+                    httpErrorMessage: 'Failed to save settings.',
+                    logLabel: 'workspace_settings:save',
+                });
+            } catch (error) {
                 this.state.pendingResetSummaryId = null;
-                this._showBanner(error.detail || 'Failed to save settings.', 'error');
+                this._showBanner(error.message || 'Failed to save settings.', 'error');
                 return false;
             }
 
@@ -1970,6 +1995,13 @@
 
         async _jsonRequest(url, options = {}, config = {}) {
             return window.SidekickNetwork.json(url, options, config);
+        }
+
+        _resolveApiMediaUrl(url) {
+            if (!url) {
+                return '';
+            }
+            return window.SidekickNetwork.resolveUrl(url);
         }
 
         _revertOpenState() {

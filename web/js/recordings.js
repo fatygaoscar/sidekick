@@ -8,6 +8,7 @@
 class RecordingsPage {
     constructor() {
         this.recordings = [];
+        this.deletingIds = new Set();
         this.workspace = new window.RecordingWorkspace({
             onClose: () => this._loadRecordings(),
         });
@@ -24,18 +25,30 @@ class RecordingsPage {
         await this._loadRecordings();
     }
 
-    async _loadRecordings() {
-        try {
-            const response = await fetch('/api/recordings');
-            if (!response.ok) {
-                throw new Error('Failed to load recordings');
-            }
+    async _loadRecordings(options = {}) {
+        const {
+            renderErrorOnFailure = true,
+        } = options;
 
-            this.recordings = await response.json();
+        console.info('[recordings:load:start]');
+        try {
+            this.recordings = await window.SidekickNetwork.json('/api/recordings', {}, {
+                timeoutMs: 10000,
+                retries: 1,
+                networkErrorMessage: 'Recordings network request failed',
+                httpErrorMessage: 'Failed to load recordings',
+                logLabel: 'recordings:load',
+            });
+            console.info('[recordings:load:ok]', { count: this.recordings.length });
             this._renderRecordings();
         } catch (error) {
             console.error('Failed to load recordings:', error);
-            this._renderError();
+            console.warn('[recordings:load:fail]', {
+                message: error?.message || 'Failed to load recordings',
+            });
+            if (renderErrorOnFailure) {
+                this._renderError();
+            }
         }
     }
 
@@ -97,6 +110,10 @@ class RecordingsPage {
             badges.push('<span class="workspace-badge">Saved</span>');
         }
 
+        const isDeleting = this.deletingIds.has(recording.id);
+        const deleteDisabledAttr = isDeleting ? ' disabled aria-disabled="true"' : '';
+        const deleteLabel = isDeleting ? 'Deleting...' : 'Delete';
+
         return `
             <div class="recording-card" data-id="${recording.id}">
                 <div class="recording-card-shell">
@@ -117,7 +134,7 @@ class RecordingsPage {
                     </div>
                 </div>
                 <div class="recording-card-footer">
-                    <button class="btn delete-btn" data-id="${recording.id}">Delete</button>
+                    <button class="btn delete-btn" data-id="${recording.id}"${deleteDisabledAttr}>${deleteLabel}</button>
                     <div class="recording-actions">
                         <button class="btn btn-primary view-btn" data-id="${recording.id}">Open</button>
                     </div>
@@ -136,19 +153,44 @@ class RecordingsPage {
     }
 
     async _deleteRecording(id) {
+        if (!id || this.deletingIds.has(id)) {
+            return;
+        }
+
         const confirmed = window.confirm('Delete this recording and all associated transcript and summary data?');
         if (!confirmed) {
             return;
         }
 
-        const response = await fetch(`/api/recordings/${id}`, { method: 'DELETE' });
-        if (!response.ok) {
-            const error = await response.json().catch(() => ({}));
-            alert(error.detail || 'Failed to delete recording');
-            return;
-        }
+        this.deletingIds.add(id);
+        this._renderRecordings();
+        console.info('[recordings:delete:start]', { recordingId: id });
 
-        await this._loadRecordings();
+        try {
+            await window.SidekickNetwork.request(`/api/recordings/${id}`, {
+                method: 'DELETE',
+            }, {
+                timeoutMs: 10000,
+                retries: 1,
+                networkErrorMessage: 'Recordings delete network request failed',
+                logLabel: 'recordings:delete',
+            });
+
+            this.recordings = this.recordings.filter((recording) => recording.id !== id);
+            console.info('[recordings:delete:ok]', { recordingId: id });
+            this._renderRecordings();
+            void this._loadRecordings({ renderErrorOnFailure: false });
+        } catch (error) {
+            console.error('Failed to delete recording:', error);
+            console.warn('[recordings:delete:fail]', {
+                recordingId: id,
+                message: error?.message || 'Failed to delete recording',
+            });
+            alert(error?.message || 'Failed to delete recording');
+        } finally {
+            this.deletingIds.delete(id);
+            this._renderRecordings();
+        }
     }
 
     _formatDuration(seconds) {

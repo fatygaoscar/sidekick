@@ -94,6 +94,7 @@ Legacy templates (constants kept for backward compat, not in UI): `one_on_one`, 
 - **Audio player** is positioned at the bottom of the modal (below summary, above Downloads).
 - Download affordances in the view modal (`Download Audio`, `Download Transcript`).
 - Recording list cards show plain title (no date prefix) — date is shown separately on the card.
+- History delete is optimistic: remove the card locally first, then do a non-blocking background refresh instead of depending on a full blocking refetch.
 - Template chooser shows 4 templates in the order above.
 - Keep `General Meeting` as default unless explicit product changes requested.
 - Speaker naming is manual-first in the workspace `Speakers` tab.
@@ -173,7 +174,10 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 ## Notes
 
 - Obsidian Sync is near-real-time, not truly instant.
+- PWA planning doc: `docs/pwa-plan.md` in-repo, mirrored to the Obsidian vault under `Sidekick/pwa-plan.md`.
 - `./stop.sh` can stop managed or detected unmanaged Sidekick processes.
 - First startup with large-v3 Whisper model may be slow (downloads ~3GB).
 - First export with diarization enabled downloads pyannote models (~1GB, cached after).
 - `get_settings()` is LRU-cached — always `./restart.sh` after `.env` changes.
+- Remote use through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The rendered HTML injects fallback `wss://` and `https://*.trycloudflare.com` transport targets, and `web/js/network.js` rewrites browser `/api/...` plus recording-media URLs onto that fallback when present.
+- Frontend cache busting: if a change to `web/index.html`, `web/recordings.html`, `web/css/styles.css`, or `web/js/*.js` does not show up after refresh, bump the `?v=` asset query string in the relevant HTML entrypoint first. Treat stale browser assets as a common cause before assuming the CSS/JS change failed.

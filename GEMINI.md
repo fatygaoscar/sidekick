@@ -22,6 +22,7 @@ This document contains foundational mandates for the Gemini CLI agent working on
 ## Technical Guardrails
 
 - **Git Safety:** Always check `.gitignore` before `git add .`. Never commit `data/` or `.env`.
+- **Frontend Cache Busting:** If browser UI changes appear not to apply, bump the `?v=` query string for the referenced `/static/css` or `/static/js` asset in `web/index.html` or `web/recordings.html` before assuming the edit failed.
 - **Port Checking:** Use the `connect()` method for checking port availability to avoid WSL false positives.
 - **Ollama Optimization:** Maintain `OLLAMA_CONTEXT_LENGTH=32768` for `qwen3:8b`. Use dynamic `num_ctx` calculation based on input size to speed up Ollama initialization for short meetings. `OLLAMA_NUM_GPU=99` forces all layers to GPU — never remove this.
 - **Ollama Think:** Always pass `think: false` to Ollama for summarization. Note: this only works for `qwen3` models. `qwen3.5` models always think regardless.
@@ -29,6 +30,8 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **Speaker Labels:** Manual speaker mapping in the workspace is the source of truth. User-facing transcript and summary output must never expose raw `SPEAKER_XX`; use fallback labels like `Attendee`, `Attendee A`, `Attendee B` when unresolved.
 - **Rename Flow:** Recording rename lives in the workspace title after opening a recording; do not reintroduce card-level rename controls.
 - **Card Actions:** Recording cards use `Open` and `Delete`, with `Open` as the primary action.
+- **History Delete Flow:** Keep delete optimistic on the History page. Remove the card locally first, then refresh in the background; do not require a blocking full-list reload just to keep delete usable.
+- **Custom Domain Transport:** When running through `go.sidekickgo.app`, keep browser `/api/...` requests and recording-media URLs on the shared fallback-aware transport layer in `web/js/network.js`; do not bypass it with raw same-origin URLs.
 - **Database Migrations:** Use the `init_db` pattern in `src/sessions/repository.py` to automatically backfill schema changes for existing users.
 
 ## Project Context
