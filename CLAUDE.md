@@ -36,10 +36,11 @@ python -m src.main
 - `src/api/routes/websocket.py`
 - Controlled by `.env`: `LIVE_TRANSCRIPTION_PREVIEW=true|false`
 - Used only for in-session preview — not the source of truth for export
+- Disabled when `TRANSCRIPTION_BACKEND=local` because WhisperX is file-oriented
 
 ### 2) Export Pipeline (authoritative)
 
-`saved audio file -> transcription -> diarization -> cohesive summary -> markdown`
+`saved audio file -> WhisperX transcribe -> align -> diarize -> cohesive summary -> markdown`
 
 - `src/api/routes/export.py`
 - Uses saved session audio from `data/audio/`
@@ -48,16 +49,14 @@ python -m src.main
 
 ### 3) Summarization
 
-`transcript -> humanized speaker labels -> two-pass cohesive summary -> markdown`
+`transcript -> humanized speaker labels -> cohesive two-pass summary -> markdown`
 
-- All templates use `generate_cohesive_summary()` in `src/summarization/cohesive.py`
+- `meeting` uses `generate_cohesive_summary()` in `src/summarization/cohesive.py`
+- Other templates continue to use `generate_cohesive_summary()` in `src/summarization/cohesive.py`
 - **Speaker handling**: unresolved diarization labels are converted to `Attendee`, `Attendee A`, `Attendee B`, etc. before summarization
-- **Pass 1 (draft)**: template style contract → draft following exact section structure
-- **Pass 2 (polish)**: editorial rewrite preserving all `##` headers from draft
-- **Retry pass**: triggered if artifacts or repeated sentences detected in pass 2 output
+- **Cohesive path**: pass 1 draft → pass 2 polish → retry if artifacts/repetition
 - Context budget: full transcript when it fits; compressed evidence pack fallback for long meetings; chunked extraction for very long meetings
-
-Pipeline modules (`src/summarization/pipeline/`) remain in codebase but are **not invoked from export**.
+Pipeline modules (`src/summarization/pipeline/`) are deprecated experimental code and are not part of normal summary routing.
 
 ## Summary Templates
 
@@ -111,8 +110,10 @@ TRANSCRIPTION_BACKEND=local
 WHISPER_MODEL_SIZE=large-v3
 WHISPER_DEVICE=cuda
 WHISPER_COMPUTE_TYPE=float16
+WHISPERX_BATCH_SIZE=16
 
 SUMMARIZATION_BACKEND=ollama
+SUMMARIZATION_MEETING_STRUCTURED_ENABLED=false
 OLLAMA_HOST=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3:8b
 OLLAMA_THINK=false
@@ -177,7 +178,7 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - PWA planning doc: `docs/pwa-plan.md` in-repo, mirrored to the Obsidian vault under `Sidekick/pwa-plan.md`.
 - `./stop.sh` can stop managed or detected unmanaged Sidekick processes.
 - First startup with large-v3 Whisper model may be slow (downloads ~3GB).
-- First export with diarization enabled downloads pyannote models (~1GB, cached after).
+- First local WhisperX run may download alignment and diarization assets (cached after first use).
 - `get_settings()` is LRU-cached — always `./restart.sh` after `.env` changes.
 - Remote use through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The rendered HTML injects fallback `wss://` and `https://*.trycloudflare.com` transport targets, and `web/js/network.js` rewrites browser `/api/...` plus recording-media URLs onto that fallback when present.
 - Frontend cache busting: if a change to `web/index.html`, `web/recordings.html`, `web/css/styles.css`, or `web/js/*.js` does not show up after refresh, bump the `?v=` asset query string in the relevant HTML entrypoint first. Treat stale browser assets as a common cause before assuming the CSS/JS change failed.

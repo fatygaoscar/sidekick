@@ -5,7 +5,8 @@ This document contains foundational mandates for the Gemini CLI agent working on
 ## Engineering Standards
 
 - **Obsidian First:** All summarization logic must prioritize scannability in Obsidian. Use bullet points (`-`), nested indentation (2 spaces), and blank lines between sections. **No long paragraphs.**
-- **Local AI Integrity:** Ensure all AI operations (transcription, diarization, summarization) remain compatible with local backends (faster-whisper, pyannote, Ollama).
+- **Local AI Integrity:** Ensure all AI operations remain compatible with the current local stack (WhisperX for transcription/alignment/diarization, Ollama for summarization).
+- **Meeting Summaries:** `General Meeting` uses the legacy cohesive two-pass summarizer with a relevance-first prompt contract. Prefer selective, useful notes over exhaustive coverage.
 - **Mobile optimization:** Maintain the iPhone-friendly UI. Do not re-introduce internal scrollbars or oversized text. Modals must expand and scroll as a single unit.
 - **Workspace Motion Split:** Keep the current device-specific tab-row behavior: polished hide/reveal on desktop, simpler direct tracking on mobile for touch-scroll stability.
 - **Main Recording Guardrails:** Keep the main page non-scrollable, resistant to pull-to-refresh, and guarded against navigation while recording.
@@ -28,6 +29,7 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **Ollama Think:** Always pass `think: false` to Ollama for summarization. Note: this only works for `qwen3` models. `qwen3.5` models always think regardless.
 - **temperature=0.3:** Always pass `temperature: 0.3` to Ollama for consistent, factual summarization output.
 - **Speaker Labels:** Manual speaker mapping in the workspace is the source of truth. User-facing transcript and summary output must never expose raw `SPEAKER_XX`; use fallback labels like `Attendee`, `Attendee A`, `Attendee B` when unresolved.
+- **Decision Precision:** In meeting summaries, prefer under-classifying to hallucinating a decision or action owner. If ownership or commitment is unclear, keep the item unresolved.
 - **Rename Flow:** Recording rename lives in the workspace title after opening a recording; do not reintroduce card-level rename controls.
 - **Card Actions:** Recording cards use `Open` and `Delete`, with `Open` as the primary action.
 - **History Delete Flow:** Keep delete optimistic on the History page. Remove the card locally first, then refresh in the background; do not require a blocking full-list reload just to keep delete usable.

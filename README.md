@@ -5,8 +5,8 @@ Browser-based meeting recorder that transcribes audio, identifies speakers, and 
 ## Features
 
 - **High-fidelity audio** — captures and plays back at 48kHz (DVD quality) while downsampling to 16kHz for AI
-- **Local transcription** via faster-whisper large-v3 (CUDA)
-- **Speaker diarization** via pyannote.audio 3.1 — speech-aware optimization skips silent ends
+- **Local transcription** via WhisperX large-v3 (CUDA, float16)
+- **Speaker alignment + diarization** via WhisperX forced alignment and diarization pipeline
 - **Manual-first speaker identification** — review speaker clips and assign names directly in the workspace
 - **Readable unresolved speakers** — transcript and summary views use `Attendee`, `Attendee A`, `Attendee B`, etc. instead of raw `SPEAKER_XX`
 - **Eager background processing** — transcription starts in the background as soon as recording stops, so export skips Whisper when you click Process
@@ -16,6 +16,7 @@ Browser-based meeting recorder that transcribes audio, identifies speakers, and 
 - **Prompt Audit Export** — Obsidian exports include the exact Pass 1 / Pass 2 prompts used plus a collapsed transcript section
 - **DAW-style analyzer** — the live recording visualizer uses a higher-resolution log-spaced spectrum analyzer while keeping the same minimal style
 - **Obsidian-Optimized Formatting** — summaries use nested bullet points and clean spacing for maximum scannability
+- **Relevance-first meeting summaries** — `General Meeting` uses the cohesive two-pass summarizer with a selective prompt contract that surfaces only useful, high-signal notes
 - **Smart Versioning** — Obsidian exports append `(v2)`, `(v3)`, etc., to prevent overwriting existing notes
 - **Performance Optimizations** — dynamic context sizing and single-pass early exit for ultra-fast short meeting processing
 - **Structured templates** — general meeting, strategic review, working session, custom
@@ -48,6 +49,7 @@ Then open `http://localhost:8000`.
 │                                                             │
 │  Microphone → WebSocket chunks → Live preview text         │
 │  src/api/routes/websocket.py                               │
+│  Disabled when TRANSCRIPTION_BACKEND=local (WhisperX).     │
 │  Not source of truth. Not used in export.                  │
 └─────────────────────────────────────────────────────────────┘
 
@@ -77,20 +79,9 @@ Browser
                     └───────┬────────┬───────┘
                          YES│        │NO
                             │        ▼
-                            │   faster-whisper large-v3 (CUDA)
-                            │   Word-level timestamps → segments → DB
-                            │        │
-                    ┌───────▼────────▼───────┐
-                    │  DIARIZATION ENABLED?  │
-                    │  (DIARIZATION_ENABLED) │
-                    └───────────┬────────────┘
-                             YES│  (skipped if speakers already in DB)
-                                ▼
-                    pyannote/speaker-diarization-3.1
-                    Audio loaded via PyAV (bundled FFmpeg)
-                    → (start, end, SPEAKER_XX) spans
-                    → assign_speaker() aligns to transcript segments
-                    → Saved to DB (TranscriptSegment.speaker)
+                            │   WhisperX large-v3 (CUDA, float16, batch 16)
+                            │   transcribe → forced alignment → diarization
+                            │   → aligned speaker-labeled segments → DB
                                 │
                     ┌───────────▼────────────────────────────────┐
                     │  Build transcript string                    │
@@ -98,18 +89,10 @@ Browser
                     └───────────┬────────────────────────────────┘
                                 │
                     ┌───────────▼────────────────────────────────┐
-                    │  SUMMARIZATION  (cohesive.py)              │
+                    │  SUMMARIZATION                             │
                     │                                            │
-                    │  Pass 1: Draft                             │
-                    │    system: template style contract         │
-                    │    user:  transcript (or compressed pack   │
-                    │           if transcript > context budget)  │
-                    │                                            │
-                    │  Pass 2: Editorial polish                  │
-                    │    Preserves all ## headers from draft     │
-                    │                                            │
-                    │  Retry (if artifacts / repetition):        │
-                    │    One additional cleanup pass             │
+                    │  cohesive.py two-pass summary              │
+                    │  relevance-first draft + editorial polish  │
                     └───────────┬────────────────────────────────┘
                                 │
                     Build Obsidian markdown:
@@ -138,7 +121,7 @@ sidekick/
 │   │   └── routes/
 │   │       ├── export.py             # Async export jobs, diarization, transcription pipeline
 │   │       ├── sessions.py           # Recording CRUD, chunked audio upload
-│   │       └── websocket.py          # Live audio stream + optional live preview
+│   │       └── websocket.py          # Live audio stream; preview only for compatible backends
 │   ├── audio/
 │   │   └── storage.py                # Audio file management, chunk recovery
 │   ├── core/
@@ -154,7 +137,7 @@ sidekick/
 │   │   ├── manager.py                # Summarization orchestration
 │   │   ├── ollama_backend.py         # Ollama client, strips <think> blocks
 │   │   ├── prompts.py                # Template strings + TEMPLATE_INFO (UI order)
-│   │   └── pipeline/                 # Kept in codebase but NOT invoked from export
+│   │   └── pipeline/                 # Deprecated experimental meeting summarization pipeline
 │   │       ├── types.py
 │   │       ├── chunker.py
 │   │       ├── extraction.py
@@ -163,9 +146,10 @@ sidekick/
 │   │       ├── narrator.py
 │   │       └── pipeline.py
 │   └── transcription/
-│       ├── diarize.py                # pyannote.audio 4.x diarization (PyAV audio loading)
+│       ├── diarize.py                # Legacy standalone pyannote helpers (deprecated runtime path)
 │       ├── manager.py                # Transcription orchestration
-│       └── whisper_local.py          # faster-whisper with progress callbacks
+│       ├── whisper_local.py          # Legacy faster-whisper engine (deprecated runtime path)
+│       └── whisperx_local.py         # WhisperX local engine for authoritative file transcription
 │
 ├── web/
 │   ├── index.html                    # Main recording UI
@@ -204,6 +188,7 @@ TRANSCRIPTION_BACKEND=local
 WHISPER_MODEL_SIZE=large-v3
 WHISPER_DEVICE=cuda
 WHISPER_COMPUTE_TYPE=float16
+WHISPERX_BATCH_SIZE=16
 
 # Speaker Diarization
 HF_TOKEN=<your_huggingface_read_token>
@@ -211,6 +196,7 @@ DIARIZATION_ENABLED=true
 
 # Summarization
 SUMMARIZATION_BACKEND=ollama
+SUMMARIZATION_MEETING_STRUCTURED_ENABLED=false
 OLLAMA_HOST=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3:8b
 OLLAMA_THINK=false
@@ -275,9 +261,8 @@ Diarization is free, fully local, and runs on GPU.
 
 1. Create a free account at [huggingface.co](https://huggingface.co)
 2. Accept the license for each gated model:
-   - [pyannote/speaker-diarization-3.1](https://hf.co/pyannote/speaker-diarization-3.1)
-   - [pyannote/segmentation-3.0](https://hf.co/pyannote/segmentation-3.0)
-   - [pyannote/speaker-diarization-community-1](https://hf.co/pyannote/speaker-diarization-community-1)
+   - WhisperX diarization dependencies gated by your Hugging Face token
+   - language-specific WhisperX alignment models loaded on demand
 3. Generate a read token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
 4. Add to `.env`:
    ```bash
@@ -404,7 +389,8 @@ Recommended approach:
 - **`OLLAMA_NUM_GPU=99`**: required to prevent Ollama's conservative auto-estimate from offloading layers to CPU.
 - `SUMMARIZATION_TIMEOUT_SECONDS` is only a per-call timeout. It does not control model unloading.
 - Summarization calls now send Ollama `keep_alive=0`, so the summarization model unloads immediately after each call finishes.
-- Pipeline package (`src/summarization/pipeline/`) exists in codebase but is **not called from export**
+- `SUMMARIZATION_MEETING_STRUCTURED_ENABLED` is deprecated. Normal meeting summaries use the cohesive two-pass summarizer.
+- When that flag is `false`, or if the structured path fails/returns no evidence, Sidekick falls back to the existing cohesive two-pass summarizer.
 - Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist; it does not require attendees.
 - Speaker identity is manual-first. The `Speakers` tab is the only product-facing place to map diarization clusters to real names.
 - If a speaker is still unresolved, transcript and summary output use fallback labels like `Attendee`, `Attendee A`, `Attendee B`.

@@ -34,7 +34,7 @@ sidekick/
 │   │   └── routes/
 │   │       ├── export.py             # Async export jobs, diarization, transcription pipeline
 │   │       ├── sessions.py           # Recording CRUD, chunked audio upload, refined saves
-│   │       └── websocket.py          # Live audio stream + optional live preview
+│   │       └── websocket.py          # Live audio stream; preview only for compatible backends
 │   ├── audio/
 │   │   └── storage.py                # Audio file management, chunk recovery
 │   ├── core/
@@ -49,7 +49,7 @@ sidekick/
 │   │   ├── manager.py                # Summarization orchestration
 │   │   ├── ollama_backend.py         # Ollama client, strips <think> blocks
 │   │   ├── prompts.py                # Template strings + TEMPLATE_INFO (UI order)
-│   │   └── pipeline/                 # Kept in codebase but NOT invoked from export
+│   │   └── pipeline/                 # Deprecated experimental meeting summarization pipeline
 │   │       ├── types.py
 │   │       ├── chunker.py
 │   │       ├── extraction.py
@@ -58,9 +58,10 @@ sidekick/
 │   │       ├── narrator.py
 │   │       └── pipeline.py
 │   └── transcription/
-│       ├── diarize.py                # pyannote.audio 4.x diarization (PyAV audio loading)
+│       ├── diarize.py                # Legacy standalone pyannote helpers (deprecated runtime path)
 │       ├── manager.py                # Transcription orchestration
-│       └── whisper_local.py          # faster-whisper with progress callbacks
+│       ├── whisper_local.py          # Legacy faster-whisper engine (deprecated runtime path)
+│       └── whisperx_local.py         # WhisperX local engine for authoritative file transcription
 │
 ├── web/
 │   ├── index.html                    # Main recording UI
@@ -106,20 +107,9 @@ Browser
                     └───────┬────────┬───────┘
                          YES│        │NO
                             │        ▼
-                            │   Whisper large-v3 (CUDA)
-                            │   Word-level timestamps → segments → DB
-                            │        │
-                    ┌───────▼────────▼───────┐
-                    │  DIARIZATION ENABLED?  │
-                    │  (DIARIZATION_ENABLED) │
-                    └───────────┬────────────┘
-                             YES│
-                                ▼
-                    pyannote/speaker-diarization-3.1
-                    Audio loaded via PyAV (no system FFmpeg)
-                    → (start, end, SPEAKER_XX) spans
-                    → assign_speaker() aligns to segments
-                    → DB update (update_segments_speakers)
+                            │   WhisperX large-v3 (CUDA, float16, batch 16)
+                            │   transcribe → forced alignment → diarization
+                            │   → aligned speaker-labeled segments → DB
                                 │
                     ┌───────────▼────────────────────────────────┐
                     │  Build transcript string                    │
@@ -127,15 +117,10 @@ Browser
                     └───────────┬────────────────────────────────┘
                                 │
                     ┌───────────▼────────────────────────────────┐
-                    │  SUMMARIZATION  (cohesive.py)              │
+                    │  SUMMARIZATION                             │
                     │                                            │
-                    │  Pass 1: Draft (Indented bullets)          │
-                    │    system: template style contract         │
-                    │    user:  transcript                       │
-                    │                                            │
-                    │  Pass 2: Editorial polish (No paragraphs)  │
-                    │    Preserves all ## headers from draft     │
-                    │                                            │
+                    │  cohesive.py two-pass summary              │
+                    │  relevance-first draft + editorial polish  │
                     └───────────┬────────────────────────────────┘
                                 │
                     Build Obsidian markdown (markdown_utils.py):
@@ -155,9 +140,11 @@ TRANSCRIPTION_BACKEND=local
 WHISPER_MODEL_SIZE=large-v3
 WHISPER_DEVICE=cuda
 WHISPER_COMPUTE_TYPE=float16
+WHISPERX_BATCH_SIZE=16
 
 # Summarization
 SUMMARIZATION_BACKEND=ollama
+SUMMARIZATION_MEETING_STRUCTURED_ENABLED=false
 OLLAMA_HOST=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen3:8b
 OLLAMA_THINK=false
@@ -251,6 +238,7 @@ Default template: `meeting`
   - Speech-Aware Diarization: stops at last Whisper timestamp + 5s.
   - Dynamic Context: `num_ctx` calculated from input size.
   - Single-Pass Early Exit: short transcripts (< 3000 chars) skip polish pass.
+- **Meeting Summaries**: `General Meeting` uses the cohesive two-pass summarizer with a relevance-first prompt contract. The structured pipeline in `src/summarization/pipeline/` is deprecated and not part of normal summary routing.
 - **Audio Quality**: Captures and saves at 48kHz; downsampled to 16kHz for AI.
 - **Live analyzer**: The recording page uses a higher-resolution log-spaced spectrum analyzer, not the saved file waveform.
 - **Unified View & Refinement:** functionally identical review/view modals.
@@ -260,9 +248,10 @@ Default template: `meeting`
 - **Attendees Compatibility:** `meeting.attendees` and `attendees_snapshot` still exist in the DB/API for backward compatibility, but they are deprecated and no longer drive speaker resolution or summary gating.
 
 **Key implementation notes**:
+- Local authoritative transcription uses **WhisperX** with forced alignment and integrated diarization.
+- `TRANSCRIPTION_BACKEND=local` disables live preview; only the saved-file pipeline is authoritative for local runs.
 - Audio loaded via **PyAV** — no system `ffmpeg` needed.
-- pyannote 4.x returns `DiarizeOutput`.
-- Manual resolution endpoint returns clip timestamps; frontend uses HTML5 audio seek to play.
+- Manual resolution endpoint returns clip URLs; frontend plays cached WAV speaker clips directly.
 - `src/core/speaker_labels.py` centralizes fallback speaker labels for transcript and summary output.
 
 ## Gotchas

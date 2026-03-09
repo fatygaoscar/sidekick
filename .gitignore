@@ -63,4 +63,5 @@ htmlcov/
 
 # Local ops docs
 how-to-use-git.md
+how-to-access-sidekick-remotely.md
 scripts/backup_to_dropbox.sh
