@@ -1,5 +1,7 @@
 """Prompt templates for summarization."""
 
+DEFAULT_TEMPLATE_KEY = "meeting"
+
 SYSTEM_PROMPT = """You are an expert meeting summarizer optimized for Obsidian markdown. Your task is to create clear, highly scannable, and well-structured summaries.
 
 Formatting Guidelines for Obsidian:
@@ -147,27 +149,71 @@ WORKING_SESSION_TEMPLATE = """Create a technical working session summary for Obs
 TRANSCRIPT:
 {transcript}"""
 
-MEETING_TEMPLATE = """Create structured meeting notes for Obsidian. Use nested bullets for discussion points.
+MEETING_TEMPLATE = """Review the transcript and extract only the information that is relevant to the meeting's outcome, next steps, important problems, key themes, or unresolved questions.
+
+Ignore filler conversation, greetings, jokes, repeated statements, and side comments.
+
+Only include information that a human would reasonably write down in useful meeting notes. If a point would not materially help someone understand what mattered in the meeting, omit it.
+
+Do not present proposals, suggestions, or unresolved questions as decisions.
+Do not guess action item owners. If ownership is unclear, use "TBD".
+Preserve exact names, dates, numbers, and system names when they materially matter.
+
+Produce draft notes using this structure:
 
 ## Summary
-- 2-3 sentences on purpose and outcome.
+- 2-3 bullets preferred; use 4 only if clearly necessary.
+- Summarize only the most important outcomes and takeaways.
+- Prefer decisions, major problems, important constraints, and next-step direction.
+- Do not use the Summary to restate every section.
+- At most one Summary bullet should primarily describe actions.
 
 ## Key Decisions
-- List of decisions. Use nested bullets for context. Write "None" if none.
+- Include only decisions that were explicitly agreed, confirmed, or clearly adopted.
+- If there were no clear decisions, write: None.
+
+## Key Discussion Points
+- 3-5 bullets preferred; use 6-7 only if the meeting truly covered multiple distinct important topics.
+- Each bullet should summarize one important topic, tradeoff, problem, or unresolved question.
+- Prefer one strong bullet per topic rather than many small bullets.
+- Merge related remarks into a single strong bullet when they support the same topic.
+- Do not create multiple bullets for the same topic unless the sub-points are materially different.
+- Focus on points that explain decisions, next steps, important problems, constraints, or unresolved questions.
+- Include attribution only when it materially changes the meaning of the point.
 
 ## Action Items
 | Owner | Action | Due |
 |-------|--------|-----|
-Use actual names. If owner not named, use "TBD".
+- Only include concrete follow-up tasks that the meeting clearly established.
+- An action item must be specific enough that someone could actually do it and must materially affect what happens after the meeting.
+- Use actual names when explicit. If no owner was assigned, use "TBD" only when the task is clearly real.
 
-## Discussion Notes
-Group by topic using ### headers.
-### [Topic Name]
-- Key points and positions.
-- Use nested bullets for supporting details or sub-topics.
-- Be specific about who said what.
+Valid action patterns:
+- "[Name] will..."
+- "We will..."
+- "[Name] to..." when clearly used as an assignment
+- "Follow up on...", "Send...", "Validate...", "Document...", "Investigate...", "Prepare...", "Update...", "Schedule..."
+- "Let's..." only when it clearly indicates a committed next step
 
-Guidelines: Avoid paragraphs; use bullets. Use actual names. Include dates and numbers.
+Do NOT create action items for:
+- suggestions
+- recommendations
+- speculative ideas
+- questions
+- hypothetical next steps
+- general recommendations
+- opinions about what should happen unless they were clearly assigned and adopted
+
+If a task is vague, speculative, or not clearly committed, omit it rather than using "TBD".
+
+## Open Questions / Unresolved Items
+- Include only questions or uncertainties that materially affect decisions or next steps.
+- Do not include minor unanswered curiosities.
+
+Important rules:
+- Focus on relevance rather than completeness.
+- Consider the entire meeting, not just the ending.
+- Keep the notes concise and useful.
 
 TRANSCRIPT:
 {transcript}"""
@@ -248,6 +294,21 @@ TRANSCRIPT:
 USER INSTRUCTIONS:
 {custom_prompt}"""
 
+AUTO_TEMPLATE = MEETING_TEMPLATE
+
+LEGACY_TEMPLATE_KEY_MAP = {
+    "auto": DEFAULT_TEMPLATE_KEY,
+}
+
+
+def normalize_template_key(template_key: str | None) -> str:
+    """Map legacy or empty template keys to the active user-facing template."""
+    key = (template_key or "").strip()
+    if not key:
+        return DEFAULT_TEMPLATE_KEY
+    return LEGACY_TEMPLATE_KEY_MAP.get(key, key)
+
+
 # Default prompt shown in the UI when "Custom" template is selected
 CUSTOM_DEFAULT_PROMPT = """Review the transcript and extract only the parts that are relevant to [insert audience or artifact here, e.g. "Account Manager dashboard", "Leadership report", "Product X rollout", "Incentive design"].
 
@@ -303,15 +364,17 @@ def get_prompt(
         "strategic_review": STRATEGIC_REVIEW_TEMPLATE,
         "working_session": WORKING_SESSION_TEMPLATE,
         "meeting": MEETING_TEMPLATE,
+        "auto": AUTO_TEMPLATE,
         "brainstorm": BRAINSTORM_TEMPLATE,
         "interview": INTERVIEW_TEMPLATE,
         "lecture": LECTURE_TEMPLATE,
         "custom": CUSTOM_TEMPLATE,
     }
 
-    template = templates.get(prompt_type, USER_PROMPT_TEMPLATE)
+    normalized_prompt_type = normalize_template_key(prompt_type)
+    template = templates.get(normalized_prompt_type, USER_PROMPT_TEMPLATE)
 
-    if prompt_type == "custom" and custom_instructions:
+    if normalized_prompt_type == "custom" and custom_instructions:
         user_prompt = template.format(transcript=transcript, custom_prompt=custom_instructions)
     else:
         user_prompt = template.format(transcript=transcript)
@@ -325,7 +388,7 @@ def get_prompt(
 TEMPLATE_INFO = {
     "meeting": {
         "name": "General Meeting",
-        "description": "Standard meeting notes with decisions and action items",
+        "description": "Concise, relevant meeting notes with decisions, actions, and key discussion points",
     },
     "strategic_review": {
         "name": "Strategic Review",
@@ -362,6 +425,7 @@ PUBLIC_TEMPLATE_KEYS = (
 def get_template_content(template_key: str) -> str:
     """Get the raw template content for display/editing in the UI."""
     templates = {
+        "auto": MEETING_TEMPLATE,
         "meeting": MEETING_TEMPLATE,
         "one_on_one": ONE_ON_ONE_TEMPLATE,
         "standup": STANDUP_TEMPLATE,
@@ -373,7 +437,7 @@ def get_template_content(template_key: str) -> str:
         "interview": INTERVIEW_TEMPLATE,
         "lecture": LECTURE_TEMPLATE,
     }
-    content = templates.get(template_key, "")
+    content = templates.get(normalize_template_key(template_key), "")
     # Remove the transcript placeholder section for display (legacy templates only)
     if content:
         parts = content.split("---\nTRANSCRIPT:")

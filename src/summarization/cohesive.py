@@ -452,6 +452,12 @@ Extract only what the Style Contract asks for. Omit filler, pleasantries, and si
 
 Follow the exact section structure defined in the Style Contract above.
 Use the same section headers (##) as specified in the Style Contract.
+Include only the most relevant content from the source context.
+Do not try to represent every topic discussed.
+If a topic did not materially affect outcomes, decisions, action items, important problems, constraints, or meaningful unresolved questions, omit it.
+Prefer fewer, stronger bullets over exhaustive coverage.
+If an item sounds like a recommendation, suggestion, or unresolved idea rather than a committed task, do not put it in Action Items.
+Compress related discussion into stronger topic bullets rather than many small bullets.
 For Action Items, always use a markdown table with columns: | Owner | Action | Due |
 Each action item must be self-explanatory: include the owner, what they will do, and what system/project/feature it relates to. Include deadline if stated.
 Owner must come directly from the transcript: use the speaker's real name when known, otherwise use the transcript's provided fallback label such as Attendee A. Use "TBD" only when no speaker attribution exists at all. Never guess a name from context or invent a role.
@@ -486,6 +492,22 @@ Requirements:
 - **Accuracy**: Preserve all specific details (names, dates, numbers).
 - **Conciseness**: Remove repetition and filler.
 - **Tables**: Ensure Action Items is a clean markdown table.
+- **Selectivity**: Keep the draft focused; do not broaden it or make it more exhaustive.
+- **Decisions**: Do not convert proposals or unresolved questions into decisions.
+- **Action Items**: Do not add new action items or guess owners. Preserve `TBD` when ownership is unclear.
+- **Action Filtering**: If an action item is actually a recommendation, suggestion, question, speculative idea, or vague possibility, remove it from Action Items.
+- **Action Specificity**: If a task is too vague to act on, remove it rather than preserving it as an action item.
+- **Scope**: Keep the same section headers already present in the draft.
+- **Summary Discipline**: Keep the Summary focused on top outcomes only; do not let it become a recap of every section.
+- **Topic Compression**: Compress multiple bullets about the same topic into one stronger bullet where possible.
+- **Topic Compression**: Remove low-signal discussion bullets that do not materially affect decisions, next steps, important problems, constraints, or unresolved questions.
+- **Wording Strength**: Do not strengthen weak wording into commitment or certainty.
+- **Limits**:
+  - Summary: max 4 bullets
+  - Key Decisions: max 5 bullets
+  - Action Items: max 6 items
+  - Key Discussion Points: max 5 bullets
+  - Open Questions / Unresolved Items: max 4 bullets
 
 Draft:
 {draft}

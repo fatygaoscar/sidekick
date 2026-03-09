@@ -1,7 +1,9 @@
 """Summarization backend manager."""
 
 import asyncio
+import json
 import logging
+import re
 import time
 from typing import Callable, Awaitable, Optional
 
@@ -15,7 +17,7 @@ from .anthropic_backend import AnthropicBackend
 from .base import SummarizationBackend, SummarizationResult
 from .ollama_backend import OllamaBackend
 from .openai_backend import OpenAIBackend
-from .prompts import get_template_content
+from .prompts import get_template_content, normalize_template_key
 from .cohesive import generate_cohesive_summary
 from .pipeline.pipeline import run_pipeline, build_markdown_output
 from .pipeline.types import PipelineResult
@@ -23,6 +25,8 @@ from .pipeline.types import PipelineResult
 
 # Type alias for pipeline progress callback
 PipelineProgressCallback = Callable[[str, str, float], Awaitable[None] | None]
+_JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+_JSON_OBJECT_RE = re.compile(r"(\{.*\})", re.DOTALL)
 
 
 class SummarizationManager:
@@ -173,6 +177,7 @@ class SummarizationManager:
             await self.initialize()
 
         ctx_len = int(self._settings.ollama_context_length)
+        normalized_prompt_type = normalize_template_key(prompt_type)
 
         # Emit start event
         await self._event_bus.emit(
@@ -206,19 +211,19 @@ class SummarizationManager:
 
                 template_contract = (
                     custom_instructions.strip()
-                    if prompt_type == "custom" and custom_instructions
-                    else get_template_content(prompt_type)
+                    if normalized_prompt_type == "custom" and custom_instructions
+                    else get_template_content(normalized_prompt_type)
                 )
 
                 cohesive_text, _, _, _, speaker_map, prompt_audit = await generate_cohesive_summary(
                     llm_call=llm_call,
                     transcript=transcript,
-                    template=prompt_type,
+                    template=normalized_prompt_type,
                     template_contract=template_contract,
                     perspective=perspective,
                     context_length=ctx_len,
                     custom_instructions=(
-                        custom_instructions if prompt_type != "custom" else None
+                        custom_instructions if normalized_prompt_type != "custom" else None
                     ),
                     include_structured_tables=include_structured_tables,
                     progress_callback=progress_callback,
@@ -274,6 +279,7 @@ class SummarizationManager:
         progress_callback: Optional[PipelineProgressCallback] = None,
         perspective: Optional[str] = None,
         template_prompt_override: Optional[str] = None,
+        emit_events: bool = True,
     ) -> PipelineResult:
         """Process transcript using the multi-stage pipeline.
 
@@ -283,7 +289,7 @@ class SummarizationManager:
 
         Args:
             transcript: Full transcript text with timestamps
-            template: Template type for narrative style
+            template: Summary template key (legacy experimental path)
             progress_callback: Optional callback for progress updates (stage, message, progress)
             perspective: Optional person/role to prioritize in narrative focus
             template_prompt_override: Optional per-export template prompt override
@@ -303,17 +309,17 @@ class SummarizationManager:
             )
             return result.content
 
-        # Emit start event
-        await self._event_bus.emit(
-            EventType.SUMMARIZATION_STARTED,
-            {
-                "backend": self._active_backend.name,
-                "model": self._active_backend.model,
-                "transcript_length": len(transcript),
-                "pipeline": True,
-            },
-            source="summarization_manager",
-        )
+        if emit_events:
+            await self._event_bus.emit(
+                EventType.SUMMARIZATION_STARTED,
+                {
+                    "backend": self._active_backend.name,
+                    "model": self._active_backend.model,
+                    "transcript_length": len(transcript),
+                    "pipeline": True,
+                },
+                source="summarization_manager",
+            )
 
         try:
             result = await run_pipeline(
@@ -329,33 +335,33 @@ class SummarizationManager:
                 llm_context_length=int(self._settings.ollama_context_length),
             )
 
-            # Emit completion event
-            await self._event_bus.emit(
-                EventType.SUMMARIZATION_COMPLETED,
-                {
-                    "backend": result.backend,
-                    "model": result.model,
-                    "narrative_length": len(result.narrative),
-                    "items_extracted": len(result.items.all_items()),
-                    "coverage_score": result.coverage_score,
-                    "pipeline": True,
-                },
-                source="summarization_manager",
-            )
+            if emit_events:
+                await self._event_bus.emit(
+                    EventType.SUMMARIZATION_COMPLETED,
+                    {
+                        "backend": result.backend,
+                        "model": result.model,
+                        "narrative_length": len(result.narrative),
+                        "items_extracted": len(result.items.all_items()),
+                        "coverage_score": result.coverage_score,
+                        "pipeline": True,
+                    },
+                    source="summarization_manager",
+                )
 
             return result
 
         except Exception as e:
-            # Emit error event
-            await self._event_bus.emit(
-                EventType.SUMMARIZATION_ERROR,
-                {
-                    "backend": self._active_backend.name if self._active_backend else "unknown",
-                    "error": str(e),
-                    "pipeline": True,
-                },
-                source="summarization_manager",
-            )
+            if emit_events:
+                await self._event_bus.emit(
+                    EventType.SUMMARIZATION_ERROR,
+                    {
+                        "backend": self._active_backend.name if self._active_backend else "unknown",
+                        "error": str(e),
+                        "pipeline": True,
+                    },
+                    source="summarization_manager",
+                )
             raise
 
     async def refine_summary(self, instruction: str, current_summary: str) -> str:
@@ -385,6 +391,84 @@ class SummarizationManager:
         )
         logger.info("[step] refine | done | elapsed=%.1fs", time.monotonic() - _t0)
         return result.content
+
+    async def answer_question_with_citations(
+        self,
+        *,
+        question: str,
+        evidence_windows: list[dict[str, str | None]],
+    ) -> dict[str, object]:
+        """Answer a user question using only provided evidence windows."""
+        if not self._initialized or self._active_backend is None:
+            await self.initialize()
+
+        if not evidence_windows:
+            return {
+                "answer": "I didn’t find grounded transcript evidence for that.",
+                "citations": [],
+                "confidence": "low",
+            }
+
+        evidence_lines = []
+        for index, window in enumerate(evidence_windows):
+            evidence_lines.append(
+                "\n".join(
+                    [
+                        f"[{index}] Recording: {window.get('recording_title') or 'Untitled Recording'}",
+                        f"Recorded At: {window.get('recorded_at') or '-'}",
+                        f"Speaker: {window.get('speaker') or '-'}",
+                        f"Timestamp: {window.get('timestamp') or '-'}",
+                        f"Snippet: {window.get('snippet') or ''}",
+                    ]
+                )
+            )
+
+        system_prompt = (
+            "You answer questions about meeting recordings using only the provided evidence windows. "
+            "Do not infer facts that are not grounded in the snippets. "
+            "If the evidence is insufficient, say that clearly. "
+            "Return JSON only with keys: answer, citations, confidence. "
+            "confidence must be one of high, medium, low. "
+            "citations must be an array of integer window indexes. "
+            "Keep the answer concise and factual."
+        )
+        user_prompt = (
+            f"Question: {question.strip()}\n\n"
+            "Evidence windows:\n"
+            f"{chr(10).join(evidence_lines)}\n\n"
+            "Return JSON only."
+        )
+
+        result = await self._summarize_with_timeout(
+            transcript="",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            num_ctx=min(int(self._settings.ollama_context_length), 8192),
+        )
+        parsed = self._parse_json_response(result.content)
+        if parsed is None:
+            repair = await self._repair_json_response(result.content)
+            parsed = self._parse_json_response(repair)
+        if parsed is None:
+            raise ValueError("Search answer model response was not valid JSON")
+
+        answer = str(parsed.get("answer") or "").strip()
+        confidence = str(parsed.get("confidence") or "low").strip().lower()
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "low"
+
+        citations: list[int] = []
+        for raw in parsed.get("citations", []):
+            try:
+                citations.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+
+        return {
+            "answer": answer,
+            "citations": citations,
+            "confidence": confidence,
+        }
 
     async def _summarize_with_timeout(
         self,
@@ -419,3 +503,39 @@ class SummarizationManager:
             raise TimeoutError(
                 f"Summarization model call timed out after {timeout_seconds} seconds"
             ) from exc
+
+    def _parse_json_response(self, content: str) -> dict[str, object] | None:
+        text = str(content or "").strip()
+        if not text:
+            return None
+
+        block_match = _JSON_BLOCK_RE.search(text)
+        if block_match:
+            text = block_match.group(1)
+        elif not text.startswith("{"):
+            object_match = _JSON_OBJECT_RE.search(text)
+            if object_match:
+                text = object_match.group(1)
+
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+        return parsed if isinstance(parsed, dict) else None
+
+    async def _repair_json_response(self, invalid_response: str) -> str:
+        """Ask the backend to rewrite invalid output into the required JSON schema."""
+        repair_prompt = (
+            "Rewrite the following response as valid JSON only with keys "
+            "answer, citations, confidence. citations must be integer indexes. "
+            "confidence must be high, medium, or low.\n\n"
+            f"{invalid_response.strip()}"
+        )
+        repaired = await self._summarize_with_timeout(
+            transcript="",
+            system_prompt="You repair malformed JSON responses. Return JSON only.",
+            user_prompt=repair_prompt,
+            num_ctx=2048,
+        )
+        return repaired.content
