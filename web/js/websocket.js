@@ -14,6 +14,8 @@ class SidekickWebSocket {
         this.isConnected = false;
         this.shouldReconnect = true;
         this.pingTimer = null;
+        this.pendingMessages = [];
+        this.openWaiters = new Set();
 
         // Event handlers
         this.onOpen = options.onOpen || (() => {});
@@ -24,12 +26,15 @@ class SidekickWebSocket {
     }
 
     _getDefaultUrl() {
+        if (typeof window !== 'undefined' && typeof window.__SIDEKICK_WS_URL === 'string' && window.__SIDEKICK_WS_URL) {
+            return window.__SIDEKICK_WS_URL;
+        }
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         return `${protocol}//${window.location.host}/ws/audio`;
     }
 
     connect() {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
             return;
         }
 
@@ -44,6 +49,8 @@ class SidekickWebSocket {
                 this.isConnected = true;
                 this.reconnectAttempts = 0;
                 this._startPing();
+                this._flushPendingMessages();
+                this._resolveOpenWaiters();
                 this.onOpen();
             };
 
@@ -51,6 +58,7 @@ class SidekickWebSocket {
                 console.log('WebSocket closed', event.code, event.reason);
                 this.isConnected = false;
                 this._stopPing();
+                this._rejectOpenWaiters(new Error(`WebSocket closed (${event.code || 'unknown'})`));
                 this.onClose(event);
 
                 if (this.shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
@@ -63,6 +71,7 @@ class SidekickWebSocket {
 
             this.ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
+                this._rejectOpenWaiters(new Error('WebSocket error'));
                 this.onError(error);
             };
 
@@ -79,6 +88,7 @@ class SidekickWebSocket {
     disconnect() {
         this.shouldReconnect = false;
         this._stopPing();
+        this._rejectOpenWaiters(new Error('WebSocket disconnected'));
         if (this.ws) {
             this.ws.close();
             this.ws = null;
@@ -127,6 +137,54 @@ class SidekickWebSocket {
         }
     }
 
+    _flushPendingMessages() {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.pendingMessages.length === 0) {
+            return;
+        }
+
+        for (const message of this.pendingMessages) {
+            this.ws.send(message);
+        }
+        this.pendingMessages = [];
+    }
+
+    _resolveOpenWaiters() {
+        for (const waiter of this.openWaiters) {
+            clearTimeout(waiter.timeoutId);
+            waiter.resolve();
+        }
+        this.openWaiters.clear();
+    }
+
+    _rejectOpenWaiters(error) {
+        for (const waiter of this.openWaiters) {
+            clearTimeout(waiter.timeoutId);
+            waiter.reject(error);
+        }
+        this.openWaiters.clear();
+    }
+
+    waitForOpen(timeoutMs = 10000) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            return Promise.resolve();
+        }
+
+        this.connect();
+
+        return new Promise((resolve, reject) => {
+            const waiter = {
+                resolve: () => resolve(),
+                reject: (error) => reject(error),
+                timeoutId: setTimeout(() => {
+                    this.openWaiters.delete(waiter);
+                    reject(new Error('WebSocket connection timeout'));
+                }, timeoutMs),
+            };
+
+            this.openWaiters.add(waiter);
+        });
+    }
+
     sendAudio(audioBuffer) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(audioBuffer);
@@ -134,9 +192,17 @@ class SidekickWebSocket {
     }
 
     sendCommand(command, data = {}) {
+        const payload = JSON.stringify({ command, ...data });
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({ command, ...data }));
+            this.ws.send(payload);
+            return;
         }
+
+        if (!this.ws || this.ws.readyState === WebSocket.CLOSED || this.ws.readyState === WebSocket.CLOSING) {
+            this.connect();
+        }
+
+        this.pendingMessages.push(payload);
     }
 
     startSession() {

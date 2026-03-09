@@ -397,6 +397,7 @@ Recommended approach:
 ## Gotchas
 
 - `get_settings()` is LRU-cached — restart required to pick up `.env` changes
+- Remote recording through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The app injects fallback `wss://` and `https://*.trycloudflare.com` transport targets into the HTML at render time, so restart Sidekick after the tunnel changes or if the custom domain starts loading UI but recorder/workspace requests stop reaching the app.
 - **`qwen3` vs `qwen3.5` thinking**: `qwen3:8b` properly respects `OLLAMA_THINK=false`. `qwen3.5` models always generate internal thinking tokens regardless of this setting — not suppressable.
 - **`OLLAMA_NUM_GPU=99`**: required to prevent Ollama's conservative auto-estimate from offloading layers to CPU.
 - `SUMMARIZATION_TIMEOUT_SECONDS` is only a per-call timeout. It does not control model unloading.

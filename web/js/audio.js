@@ -21,6 +21,7 @@ class AudioCapture {
         this.recordedMimeType = null;
         this.chunkIndex = 0;
         this.isCapturing = false;
+        this._pendingStopCleanup = null;
 
         // Resampling state
         this.resampleBuffer = [];
@@ -244,6 +245,7 @@ class AudioCapture {
             });
             this.recordedChunks = [];
             this.chunkIndex = 0;
+            this._runPendingStopCleanup();
         };
 
         this.mediaRecorder.start(1000);
@@ -253,41 +255,62 @@ class AudioCapture {
         this.isCapturing = false;
         let awaitingMediaRecorderStop = false;
 
+        const cleanup = () => {
+            if (this.workletNode) {
+                this.workletNode.disconnect();
+                this.workletNode = null;
+            }
+
+            if (this.analyser) {
+                this.analyser.disconnect();
+                this.analyser = null;
+            }
+
+            if (this.audioContext) {
+                this.audioContext.close();
+                this.audioContext = null;
+            }
+
+            if (this.mediaStream) {
+                this.mediaStream.getTracks().forEach(track => track.stop());
+                this.mediaStream = null;
+            }
+        };
+
         if (this.mediaRecorder) {
             if (this.mediaRecorder.state !== 'inactive') {
                 awaitingMediaRecorderStop = true;
+                this._pendingStopCleanup = cleanup;
+                try {
+                    this.mediaRecorder.requestData();
+                } catch (_error) {
+                    // Safari may throw if no data is ready yet.
+                }
                 this.mediaRecorder.stop();
+                window.setTimeout(() => {
+                    this._runPendingStopCleanup();
+                }, 1500);
             }
             this.mediaRecorder = null;
         }
 
-        if (this.workletNode) {
-            this.workletNode.disconnect();
-            this.workletNode = null;
-        }
-
-        if (this.analyser) {
-            this.analyser.disconnect();
-            this.analyser = null;
-        }
-
-        if (this.audioContext) {
-            this.audioContext.close();
-            this.audioContext = null;
-        }
-
-        if (this.mediaStream) {
-            this.mediaStream.getTracks().forEach(track => track.stop());
-            this.mediaStream = null;
-        }
-
         if (!awaitingMediaRecorderStop) {
+            cleanup();
             this.onCaptureStopped({
                 chunkCount: this.chunkIndex,
                 mimeType: this.recordedMimeType || 'audio/webm',
             });
             this.chunkIndex = 0;
         }
+    }
+
+    _runPendingStopCleanup() {
+        if (!this._pendingStopCleanup) {
+            return;
+        }
+        const cleanup = this._pendingStopCleanup;
+        this._pendingStopCleanup = null;
+        cleanup();
     }
 }
 

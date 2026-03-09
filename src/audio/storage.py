@@ -182,6 +182,8 @@ def ensure_session_audio_path(
         except Exception:
             pass
 
+    meta = read_session_chunk_meta(session_id) or {}
+
     # Try new chunk storage recovery - check all client directories
     session_chunk_dir = get_chunk_storage_dir(session_id)
     if session_chunk_dir.exists():
@@ -194,7 +196,11 @@ def ensure_session_audio_path(
                 continue
 
             # Determine extension from preferred or default
-            extension = str(preferred_extension or "webm").strip(". ").lower()
+            extension = str(
+                meta.get("extension")
+                or preferred_extension
+                or "webm"
+            ).strip(". ").lower()
             if extension not in _KNOWN_AUDIO_EXTENSIONS:
                 extension = "webm"
 

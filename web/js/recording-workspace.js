@@ -1,7 +1,8 @@
 (function () {
     class RecordingWorkspace {
         constructor(options = {}) {
-            this.options = options;
+            this.baseOptions = { ...options };
+            this.options = { ...options };
             this.templates = {};
             this._settingsSaveTimer = null;
             this._settingsSavePromise = null;
@@ -56,7 +57,7 @@
         }
 
         async open(sessionId, options = {}) {
-            this.options = { ...this.options, ...options };
+            this.options = { ...this.baseOptions, ...options };
             this.state.sessionId = sessionId;
             this.state.jobStatus = null;
             this.state.speakerAssignments = {};
@@ -78,17 +79,36 @@
             this.elements.modal.classList.remove('hidden');
             this._lockBodyScroll();
 
-            await this._loadTemplates();
-            await this._loadWorkspace();
+            console.info('[workspace_open:start]', { sessionId });
+
+            try {
+                await this._loadTemplates();
+                await this._loadWorkspace();
+            } catch (error) {
+                console.warn('[workspace_open:fail]', {
+                    sessionId,
+                    message: error?.message || 'Workspace unavailable',
+                });
+                this._revertOpenState();
+                throw error;
+            }
 
             if (this.options.initialTab) {
                 this.state.activeTab = this.options.initialTab;
                 this._renderTabs();
             }
 
+            this._applySearchFocus();
+
             if (this.options.autoStartTranscription && !this.state.workspace?.recording?.has_transcription) {
-                await this._startTranscriptionJob();
+                this._startTranscriptionJob().catch((error) => {
+                    this.state.jobStatus = null;
+                    this._render();
+                    this._showBanner(error?.message || 'Failed to start transcription.', 'error');
+                });
             }
+
+            console.info('[workspace_open:ok]', { sessionId });
         }
 
         async close() {
@@ -119,6 +139,7 @@
             this._settingsSavePromise = null;
             this._resetTabScrollStage();
             this._stopSpeakerPlayback();
+            this.options = { ...this.baseOptions };
             if (typeof this.options.onClose === 'function') {
                 this.options.onClose();
             }
@@ -129,13 +150,16 @@
                 return;
             }
 
-            const response = await fetch('/api/templates');
-            if (!response.ok) {
-                throw new Error('Failed to load templates');
-            }
-
-            const payload = await response.json();
+            console.info('[workspace_open:templates:start]');
+            const payload = await this._jsonRequest('/api/templates', {}, {
+                timeoutMs: 8000,
+                retries: 2,
+                networkErrorMessage: 'Workspace network request failed',
+                httpErrorMessage: 'Failed to load templates',
+                logLabel: 'workspace_open:templates',
+            });
             this.templates = payload.templates || {};
+            console.info('[workspace_open:templates:ok]');
         }
 
         async _loadWorkspace({ keepTab = true } = {}) {
@@ -143,13 +167,14 @@
                 return;
             }
 
-            const response = await fetch(`/api/recordings/${this.state.sessionId}/workspace`);
-            if (!response.ok) {
-                const error = await response.json().catch(() => ({}));
-                throw new Error(error.detail || 'Failed to load recording workspace');
-            }
-
-            const payload = await response.json();
+            console.info('[workspace_open:data:start]', { sessionId: this.state.sessionId });
+            const payload = await this._jsonRequest(`/api/recordings/${this.state.sessionId}/workspace`, {}, {
+                timeoutMs: 8000,
+                retries: 2,
+                networkErrorMessage: 'Workspace network request failed',
+                httpErrorMessage: 'Failed to load recording workspace',
+                logLabel: 'workspace_open:data',
+            });
             const previousTab = this.state.activeTab;
             this.state.workspace = payload;
             const draftId = payload.draft_summary?.id || null;
@@ -189,6 +214,7 @@
             this._syncLastCustomPrompt();
 
             this._render();
+            console.info('[workspace_open:data:ok]', { sessionId: this.state.sessionId });
         }
 
         _defaultTab() {
@@ -1095,7 +1121,7 @@
                         ? ''
                         : ` style="--speaker-color: ${this._speakerColorForLabel(speaker)}"`;
                     return `
-                        <div class="transcript-segment${importantClass}">
+                        <div class="transcript-segment${importantClass}" data-segment-id="${this._escapeHtml(segment.id)}">
                             <span class="timestamp">${this._escapeHtml(segment.timestamp)}</span>
                             <span class="speaker-inline${speaker === '?' ? ' speaker-inline-unknown' : ''}"${speakerStyle}>[${this._escapeHtml(speaker)}]:</span>
                             <span class="transcript-line-text">${this._escapeHtml(segment.text)}</span>
@@ -1103,6 +1129,37 @@
                     `;
                 })
                 .join('');
+        }
+
+        _applySearchFocus() {
+            const highlightSegmentIds = Array.isArray(this.options.highlightSegmentIds)
+                ? this.options.highlightSegmentIds.filter(Boolean)
+                : [];
+            if (!highlightSegmentIds.length || this.state.activeTab !== 'transcript') {
+                return;
+            }
+
+            window.requestAnimationFrame(() => {
+                const nodes = [];
+                highlightSegmentIds.forEach((segmentId) => {
+                    const node = this.elements.transcript.querySelector(
+                        `.transcript-segment[data-segment-id="${CSS.escape(String(segmentId))}"]`
+                    );
+                    if (!node) {
+                        return;
+                    }
+                    node.classList.add('transcript-segment-highlight');
+                    nodes.push(node);
+                });
+
+                if (nodes.length > 0) {
+                    nodes[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+
+                window.setTimeout(() => {
+                    nodes.forEach((node) => node.classList.remove('transcript-segment-highlight'));
+                }, 3200);
+            });
         }
 
         _renderSettings() {
@@ -1308,8 +1365,14 @@
                 return;
             }
 
-            const response = await fetch(`/api/recordings/${this.state.sessionId}/transcription-job`, {
+            console.info('[workspace_open:auto_transcription:start]', { sessionId: this.state.sessionId });
+            const response = await window.SidekickNetwork.request(`/api/recordings/${this.state.sessionId}/transcription-job`, {
                 method: 'POST',
+            }, {
+                timeoutMs: 10000,
+                retries: 1,
+                networkErrorMessage: 'Workspace network request failed',
+                logLabel: 'workspace_open:auto_transcription',
             });
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
@@ -1339,8 +1402,13 @@
                 return;
             }
 
-            const response = await fetch(`/api/recordings/${this.state.sessionId}/summary-job`, {
+            const response = await window.SidekickNetwork.request(`/api/recordings/${this.state.sessionId}/summary-job`, {
                 method: 'POST',
+            }, {
+                timeoutMs: 10000,
+                retries: 1,
+                networkErrorMessage: 'Workspace network request failed',
+                logLabel: 'workspace_summary:start',
             });
             if (!response.ok) {
                 const error = await response.json().catch(() => ({}));
@@ -1354,45 +1422,54 @@
 
         async _pollJob(kind, jobId, url) {
             while (this.state.sessionId) {
-                const response = await fetch(url);
-                if (!response.ok) {
-                    const error = await response.json().catch(() => ({}));
-                    this.state.jobStatus = null;
-                    this._render();
-                    this._showBanner(error.detail || 'Failed to read job status.', 'error');
-                    return;
-                }
+                try {
+                    const job = await this._jsonRequest(url, {}, {
+                        timeoutMs: 10000,
+                        retries: 1,
+                        networkErrorMessage: 'Lost connection while checking job status',
+                        httpErrorMessage: 'Failed to read job status.',
+                        logLabel: `job_poll:${kind}`,
+                    });
+                    this.state.jobStatus = {
+                        kind,
+                        ...job,
+                    };
+                    this._renderProgress();
+                    this._renderFooter();
 
-                const job = await response.json();
-                this.state.jobStatus = {
-                    kind,
-                    ...job,
-                };
-                this._renderProgress();
-                this._renderFooter();
-
-                if (job.status === 'completed') {
-                    this.state.jobStatus = null;
-                    await this._loadWorkspace({ keepTab: false });
-                    if (kind === 'summary' && this.state.workspace?.draft_summary?.id) {
-                        this.state.selectedSavedSummaryId = this.state.workspace.draft_summary.id;
-                        this._resetSettingsEditSession();
+                    if (job.status === 'completed') {
+                        this.state.jobStatus = null;
+                        await this._loadWorkspace({ keepTab: false });
+                        if (kind === 'summary' && this.state.workspace?.draft_summary?.id) {
+                            this.state.selectedSavedSummaryId = this.state.workspace.draft_summary.id;
+                            this._resetSettingsEditSession();
+                        }
+                        this.state.activeTab = kind === 'transcription'
+                            ? (this.state.workspace?.state?.requires_speaker_review ? 'speakers' : 'summary')
+                            : 'summary';
+                        this._render();
+                        this._showBanner(
+                            kind === 'transcription' ? 'Transcript ready.' : 'Summary draft ready.',
+                            'success'
+                        );
+                        return;
                     }
-                    this.state.activeTab = kind === 'transcription'
-                        ? (this.state.workspace?.state?.requires_speaker_review ? 'speakers' : 'summary')
-                        : 'summary';
-                    this._render();
-                    this._showBanner(
-                        kind === 'transcription' ? 'Transcript ready.' : 'Summary draft ready.',
-                        'success'
-                    );
-                    return;
-                }
 
-                if (job.status === 'failed') {
+                    if (job.status === 'failed') {
+                        this.state.jobStatus = null;
+                        this._render();
+                        this._showBanner(job.error || 'Job failed.', 'error');
+                        return;
+                    }
+                } catch (error) {
                     this.state.jobStatus = null;
                     this._render();
-                    this._showBanner(job.error || 'Job failed.', 'error');
+                    console.warn(`[job_poll:${kind}:fail]`, {
+                        sessionId: this.state.sessionId,
+                        jobId,
+                        message: error?.message || 'Failed to read job status.',
+                    });
+                    this._showBanner(error?.message || 'Failed to read job status.', 'error');
                     return;
                 }
 
@@ -1889,6 +1966,22 @@
                 return saved !== false;
             }
             return true;
+        }
+
+        async _jsonRequest(url, options = {}, config = {}) {
+            return window.SidekickNetwork.json(url, options, config);
+        }
+
+        _revertOpenState() {
+            this.elements.modal.classList.add('hidden');
+            this._unlockBodyScroll();
+            this.state.sessionId = null;
+            this.state.jobStatus = null;
+            this.state.workspace = null;
+            this.state.banner = null;
+            this.state.selectedSavedSummaryId = null;
+            this._resetTabScrollStage();
+            this._stopSpeakerPlayback();
         }
 
         _showBanner(message, tone = 'success') {

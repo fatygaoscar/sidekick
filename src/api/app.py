@@ -1,11 +1,12 @@
 """FastAPI application factory."""
 
+import json
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -102,6 +103,14 @@ def create_app() -> FastAPI:
     if web_dir.exists():
         app.mount("/static", StaticFiles(directory=str(web_dir)), name="static")
 
+    def _read_cloudflare_public_url() -> str | None:
+        path = Path("data/cloudflare.url")
+        if not path.exists():
+            return None
+
+        value = path.read_text(encoding="utf-8").strip()
+        return value or None
+
     def _static_version() -> str:
         """Return a version string based on the most recently modified static file."""
         static_dirs = [web_dir / "css", web_dir / "js"]
@@ -112,8 +121,26 @@ def create_app() -> FastAPI:
         ]
         return str(int(max(mtimes))) if mtimes else "0"
 
-    def _serve_html(path: Path) -> HTMLResponse:
-        content = re.sub(r"\?v=[^\"']+", f"?v={_static_version()}", path.read_text())
+    def _serve_html(path: Path, request: Request) -> HTMLResponse:
+        content = path.read_text(encoding="utf-8")
+        content = re.sub(r"\?v=[^\"']+", f"?v={_static_version()}", content)
+
+        fallback_ws_url = ""
+        fallback_api_base = ""
+        if request.url.hostname == "go.sidekickgo.app":
+            cloudflare_url = _read_cloudflare_public_url()
+            if cloudflare_url:
+                fallback_api_base = cloudflare_url
+                fallback_ws_url = f"{cloudflare_url.replace('https://', 'wss://', 1)}/ws/audio"
+
+        content = content.replace(
+            '"__SIDEKICK_WS_URL__"',
+            json.dumps(fallback_ws_url),
+        )
+        content = content.replace(
+            '"__SIDEKICK_API_BASE__"',
+            json.dumps(fallback_api_base),
+        )
         return HTMLResponse(content=content, headers={"Cache-Control": "no-store"})
 
     # Health check endpoint
@@ -126,18 +153,18 @@ def create_app() -> FastAPI:
 
     # Root redirect to UI
     @app.get("/")
-    async def root():
+    async def root(request: Request):
         index_path = web_dir / "index.html"
         if index_path.exists():
-            return _serve_html(index_path)
+            return _serve_html(index_path, request)
         return {"message": "Sidekick API", "docs": "/docs"}
 
     # Recordings page
     @app.get("/recordings")
-    async def recordings_page():
+    async def recordings_page(request: Request):
         recordings_path = web_dir / "recordings.html"
         if recordings_path.exists():
-            return _serve_html(recordings_path)
+            return _serve_html(recordings_path, request)
         return {"message": "Page not found"}, 404
 
     return app

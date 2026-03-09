@@ -39,6 +39,7 @@ from src.audio.storage import (
     get_session_audio_path,
     media_type_for_path,
     write_chunk,
+    write_session_chunk_meta,
 )
 from src.sessions.manager import SessionManager
 from src.sessions.repository import Repository, UNSET
@@ -1365,8 +1366,14 @@ async def upload_recording_audio_chunk(
     if not body:
         raise HTTPException(status_code=400, detail="Audio chunk payload is empty")
 
+    extension = extension_from_content_type(request.headers.get("content-type", ""))
+
     # Store chunk (idempotent - skips if same size already exists)
     chunk_path = write_chunk(session_id, client_id, chunk_index, body)
+    write_session_chunk_meta(session_id, {
+        "extension": extension,
+        "client_id": client_id,
+    })
 
     return {
         "status": "stored",

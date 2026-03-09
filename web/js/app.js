@@ -28,6 +28,7 @@ class SidekickApp {
         this.clientId = crypto.randomUUID();
         this.chunkUploads = new Map();
         this.chunkResults = new Map();
+        this.pendingChunks = new Map();
         this.expectedChunkCount = 0;
         this.finalizedChunkAudio = false;
         this.captureStoppedPromise = null;
@@ -200,6 +201,7 @@ class SidekickApp {
         if (state.session) {
             this.state.sessionId = state.session.id;
             this.state.lastSessionId = state.session.id;
+            this._flushPendingChunks();
         } else if (!this.state.isRecording) {
             this.state.sessionId = null;
         }
@@ -242,6 +244,7 @@ class SidekickApp {
             this.elements.statusText.textContent = 'Starting...';
             this.state.sessionId = null;
             this.state.lastSessionId = null;
+            this.ws.connect();
 
             await this.audioCapture.start();
             this.state.isRecording = true;
@@ -255,7 +258,7 @@ class SidekickApp {
             this._startTimer();
             this.ws.startSession();
 
-            const startedSessionId = await this._waitForSessionId(3000);
+            const startedSessionId = await this._waitForSessionId(10000);
             if (!startedSessionId) {
                 throw new Error('Failed to start recording session');
             }
@@ -264,6 +267,7 @@ class SidekickApp {
             this.audioUploadPromise = null;
             this.chunkUploads = new Map();
             this.chunkResults = new Map();
+            this.pendingChunks = new Map();
             this.expectedChunkCount = 0;
             this.finalizedChunkAudio = false;
             this.captureStopMeta = null;
@@ -316,18 +320,24 @@ class SidekickApp {
         }
 
         try {
+            console.info('[recording_stop:persist_audio:start]', { sessionId });
             await this._ensureRecordingAudioPersisted(sessionId);
+            console.info('[recording_stop:persist_audio:ok]', { sessionId });
             this.elements.statusText.textContent = 'Opening workspace...';
+            console.info('[recording_stop:open_workspace:start]', { sessionId });
             await this.workspace.open(sessionId, {
                 autoStartTranscription: true,
                 initialTab: 'speakers',
             });
+            console.info('[recording_stop:open_workspace:ok]', { sessionId });
             this.elements.statusText.textContent = 'Review recording';
         } catch (error) {
             console.error('Failed to prepare recording workspace:', error);
-            this.elements.statusText.textContent = 'Could not open workspace';
-            alert(`Could not open workspace: ${error.message}`);
-            this._resetAfterWorkspace();
+            console.warn('[recording_stop:open_workspace:fail]', {
+                sessionId,
+                message: error?.message || 'Workspace unavailable',
+            });
+            this._handleWorkspaceOpenFailure(sessionId, error);
         }
     }
 
@@ -401,15 +411,22 @@ class SidekickApp {
         }
     }
 
-    _resetAfterWorkspace() {
+    _resetAfterWorkspace(options = {}) {
+        const {
+            preserveLastSessionId = false,
+            statusText = '',
+        } = options;
         this.state.elapsedSeconds = 0;
         this.state.recordingStartTime = null;
         this._updateTimerDisplay();
         this.state.sessionId = null;
-        this.state.lastSessionId = null;
+        if (!preserveLastSessionId) {
+            this.state.lastSessionId = null;
+        }
         this.audioUploadPromise = null;
         this.chunkUploads = new Map();
         this.chunkResults = new Map();
+        this.pendingChunks = new Map();
         this.expectedChunkCount = 0;
         this.finalizedChunkAudio = false;
         this.captureStoppedPromise = null;
@@ -417,7 +434,7 @@ class SidekickApp {
         this.resolveCaptureStopped = null;
         this.fallbackBlob = null;
         this.fallbackMimeType = null;
-        this.elements.statusText.textContent = '';
+        this.elements.statusText.textContent = statusText;
     }
 
     _resetLivePreview() {
@@ -438,10 +455,15 @@ class SidekickApp {
     async _uploadChunkBestEffort(blob, mimeType, chunkIndex) {
         const sessionId = this.state.sessionId || this.state.lastSessionId;
         if (!sessionId) {
-            this.chunkResults.set(chunkIndex, { success: false, error: 'No session ID' });
+            this.pendingChunks.set(chunkIndex, { blob, mimeType, chunkIndex });
+            console.info('[recording_stop:chunk:queued]', { chunkIndex });
             return;
         }
 
+        this._scheduleChunkUpload(sessionId, blob, mimeType, chunkIndex);
+    }
+
+    _scheduleChunkUpload(sessionId, blob, mimeType, chunkIndex) {
         const uploadPromise = this._doChunkUpload(sessionId, blob, mimeType, chunkIndex);
         this.chunkUploads.set(chunkIndex, uploadPromise);
         uploadPromise.then(
@@ -454,17 +476,45 @@ class SidekickApp {
         );
     }
 
+    _flushPendingChunks() {
+        const sessionId = this.state.sessionId || this.state.lastSessionId;
+        if (!sessionId || this.pendingChunks.size === 0) {
+            return;
+        }
+
+        const queuedChunks = Array.from(this.pendingChunks.values())
+            .sort((left, right) => left.chunkIndex - right.chunkIndex);
+        this.pendingChunks.clear();
+
+        console.info('[recording_stop:chunk:flush]', {
+            sessionId,
+            queuedChunkCount: queuedChunks.length,
+        });
+
+        queuedChunks.forEach(({ blob, mimeType, chunkIndex }) => {
+            if (this.chunkResults.get(chunkIndex)?.success) {
+                return;
+            }
+            this._scheduleChunkUpload(sessionId, blob, mimeType, chunkIndex);
+        });
+    }
+
     async _doChunkUpload(sessionId, blob, mimeType, chunkIndex) {
         const maxAttempts = 3;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             try {
-                const response = await fetch(`/api/recordings/${sessionId}/audio/chunks/${chunkIndex}`, {
+                const response = await window.SidekickNetwork.request(`/api/recordings/${sessionId}/audio/chunks/${chunkIndex}`, {
                     method: 'PUT',
                     headers: {
                         'Content-Type': mimeType || 'audio/webm',
                         'X-Client-ID': this.clientId,
                     },
                     body: blob,
+                }, {
+                    timeoutMs: 15000,
+                    retries: 0,
+                    networkErrorMessage: 'Network request failed while uploading recording audio chunk',
+                    logLabel: 'recording_stop:upload_chunk',
                 });
 
                 if (response.ok) {
@@ -503,6 +553,14 @@ class SidekickApp {
         return true;
     }
 
+    _contiguousUploadedChunkCount() {
+        let count = 0;
+        while (this.chunkResults.get(count)?.success) {
+            count += 1;
+        }
+        return count;
+    }
+
     async _ensureRecordingAudioPersisted(sessionId) {
         if (!sessionId) {
             throw new Error('No recording session found');
@@ -512,8 +570,10 @@ class SidekickApp {
             await this.captureStoppedPromise;
         }
 
+        this._flushPendingChunks();
         await this._waitForChunkUploadsToSettle();
         const allChunksOk = this._allChunksSucceeded();
+        const contiguousUploadedChunks = this._contiguousUploadedChunkCount();
 
         if (allChunksOk && this.expectedChunkCount > 0 && !this.finalizedChunkAudio) {
             try {
@@ -521,8 +581,21 @@ class SidekickApp {
                 this.finalizedChunkAudio = true;
                 return;
             } catch (error) {
+                if (this._isRecoverableFinalizeError(error)) {
+                    console.warn('Chunk finalization request failed, relying on server-side chunk recovery:', error.message);
+                    return;
+                }
                 console.warn('Chunk finalization failed, falling back to full blob:', error.message);
             }
+        }
+
+        if (contiguousUploadedChunks > 0) {
+            console.warn('Using server-side chunk recovery without explicit finalize.', {
+                sessionId,
+                contiguousUploadedChunks,
+                expectedChunkCount: this.expectedChunkCount,
+            });
+            return;
         }
 
         if (this.fallbackBlob) {
@@ -538,7 +611,7 @@ class SidekickApp {
     }
 
     async _finalizeChunkedAudio(sessionId) {
-        const response = await fetch(`/api/recordings/${sessionId}/audio/finalize`, {
+        await window.SidekickNetwork.json(`/api/recordings/${sessionId}/audio/finalize`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -548,27 +621,55 @@ class SidekickApp {
                 mime_type: this.captureStopMeta?.mimeType || this.fallbackMimeType || 'audio/webm',
                 expected_chunks: this.expectedChunkCount,
             }),
+        }, {
+            timeoutMs: 15000,
+            retries: 1,
+            networkErrorMessage: 'Network request failed while finalizing recording audio',
+            httpErrorMessage: 'Failed to finalize recording audio',
+            logLabel: 'recording_stop:finalize_audio',
         });
-
-        if (!response.ok) {
-            const payload = await response.json().catch(() => ({}));
-            throw new Error(payload.detail || 'Failed to finalize recording audio');
-        }
     }
 
     async _uploadSessionAudio(sessionId, blob, mimeType) {
-        const response = await fetch(`/api/recordings/${sessionId}/audio`, {
+        const response = await window.SidekickNetwork.request(`/api/recordings/${sessionId}/audio`, {
             method: 'PUT',
             headers: {
                 'Content-Type': mimeType || 'audio/webm',
             },
             body: blob,
+        }, {
+            timeoutMs: 15000,
+            retries: 1,
+            networkErrorMessage: 'Network request failed while uploading recording audio',
+            logLabel: 'recording_stop:upload_audio',
         });
 
         if (!response.ok) {
             const payload = await response.json().catch(() => ({}));
             throw new Error(payload.detail || 'Audio upload failed');
         }
+    }
+
+    _isRecoverableFinalizeError(error) {
+        const message = error?.message || '';
+        return (
+            message === 'Network request failed while finalizing recording audio'
+            || message === 'Network request timed out'
+        );
+    }
+
+    _handleWorkspaceOpenFailure(sessionId, error) {
+        const message = error?.message || 'Workspace unavailable';
+        this.state.sessionId = null;
+        this.state.lastSessionId = sessionId;
+        this._resetAfterWorkspace({
+            preserveLastSessionId: true,
+            statusText: 'Workspace unavailable',
+        });
+        alert(
+            `Recording saved, but the workspace could not load. ` +
+            `You can reopen it from History.\n\nDetails: ${message}`
+        );
     }
 }
 

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Sidekick</title>
     <link rel="icon" type="image/x-icon" href="/static/sidekick-logo-simple.ico">
-    <link rel="stylesheet" href="/static/css/styles.css?v=20260308b">
+    <link rel="stylesheet" href="/static/css/styles.css?v=20260309a">
 </head>
 <body class="main-page">
     <div class="app">
@@ -13,7 +13,7 @@
         <header class="header">
             <h1 class="logo">Sidekick</h1>
             <div class="header-right">
-                <a href="/static/recordings.html" class="header-link">History</a>
+                <a href="/recordings" class="header-link">History</a>
             </div>
         </header>
 
@@ -40,7 +40,7 @@
         </main>
 
         <div class="mobile-history-bar">
-            <a href="/static/recordings.html" class="btn mobile-history-link">History</a>
+            <a href="/recordings" class="btn mobile-history-link">History</a>
         </div>
 
         <!-- Status Bar -->
@@ -54,9 +54,12 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="/static/js/audio.js?v=20260307l"></script>
-    <script src="/static/js/websocket.js?v=20260210h"></script>
-    <script src="/static/js/recording-workspace.js?v=20260307bt"></script>
-    <script src="/static/js/app.js?v=20260308b"></script>
+    <script>window.__SIDEKICK_WS_URL = "__SIDEKICK_WS_URL__";</script>
+    <script>window.__SIDEKICK_API_BASE = "__SIDEKICK_API_BASE__";</script>
+    <script src="/static/js/network.js?v=20260309h"></script>
+    <script src="/static/js/audio.js?v=20260309o"></script>
+    <script src="/static/js/websocket.js?v=20260309g"></script>
+    <script src="/static/js/recording-workspace.js?v=20260309f"></script>
+    <script src="/static/js/app.js?v=20260309g"></script>
 </body>
 </html>
