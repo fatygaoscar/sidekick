@@ -109,7 +109,6 @@
             console.info('[workspace_open:start]', { sessionId });
 
             try {
-                await this._loadTemplates();
                 await this._loadWorkspace();
             } catch (error) {
                 console.warn('[workspace_open:fail]', {
@@ -118,6 +117,16 @@
                 });
                 this._revertOpenState();
                 throw error;
+            }
+
+            try {
+                await this._loadTemplates();
+            } catch (error) {
+                console.warn('[workspace_open:templates:degraded]', {
+                    sessionId,
+                    message: error?.message || 'Templates unavailable',
+                });
+                this._showBanner('Workspace loaded, but template settings are temporarily unavailable.', 'error');
             }
 
             if (this.options.initialTab) {
@@ -210,8 +219,8 @@
                 workspaceUrl.searchParams.set('transcript_version_id', this.state.selectedTranscriptVersionId);
             }
             const payload = await this._jsonRequest(`${workspaceUrl.pathname}${workspaceUrl.search}`, {}, {
-                timeoutMs: 8000,
-                retries: 2,
+                timeoutMs: this.options.workspaceLoadTimeoutMs || 8000,
+                retries: this.options.workspaceLoadRetries ?? 2,
                 networkErrorMessage: 'Workspace network request failed',
                 httpErrorMessage: 'Failed to load recording workspace',
                 logLabel: 'workspace_open:data',

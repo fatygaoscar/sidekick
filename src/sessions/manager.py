@@ -55,6 +55,17 @@ class SessionManager:
             timezone_name=timezone_name,
             timezone_offset_minutes=timezone_offset_minutes,
         )
+        self._current_session = await self._repo.update_session_recording_state(
+            self._current_session.id,
+            recording_status="recording",
+            audio_status="chunking",
+            audio_error=None,
+            finalized_at=None,
+        )
+        self._current_meeting = await self._repo.get_primary_meeting(
+            self._current_session.id,
+            create_if_missing=True,
+        )
         self._session_start_time = self._current_session.started_at
 
         await self._event_bus.emit(
@@ -88,6 +99,41 @@ class SessionManager:
 
         self._current_session = None
         self._session_start_time = None
+
+        return session
+
+    async def end_session_by_id(self, session_id: str) -> Session | None:
+        """End a session by ID, returning the final persisted session state."""
+        if not session_id:
+            return None
+
+        if self._current_session and self._current_session.id == session_id:
+            return await self.end_session()
+
+        session = await self._repo.get_session(session_id)
+        if not session:
+            return None
+
+        if not session.is_active:
+            return session
+
+        meeting = await self._repo.get_active_meeting(session_id)
+        if meeting:
+            await self._repo.end_meeting(meeting.id)
+
+        session = await self._repo.end_session(session_id)
+
+        await self._event_bus.emit(
+            EventType.SESSION_ENDED,
+            {"session_id": session_id},
+            source="session_manager",
+        )
+
+        if self._current_meeting and self._current_meeting.session_id == session_id:
+            self._current_meeting = None
+        if self._current_session and self._current_session.id == session_id:
+            self._current_session = None
+            self._session_start_time = None
 
         return session
 

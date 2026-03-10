@@ -107,9 +107,6 @@ def assemble_chunks(
 
     temp_path.replace(final_path)
 
-    # Cleanup chunk storage after successful assembly
-    cleanup_chunk_storage(session_id, client_id)
-
     return final_path
 
 
@@ -119,6 +116,38 @@ def get_missing_chunk_indices(session_id: str, client_id: str, expected_count: i
     chunk_indices = {idx for idx, _ in chunks}
     expected_indices = set(range(expected_count))
     return sorted(expected_indices - chunk_indices)
+
+
+def get_chunk_upload_summary(
+    session_id: str,
+    client_id: str,
+    expected_count: int | None = None,
+) -> dict:
+    """Summarize the chunk upload state for a specific client."""
+    chunks = get_available_chunks(session_id, client_id)
+    available_indices = [idx for idx, _ in chunks]
+    highest_index = max(available_indices) if available_indices else None
+    chunk_indices = set(available_indices)
+
+    expected = int(expected_count) if expected_count and expected_count > 0 else None
+    contiguous_expected = set(range((highest_index or -1) + 1))
+    is_contiguous = bool(available_indices) and chunk_indices == contiguous_expected
+    missing_indices = (
+        sorted(set(range(expected)) - chunk_indices)
+        if expected is not None
+        else []
+    )
+
+    return {
+        "client_id": client_id,
+        "available_indices": available_indices,
+        "available_count": len(available_indices),
+        "highest_index": highest_index,
+        "expected_count": expected,
+        "missing_indices": missing_indices,
+        "is_contiguous": is_contiguous,
+        "is_complete": expected is not None and not missing_indices and len(available_indices) == expected,
+    }
 
 
 def cleanup_chunk_storage(session_id: str, client_id: str | None = None) -> None:
@@ -190,38 +219,97 @@ def ensure_session_audio_path(
         except Exception:
             pass
 
+    return recover_session_audio_from_chunks(
+        session_id,
+        preferred_extension=preferred_extension,
+    )
+
+
+def recover_session_audio_from_chunks(
+    session_id: str,
+    client_id: str | None = None,
+    expected_count: int | None = None,
+    preferred_extension: str | None = None,
+) -> Path | None:
+    """Recover finalized audio from retained chunks if a complete set exists.
+
+    If `expected_count` is not provided, recovery falls back to the legacy
+    best-effort behavior of treating a contiguous chunk set from 0..max_index as
+    complete. That path exists for backward compatibility with older recordings
+    that predate explicit expected chunk counts.
+    """
+    existing = get_session_audio_path(session_id)
+    if existing:
+        return existing
+
     meta = read_session_chunk_meta(session_id) or {}
-
-    # Try new chunk storage recovery - check all client directories
     session_chunk_dir = get_chunk_storage_dir(session_id)
-    if session_chunk_dir.exists():
-        for client_dir in session_chunk_dir.iterdir():
-            if not client_dir.is_dir():
+    if not session_chunk_dir.exists():
+        return None
+
+    preferred_clients: list[str] = []
+    requested_client = str(client_id or "").strip()
+    meta_client = str(meta.get("client_id") or "").strip()
+    if requested_client:
+        preferred_clients.append(requested_client)
+    if meta_client and meta_client not in preferred_clients:
+        preferred_clients.append(meta_client)
+
+    for client_dir in sorted(session_chunk_dir.iterdir()):
+        if client_dir.is_dir() and client_dir.name not in preferred_clients:
+            preferred_clients.append(client_dir.name)
+
+    extension = str(
+        meta.get("extension")
+        or preferred_extension
+        or "webm"
+    ).strip(". ").lower()
+    if extension not in _KNOWN_AUDIO_EXTENSIONS:
+        extension = "webm"
+
+    meta_expected = meta.get("expected_chunks")
+    try:
+        parsed_expected = int(expected_count) if expected_count is not None else None
+    except (TypeError, ValueError):
+        parsed_expected = None
+    try:
+        parsed_meta_expected = int(meta_expected) if meta_expected is not None else None
+    except (TypeError, ValueError):
+        parsed_meta_expected = None
+
+    resolved_expected = (
+        parsed_expected
+        if parsed_expected and parsed_expected > 0
+        else parsed_meta_expected
+        if parsed_meta_expected and parsed_meta_expected > 0
+        else None
+    )
+
+    for candidate_client_id in preferred_clients:
+        summary = get_chunk_upload_summary(
+            session_id,
+            candidate_client_id,
+            resolved_expected,
+        )
+        if summary["available_count"] == 0:
+            continue
+
+        assembly_count = summary["expected_count"]
+        if assembly_count is None:
+            if not summary["is_contiguous"] or summary["highest_index"] is None:
                 continue
-            client_id = client_dir.name
-            chunks = get_available_chunks(session_id, client_id)
-            if not chunks:
-                continue
+            assembly_count = int(summary["highest_index"]) + 1
+        elif not summary["is_complete"]:
+            continue
 
-            # Determine extension from preferred or default
-            extension = str(
-                meta.get("extension")
-                or preferred_extension
-                or "webm"
-            ).strip(". ").lower()
-            if extension not in _KNOWN_AUDIO_EXTENSIONS:
-                extension = "webm"
-
-            # Get the maximum chunk index + 1 as expected count (best effort)
-            max_index = max(idx for idx, _ in chunks)
-            expected_count = max_index + 1
-
-            # Check if we have all chunks from 0 to max_index
-            chunk_indices = {idx for idx, _ in chunks}
-            if chunk_indices == set(range(expected_count)):
-                result = assemble_chunks(session_id, client_id, expected_count, extension)
-                if result:
-                    return result
+        result = assemble_chunks(
+            session_id,
+            candidate_client_id,
+            assembly_count,
+            extension,
+        )
+        if result:
+            return result
 
     return None
 

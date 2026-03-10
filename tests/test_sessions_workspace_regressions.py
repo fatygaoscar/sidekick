@@ -22,6 +22,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
         cls.sessions = importlib.import_module("src.api.routes.sessions")
         cls.export = importlib.import_module("src.api.routes.export")
         cls.audio_clips = importlib.import_module("src.audio.clips")
+        cls.audio_storage = importlib.import_module("src.audio.storage")
 
     def test_sessions_router_imports_cleanly(self):
         self.assertTrue(hasattr(self.sessions, "UpdateRecordingSettingsRequest"))
@@ -172,6 +173,265 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
         self.assertEqual(payload, {"settings": {"workspace_chat_enabled": True}})
         repository.update_app_settings.assert_awaited_once()
 
+    def test_end_session_by_id_reports_ended_for_active_session(self):
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=SimpleNamespace(id="session-1", is_active=True))
+        )
+        session_manager = SimpleNamespace(
+            end_session_by_id=AsyncMock(return_value=SimpleNamespace(id="session-1", is_active=False))
+        )
+
+        payload = asyncio.run(
+            self.sessions.end_session_by_id(
+                "session-1",
+                repository=repository,
+                session_manager=session_manager,
+            )
+        )
+
+        self.assertEqual(payload, {"status": "ended", "session_id": "session-1"})
+
+    def test_end_session_by_id_reports_already_ended_for_inactive_session(self):
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=SimpleNamespace(id="session-1", is_active=False))
+        )
+        session_manager = SimpleNamespace(
+            end_session_by_id=AsyncMock(return_value=SimpleNamespace(id="session-1", is_active=False))
+        )
+
+        payload = asyncio.run(
+            self.sessions.end_session_by_id(
+                "session-1",
+                repository=repository,
+                session_manager=session_manager,
+            )
+        )
+
+        self.assertEqual(payload, {"status": "already_ended", "session_id": "session-1"})
+
+    def test_complete_recording_marks_session_ready_after_chunk_assembly(self):
+        session = SimpleNamespace(
+            id="session-1",
+            is_active=True,
+            recording_status="recording",
+            audio_status="chunking",
+            audio_error=None,
+            finalized_at=None,
+        )
+        ready_session = SimpleNamespace(
+            id="session-1",
+            is_active=False,
+            recording_status="ready",
+            audio_status="finalized",
+            audio_error=None,
+            finalized_at=datetime.now(UTC),
+        )
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            get_primary_meeting=AsyncMock(return_value=SimpleNamespace(id="meeting-1")),
+            update_session_recording_state=AsyncMock(return_value=session),
+            mark_session_recording_ready=AsyncMock(return_value=ready_session),
+        )
+        session_manager = SimpleNamespace(
+            end_session_by_id=AsyncMock(return_value=ready_session)
+        )
+        final_audio = Path("/tmp/session-1.webm")
+
+        with patch.object(
+            self.sessions,
+            "get_session_audio_path",
+            side_effect=[None, final_audio],
+        ), patch.object(
+            self.sessions,
+            "_recover_recording_audio",
+            AsyncMock(return_value=(final_audio, {
+                "client_id": "client-1",
+                "available_count": 3,
+                "highest_index": 2,
+                "expected_count": 3,
+                "missing_indices": [],
+                "is_contiguous": True,
+                "is_complete": True,
+            })),
+        ), patch.object(
+            self.sessions,
+            "get_chunk_upload_summary",
+            return_value={
+                "client_id": "client-1",
+                "available_count": 3,
+                "highest_index": 2,
+                "expected_count": 3,
+                "missing_indices": [],
+                "is_contiguous": True,
+                "is_complete": True,
+            },
+        ):
+            payload = asyncio.run(
+                self.sessions.complete_recording(
+                    "session-1",
+                    self.sessions.CompleteRecordingRequest(
+                        client_id="client-1",
+                        mime_type="audio/webm",
+                        expected_chunks=3,
+                    ),
+                    repository=repository,
+                    session_manager=session_manager,
+                )
+            )
+
+        self.assertTrue(payload["workspace_ready"])
+        self.assertEqual(payload["audio_status"], "finalized")
+        self.assertEqual(payload["audio_url"], "/api/recordings/session-1/audio")
+        self.assertTrue(payload["recoverable_from_chunks"])
+        self.assertEqual(payload["chunk_summary"]["available_count"], 3)
+        session_manager.end_session_by_id.assert_awaited_once_with("session-1")
+        repository.mark_session_recording_ready.assert_awaited_once_with("session-1")
+
+    def test_complete_recording_reports_missing_chunks_without_fake_success(self):
+        session = SimpleNamespace(
+            id="session-1",
+            is_active=True,
+            recording_status="recording",
+            audio_status="chunking",
+            audio_error=None,
+            finalized_at=None,
+        )
+        finalizing_session = SimpleNamespace(
+            id="session-1",
+            is_active=True,
+            recording_status="finalizing",
+            audio_status="chunking",
+            audio_error=None,
+            finalized_at=None,
+        )
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            get_primary_meeting=AsyncMock(return_value=SimpleNamespace(id="meeting-1")),
+            update_session_recording_state=AsyncMock(return_value=finalizing_session),
+            mark_session_recording_ready=AsyncMock(),
+        )
+        session_manager = SimpleNamespace(
+            end_session_by_id=AsyncMock(),
+        )
+
+        with patch.object(
+            self.sessions,
+            "get_session_audio_path",
+            return_value=None,
+        ), patch.object(
+            self.sessions,
+            "_recover_recording_audio",
+            AsyncMock(return_value=(None, {
+                "client_id": "client-1",
+                "available_count": 2,
+                "highest_index": 3,
+                "expected_count": 4,
+                "missing_indices": [1, 2],
+                "is_contiguous": False,
+                "is_complete": False,
+            })),
+        ):
+            payload = asyncio.run(
+                self.sessions.complete_recording(
+                    "session-1",
+                    self.sessions.CompleteRecordingRequest(
+                        client_id="client-1",
+                        mime_type="audio/webm",
+                        expected_chunks=4,
+                    ),
+                    repository=repository,
+                    session_manager=session_manager,
+                )
+            )
+
+        self.assertFalse(payload["workspace_ready"])
+        self.assertEqual(payload["reason"], "missing_chunks")
+        self.assertEqual(payload["missing_chunks"], [1, 2])
+        self.assertTrue(payload["recoverable_from_chunks"])
+        self.assertEqual(payload["chunk_summary"]["available_count"], 2)
+        session_manager.end_session_by_id.assert_not_awaited()
+        repository.mark_session_recording_ready.assert_not_awaited()
+
+    def test_recover_recording_audio_reuses_completion_path(self):
+        payload = {
+            "session_id": "session-1",
+            "workspace_ready": True,
+            "has_audio": True,
+        }
+
+        with patch.object(
+            self.sessions,
+            "complete_recording",
+            AsyncMock(return_value=payload.copy()),
+        ) as complete_mock:
+            result = asyncio.run(
+                self.sessions.recover_recording_audio(
+                    "session-1",
+                    self.sessions.CompleteRecordingRequest(
+                        client_id="client-1",
+                        expected_chunks=3,
+                    ),
+                    repository=SimpleNamespace(),
+                    session_manager=SimpleNamespace(),
+                )
+            )
+
+        self.assertTrue(result["recovered"])
+        complete_mock.assert_awaited_once()
+
+    def test_assemble_chunks_keeps_chunk_storage_for_recovery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            with patch.object(
+                self.audio_storage,
+                "get_settings",
+                return_value=SimpleNamespace(data_dir=data_dir),
+            ):
+                self.audio_storage.write_chunk("session-1", "client-1", 0, b"abc")
+                self.audio_storage.write_chunk("session-1", "client-1", 1, b"def")
+
+                final_path = self.audio_storage.assemble_chunks(
+                    "session-1",
+                    "client-1",
+                    2,
+                    "webm",
+                )
+
+                self.assertIsNotNone(final_path)
+                self.assertTrue(final_path.exists())
+                chunk_dir = self.audio_storage.get_chunk_storage_dir("session-1", "client-1")
+                self.assertTrue(chunk_dir.exists())
+                self.assertEqual(sorted(p.name for p in chunk_dir.glob("*.chunk")), ["000000.chunk", "000001.chunk"])
+
+    def test_recover_session_audio_from_chunks_rebuilds_audio_from_retained_chunks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir)
+            with patch.object(
+                self.audio_storage,
+                "get_settings",
+                return_value=SimpleNamespace(data_dir=data_dir),
+            ):
+                self.audio_storage.write_chunk("session-1", "client-1", 0, b"abc")
+                self.audio_storage.write_chunk("session-1", "client-1", 1, b"def")
+                self.audio_storage.write_session_chunk_meta("session-1", {
+                    "client_id": "client-1",
+                    "extension": "webm",
+                    "expected_chunks": 2,
+                })
+
+                final_path = self.audio_storage.recover_session_audio_from_chunks(
+                    "session-1",
+                    client_id="client-1",
+                    expected_count=2,
+                    preferred_extension="webm",
+                )
+
+                self.assertIsNotNone(final_path)
+                self.assertTrue(final_path.exists())
+                self.assertEqual(final_path.read_bytes(), b"abcdef")
+                chunk_dir = self.audio_storage.get_chunk_storage_dir("session-1", "client-1")
+                self.assertTrue(chunk_dir.exists())
+
     def test_workspace_state_allows_summary_when_speaker_review_is_pending(self):
         session = SimpleNamespace(has_transcription=True)
         meeting = SimpleNamespace(
@@ -258,6 +518,105 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
         finally:
             self.export._TRANSCRIPTION_JOBS.clear()
             self.export._TRANSCRIPTION_JOBS.update(original_jobs)
+
+    def test_transcription_job_uses_existing_primary_meeting_for_initial_version(self):
+        primary_meeting = SimpleNamespace(
+            id="meeting-1",
+            key_start=datetime.now(UTC),
+            template_key="working_session",
+            custom_prompt="Focus on implementation details.",
+        )
+        session = SimpleNamespace(
+            id="session-1",
+            meetings=[primary_meeting],
+        )
+        transcript_version = SimpleNamespace(
+            id="tv-1",
+            version_number=1,
+            status="processing",
+        )
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            create_meeting=AsyncMock(),
+            ensure_transcript_versions=AsyncMock(return_value=[]),
+            get_latest_transcript_version=AsyncMock(return_value=None),
+            get_transcript_version_for_session=AsyncMock(return_value=None),
+            create_transcript_version=AsyncMock(return_value=transcript_version),
+            update_transcript_version=AsyncMock(return_value=transcript_version),
+        )
+        transcription_manager = SimpleNamespace(
+            active_engine=SimpleNamespace(name="whisperx-test")
+        )
+
+        with patch.object(
+            self.export,
+            "_transcribe_and_persist_session",
+            AsyncMock(return_value=("Transcript", 12.0)),
+        ):
+            asyncio.run(
+                self.export._run_transcription_job(
+                    job_id="job-1",
+                    session_id="session-1",
+                    repository=repository,
+                    transcription_manager=transcription_manager,
+                    mode="initial",
+                )
+            )
+
+        repository.create_meeting.assert_not_awaited()
+        repository.create_transcript_version.assert_awaited_once_with(
+            session_id="session-1",
+            meeting_id="meeting-1",
+            version_number=1,
+            status="processing",
+            source_type="initial_transcription",
+            template_key=self.export.normalize_template_key("working_session"),
+            custom_prompt="Focus on implementation details.",
+        )
+
+    def test_transcription_job_logs_unexpected_exceptions_with_traceback(self):
+        primary_meeting = SimpleNamespace(
+            id="meeting-1",
+            key_start=datetime.now(UTC),
+            template_key="meeting",
+            custom_prompt=None,
+        )
+        session = SimpleNamespace(
+            id="session-1",
+            meetings=[primary_meeting],
+        )
+        transcript_version = SimpleNamespace(
+            id="tv-1",
+            version_number=1,
+            status="processing",
+        )
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            create_meeting=AsyncMock(),
+            ensure_transcript_versions=AsyncMock(return_value=[]),
+            get_latest_transcript_version=AsyncMock(return_value=None),
+            get_transcript_version_for_session=AsyncMock(return_value=None),
+            create_transcript_version=AsyncMock(return_value=transcript_version),
+            update_transcript_version=AsyncMock(return_value=transcript_version),
+        )
+
+        with patch.object(
+            self.export,
+            "_transcribe_and_persist_session",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ), patch.object(self.export.logger, "exception") as mock_exception:
+            asyncio.run(
+                self.export._run_transcription_job(
+                    job_id="job-1",
+                    session_id="session-1",
+                    repository=repository,
+                    transcription_manager=SimpleNamespace(),
+                    mode="initial",
+                )
+            )
+
+        repository.update_transcript_version.assert_any_await("tv-1", status="failed")
+        mock_exception.assert_called_once()
 
     def test_revise_summary_draft_returns_updated_draft(self):
         draft = SimpleNamespace(id="draft-1", status="draft", content="Original summary")

@@ -44,6 +44,7 @@ class Repository:
             await conn.run_sync(Base.metadata.create_all)
             await self._ensure_session_timezone_columns(conn)
             await self._ensure_session_transcription_column(conn)
+            await self._ensure_session_recording_columns(conn)
             await self._ensure_transcript_version_table(conn)
             await self._ensure_transcript_segment_version_column(conn)
             await self._ensure_meeting_workflow_columns(conn)
@@ -183,6 +184,56 @@ class Repository:
             )
             await db.commit()
             return await self.get_session(session_id)
+
+    async def update_session_recording_state(
+        self,
+        session_id: str,
+        *,
+        recording_status: str | object = UNSET,
+        audio_status: str | object = UNSET,
+        audio_error: str | None | object = UNSET,
+        finalized_at: datetime | None | object = UNSET,
+    ) -> Session | None:
+        """Update recording lifecycle state for a session."""
+        values: dict[str, Any] = {}
+        if recording_status is not UNSET:
+            values["recording_status"] = str(recording_status)
+        if audio_status is not UNSET:
+            values["audio_status"] = str(audio_status)
+        if audio_error is not UNSET:
+            values["audio_error"] = audio_error
+        if finalized_at is not UNSET:
+            values["finalized_at"] = finalized_at
+        if not values:
+            return await self.get_session(session_id)
+
+        async with self._session_factory() as db:
+            await db.execute(update(Session).where(Session.id == session_id).values(**values))
+            await db.commit()
+        return await self.get_session(session_id)
+
+    async def mark_session_recording_ready(self, session_id: str) -> Session | None:
+        """Mark a session recording as finalized and ready for workspace review."""
+        return await self.update_session_recording_state(
+            session_id,
+            recording_status="ready",
+            audio_status="finalized",
+            audio_error=None,
+            finalized_at=datetime.utcnow(),
+        )
+
+    async def mark_session_recording_failed(
+        self,
+        session_id: str,
+        error_message: str,
+    ) -> Session | None:
+        """Mark a session recording as failed."""
+        return await self.update_session_recording_state(
+            session_id,
+            recording_status="failed",
+            audio_status="failed",
+            audio_error=error_message,
+        )
 
     # Meeting operations
     async def create_meeting(
@@ -1445,6 +1496,50 @@ class Repository:
         column_names = {row[1] for row in result.fetchall()}
         if "has_transcription" not in column_names:
             await conn.execute(text("ALTER TABLE sessions ADD COLUMN has_transcription BOOLEAN DEFAULT 0"))
+
+    async def _ensure_session_recording_columns(self, conn) -> None:
+        """Backfill schema for recording lifecycle state on existing SQLite DBs."""
+        result = await conn.execute(text("PRAGMA table_info(sessions)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "recording_status" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE sessions ADD COLUMN recording_status VARCHAR(20) DEFAULT 'starting'")
+            )
+        if "audio_status" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE sessions ADD COLUMN audio_status VARCHAR(20) DEFAULT 'none'")
+            )
+        if "audio_error" not in column_names:
+            await conn.execute(text("ALTER TABLE sessions ADD COLUMN audio_error TEXT"))
+        if "finalized_at" not in column_names:
+            await conn.execute(text("ALTER TABLE sessions ADD COLUMN finalized_at DATETIME"))
+
+        await conn.execute(
+            text(
+                """
+                UPDATE sessions
+                SET recording_status = CASE
+                    WHEN is_active = 1 THEN 'recording'
+                    WHEN ended_at IS NOT NULL THEN 'ready'
+                    ELSE 'starting'
+                END
+                WHERE recording_status IS NULL OR recording_status = ''
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                UPDATE sessions
+                SET audio_status = CASE
+                    WHEN ended_at IS NOT NULL THEN 'finalized'
+                    WHEN is_active = 1 THEN 'chunking'
+                    ELSE 'none'
+                END
+                WHERE audio_status IS NULL OR audio_status = ''
+                """
+            )
+        )
 
     async def _ensure_transcript_version_table(self, conn) -> None:
         """Create transcript version table for versioned workspace state."""

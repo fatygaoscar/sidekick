@@ -9,12 +9,15 @@ class SidekickApp {
     constructor() {
         this.state = {
             isRecording: false,
+            isStartingRecording: false,
+            isStoppingRecording: false,
             isUploadingFile: false,
             sessionId: null,
             lastSessionId: null,
             elapsedSeconds: 0,
             recordingStartTime: null,
             livePreviewEnabled: false,
+            previewConnectionState: 'idle',
         };
 
         this.timerInterval = null;
@@ -22,6 +25,7 @@ class SidekickApp {
         this.visualizer = null;
         this.ws = null;
         this.audioUploadPromise = null;
+        this.previewAttachPromise = null;
         this._pageGuardArmed = false;
         this._historyGuardArmed = false;
         this._suppressHistoryGuardPop = false;
@@ -31,10 +35,7 @@ class SidekickApp {
         this.chunkResults = new Map();
         this.pendingChunks = new Map();
         this.expectedChunkCount = 0;
-        this.finalizedChunkAudio = false;
-        this.captureStoppedPromise = null;
         this.captureStopMeta = null;
-        this.resolveCaptureStopped = null;
         this.fallbackBlob = null;
         this.fallbackMimeType = null;
 
@@ -73,10 +74,10 @@ class SidekickApp {
         this.ws = new SidekickWebSocket({
             onOpen: () => this._onConnected(),
             onClose: () => this._onDisconnected(),
+            onError: () => this._onWebSocketError(),
             onState: (state) => this._onState(state),
             onTranscription: (message) => this._onLiveTranscription(message),
         });
-        this.ws.connect();
     }
 
     _initAudioCapture() {
@@ -84,7 +85,11 @@ class SidekickApp {
             sampleRate: 16000,
             captureSampleRate: 48000,
             onAudioData: (buffer) => {
-                if (this.state.isRecording) {
+                if (
+                    this.state.isRecording
+                    && this.state.livePreviewEnabled
+                    && this.state.previewConnectionState === 'connected'
+                ) {
                     this.ws.sendAudio(buffer);
                 }
             },
@@ -98,10 +103,6 @@ class SidekickApp {
             onCaptureStopped: (meta) => {
                 this.captureStopMeta = meta;
                 this.expectedChunkCount = meta.chunkCount || 0;
-                if (this.resolveCaptureStopped) {
-                    this.resolveCaptureStopped(meta);
-                    this.resolveCaptureStopped = null;
-                }
             },
             onLevelUpdate: (level, frequencyData, sampleRate) => {
                 this.visualizer.draw(level, frequencyData, sampleRate);
@@ -120,7 +121,12 @@ class SidekickApp {
         window.addEventListener('keydown', armPageGuard, { once: true });
 
         window.addEventListener('beforeunload', (event) => {
-            if (!this.state.isRecording && !this.state.isUploadingFile) {
+            if (
+                !this.state.isRecording
+                && !this.state.isStartingRecording
+                && !this.state.isStoppingRecording
+                && !this.state.isUploadingFile
+            ) {
                 return;
             }
             event.preventDefault();
@@ -139,7 +145,15 @@ class SidekickApp {
 
         document.addEventListener('click', (event) => {
             const link = event.target.closest('a[href]');
-            if (!link || (!this.state.isRecording && !this.state.isUploadingFile)) {
+            if (
+                !link
+                || (
+                    !this.state.isRecording
+                    && !this.state.isStartingRecording
+                    && !this.state.isStoppingRecording
+                    && !this.state.isUploadingFile
+                )
+            ) {
                 return;
             }
             if (link.target === '_blank' || link.hasAttribute('download')) {
@@ -156,7 +170,7 @@ class SidekickApp {
                 this._suppressHistoryGuardPop = false;
                 return;
             }
-            if (this.state.isRecording && this._historyGuardArmed) {
+            if ((this.state.isRecording || this.state.isStartingRecording || this.state.isStoppingRecording) && this._historyGuardArmed) {
                 window.history.pushState({ __sidekickRecordingGuard: true, __sidekickMainPage: true }, '', window.location.href);
                 this.elements.statusText.textContent = 'Stop recording before leaving this page';
                 return;
@@ -171,11 +185,6 @@ class SidekickApp {
                 return;
             }
             try {
-                this.ws.endSession();
-            } catch (_error) {
-                // no-op: page is being hidden/unloaded
-            }
-            try {
                 this.audioCapture.stop();
             } catch (_error) {
                 // no-op: page is being hidden/unloaded
@@ -188,32 +197,70 @@ class SidekickApp {
         });
 
         document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible' && !this.ws.isConnected) {
-                this.ws.connect();
+            if (
+                document.visibilityState === 'visible'
+                && this.state.isRecording
+                && !this.ws.isConnected
+            ) {
+                void this._connectPreviewSocket(this.state.sessionId || this.state.lastSessionId);
             }
         });
     }
 
     _onConnected() {
-        this.elements.connectionDot.classList.add('connected');
-        this.elements.connectionText.textContent = 'Connected';
+        if (
+            this.state.isRecording
+            && (this.state.sessionId || this.state.lastSessionId)
+            && this.state.previewConnectionState !== 'connected'
+            && !this.previewAttachPromise
+        ) {
+            void this._connectPreviewSocket(this.state.sessionId || this.state.lastSessionId);
+            return;
+        }
+        this._syncConnectionStatus();
     }
 
     _onDisconnected() {
-        this.elements.connectionDot.classList.remove('connected');
-        this.elements.connectionText.textContent = 'Ready';
+        this.state.previewConnectionState = this.state.isRecording ? 'degraded' : 'idle';
+        this._syncConnectionStatus();
+    }
+
+    _onWebSocketError() {
+        if (!this.state.isRecording) {
+            return;
+        }
+        this.state.previewConnectionState = 'degraded';
+        this._syncConnectionStatus();
     }
 
     _onState(state) {
         this.state.livePreviewEnabled = !!state.live_preview_enabled;
-        if (state.session) {
-            this.state.sessionId = state.session.id;
-            this.state.lastSessionId = state.session.id;
-            this._flushPendingChunks();
-        } else if (!this.state.isRecording) {
-            this.state.sessionId = null;
-        }
         this._syncLivePreviewVisibility();
+        this._syncConnectionStatus();
+    }
+
+    _syncConnectionStatus() {
+        const dot = this.elements.connectionDot;
+        const text = this.elements.connectionText;
+        if (!dot || !text) {
+            return;
+        }
+
+        const recordingActive = this.state.isRecording || this.state.isStartingRecording || this.state.isStoppingRecording;
+        if (!recordingActive) {
+            dot.classList.remove('connected');
+            text.textContent = 'Ready';
+            return;
+        }
+
+        if (this.state.previewConnectionState === 'connected' && this.state.livePreviewEnabled) {
+            dot.classList.add('connected');
+            text.textContent = 'Connected';
+            return;
+        }
+
+        dot.classList.remove('connected');
+        text.textContent = 'Preview unavailable';
     }
 
     _onLiveTranscription(message) {
@@ -244,6 +291,9 @@ class SidekickApp {
             this.elements.statusText.textContent = 'Wait for the upload to finish';
             return;
         }
+        if (this.state.isStartingRecording || this.state.isStoppingRecording) {
+            return;
+        }
         if (this.state.isRecording) {
             await this._stopRecording();
         } else {
@@ -253,16 +303,25 @@ class SidekickApp {
 
     _syncPrimaryControls() {
         if (this.elements.recordBtn) {
-            this.elements.recordBtn.disabled = this.state.isUploadingFile;
+            this.elements.recordBtn.disabled = (
+                this.state.isUploadingFile
+                || this.state.isStartingRecording
+                || this.state.isStoppingRecording
+            );
         }
         if (this.elements.uploadBtn) {
-            this.elements.uploadBtn.disabled = this.state.isRecording || this.state.isUploadingFile;
+            this.elements.uploadBtn.disabled = (
+                this.state.isRecording
+                || this.state.isStartingRecording
+                || this.state.isStoppingRecording
+                || this.state.isUploadingFile
+            );
             this.elements.uploadBtn.textContent = this.state.isUploadingFile ? 'Uploading...' : 'Upload File';
         }
     }
 
     _handleUploadClick() {
-        if (this.state.isRecording) {
+        if (this.state.isRecording || this.state.isStartingRecording || this.state.isStoppingRecording) {
             this.elements.statusText.textContent = 'Stop recording before uploading a file';
             return;
         }
@@ -290,55 +349,56 @@ class SidekickApp {
 
     async _startRecording() {
         try {
+            this.state.isStartingRecording = true;
+            this._syncPrimaryControls();
             this.elements.statusText.textContent = 'Starting...';
-            this.state.sessionId = null;
-            this.state.lastSessionId = null;
-            this.ws.connect();
+            this._resetRecordingBootstrapState();
 
             await this.audioCapture.start();
-            this.state.isRecording = true;
-            this._armRecordingHistoryGuard();
-            this._syncPrimaryControls();
-            this.elements.recordBtn.classList.add('recording');
-            this.elements.recordBtn.textContent = 'Stop';
-            this.elements.recordBtn.setAttribute('aria-pressed', 'true');
-            this.elements.statusText.textContent = 'Starting recording...';
-            this._resetLivePreview();
-            this._syncLivePreviewVisibility();
-            this._startTimer();
-            this.ws.startSession();
+            const sessionId = await this._createSession({
+                timeoutMs: 15000,
+                retries: 1,
+                networkErrorMessage: 'Network request failed while creating recording session',
+                httpErrorMessage: 'Failed to create recording session',
+                logLabel: 'recording:create_session',
+            });
 
-            const startedSessionId = await this._waitForSessionId(10000);
-            if (!startedSessionId) {
-                throw new Error('Failed to start recording session');
-            }
-
-            this.state.lastSessionId = startedSessionId;
-            this.audioUploadPromise = null;
-            this.chunkUploads = new Map();
-            this.chunkResults = new Map();
-            this.pendingChunks = new Map();
-            this.expectedChunkCount = 0;
-            this.finalizedChunkAudio = false;
-            this.captureStopMeta = null;
-            this.captureStoppedPromise = null;
-            this.resolveCaptureStopped = null;
-            this.fallbackBlob = null;
-            this.fallbackMimeType = null;
+            this.state.sessionId = sessionId;
+            this.state.lastSessionId = sessionId;
+            this._beginRecordingUi(sessionId);
+            void this._connectPreviewSocket(sessionId);
 
             this.elements.statusText.textContent = 'Recording';
         } catch (error) {
             console.error('Failed to start recording:', error);
-            this.state.isRecording = false;
-            this._disarmRecordingHistoryGuard();
-            this.audioCapture.stop();
-            this._syncPrimaryControls();
-            this.elements.recordBtn.classList.remove('recording');
-            this.elements.recordBtn.textContent = 'Record';
-            this.elements.recordBtn.setAttribute('aria-pressed', 'false');
-            this._stopTimer();
+            try {
+                this.audioCapture.stop();
+            } catch (_stopError) {
+                // no-op: best effort cleanup after failed startup
+            }
+            try {
+                await this._disconnectPreviewSocket(this.state.sessionId || this.state.lastSessionId, {
+                    flushBuffer: false,
+                });
+            } catch (_disconnectError) {
+                // no-op: preview is best effort during cleanup
+            }
+            if (this.state.sessionId) {
+                try {
+                    await this._endSession(this.state.sessionId, {
+                        networkErrorMessage: 'Network request failed while cleaning up failed recording session',
+                        logLabel: 'recording:cleanup_session',
+                    });
+                } catch (cleanupError) {
+                    console.warn('Failed to clean up recording session after start failure:', cleanupError?.message || cleanupError);
+                }
+            }
+            this._resetRecordingBootstrapState();
             this.elements.statusText.textContent = 'Could not start session';
-            this._syncLivePreviewVisibility();
+        } finally {
+            this.state.isStartingRecording = false;
+            this._syncPrimaryControls();
+            this._syncConnectionStatus();
         }
     }
 
@@ -348,53 +408,86 @@ class SidekickApp {
             this.state.lastSessionId = sessionId;
         }
 
-        this.captureStoppedPromise = new Promise((resolve) => {
-            this.resolveCaptureStopped = resolve;
-        });
-
-        this.audioCapture.stop();
-        this.visualizer.clear();
-        this.ws.endSession();
-
-        this.state.isRecording = false;
-        this._disarmRecordingHistoryGuard();
-        this._syncPrimaryControls();
-        this.elements.recordBtn.classList.remove('recording');
-        this.elements.recordBtn.textContent = 'Record';
-        this.elements.recordBtn.setAttribute('aria-pressed', 'false');
-        this.elements.statusText.textContent = 'Finalizing recording...';
-        this._syncLivePreviewVisibility();
-        this._stopTimer();
-
         if (!sessionId) {
-            this.elements.statusText.textContent = 'Missing session';
+            this._resetRecordingBootstrapState();
+            this.elements.statusText.textContent = 'Could not stop recording';
             return;
         }
 
+        this.state.isStoppingRecording = true;
+        this._syncPrimaryControls();
+        const captureStopPromise = this.audioCapture.stopAndWait();
+        this.visualizer.clear();
+        const previewDisconnectPromise = this._disconnectPreviewSocket(sessionId, {
+            flushBuffer: true,
+        });
+        this._endRecordingUi();
+        this.elements.statusText.textContent = 'Finalizing recording...';
+
         try {
-            console.info('[recording_stop:persist_audio:start]', { sessionId });
-            await this._ensureRecordingAudioPersisted(sessionId);
-            console.info('[recording_stop:persist_audio:ok]', { sessionId });
+            this.captureStopMeta = await captureStopPromise;
+            this.expectedChunkCount = this.captureStopMeta?.chunkCount || 0;
+            await this._waitForChunkUploadsToSettle();
+            let completion = await this._waitForRecordingCompletion(sessionId, {
+                mimeType: this.captureStopMeta?.mimeType || this.fallbackMimeType || 'audio/webm',
+                expectedChunks: this.expectedChunkCount,
+            });
+            if (!completion?.workspace_ready && this.fallbackBlob) {
+                this.elements.statusText.textContent = 'Uploading backup audio...';
+                await this._uploadSessionAudio(
+                    sessionId,
+                    this.fallbackBlob,
+                    this.fallbackMimeType || this.captureStopMeta?.mimeType || 'audio/webm'
+                );
+                this.elements.statusText.textContent = 'Finalizing recording...';
+                completion = await this._waitForRecordingCompletion(sessionId, {
+                    mimeType: this.captureStopMeta?.mimeType || this.fallbackMimeType || 'audio/webm',
+                    expectedChunks: this.expectedChunkCount,
+                    allowFallbackBlob: true,
+                    retryWindowMs: 15000,
+                });
+            }
+            if (!completion?.workspace_ready) {
+                const reason = completion?.recoverable_from_chunks
+                    ? 'Recording audio is still recoverable, but finalization did not complete. Reopen it from History and try again.'
+                    : completion?.reason === 'missing_chunks'
+                        ? 'Recording audio is incomplete'
+                        : 'Recording audio is not ready yet';
+                throw new Error(reason);
+            }
+            await previewDisconnectPromise.catch((error) => {
+                console.warn('Failed to disconnect preview socket cleanly:', error?.message || error);
+            });
             this.elements.statusText.textContent = 'Opening workspace...';
             console.info('[recording_stop:open_workspace:start]', { sessionId });
             await this.workspace.open(sessionId, {
                 autoStartTranscription: true,
                 initialTab: 'speakers',
+                workspaceLoadTimeoutMs: 15000,
+                workspaceLoadRetries: 3,
             });
             console.info('[recording_stop:open_workspace:ok]', { sessionId });
             this.elements.statusText.textContent = 'Review recording';
         } catch (error) {
             console.error('Failed to prepare recording workspace:', error);
-            console.warn('[recording_stop:open_workspace:fail]', {
+            console.warn('[recording_stop:fail]', {
                 sessionId,
-                message: error?.message || 'Workspace unavailable',
+                message: error?.message || 'Recording finalization failed',
             });
-            this._handleWorkspaceOpenFailure(sessionId, error);
+            this._resetAfterWorkspace({
+                preserveLastSessionId: true,
+                statusText: error?.message || 'Recording finalization failed',
+            });
+            alert(error?.message || 'Failed to finalize recording');
+        } finally {
+            this.state.isStoppingRecording = false;
+            this._syncPrimaryControls();
+            this._syncConnectionStatus();
         }
     }
 
     async _startFileUpload(file) {
-        if (this.state.isRecording) {
+        if (this.state.isRecording || this.state.isStartingRecording || this.state.isStoppingRecording) {
             this.elements.statusText.textContent = 'Stop recording before uploading a file';
             return;
         }
@@ -415,7 +508,13 @@ class SidekickApp {
         this.elements.statusText.textContent = 'Preparing upload...';
 
         try {
-            sessionId = await this._createUploadSession();
+            sessionId = await this._createSession({
+                timeoutMs: 15000,
+                retries: 1,
+                networkErrorMessage: 'Network request failed while creating upload session',
+                httpErrorMessage: 'Failed to create upload session',
+                logLabel: 'upload:create_session',
+            });
             this.state.sessionId = sessionId;
             this.state.lastSessionId = sessionId;
 
@@ -428,6 +527,8 @@ class SidekickApp {
             await this.workspace.open(sessionId, {
                 autoStartTranscription: false,
                 transcriptionStartMode: 'manual',
+                workspaceLoadTimeoutMs: 15000,
+                workspaceLoadRetries: 3,
             });
             this.elements.statusText.textContent = 'Review upload';
         } catch (error) {
@@ -443,7 +544,7 @@ class SidekickApp {
         }
     }
 
-    async _createUploadSession() {
+    async _createSession(config = {}) {
         let timezoneName = null;
         try {
             timezoneName = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
@@ -462,19 +563,28 @@ class SidekickApp {
                 timezone_name: timezoneName,
                 timezone_offset_minutes: new Date().getTimezoneOffset(),
             }),
-        }, {
-            timeoutMs: 15000,
-            retries: 1,
-            networkErrorMessage: 'Network request failed while creating upload session',
-            httpErrorMessage: 'Failed to create upload session',
-            logLabel: 'upload:create_session',
-        });
+        }, config);
 
         if (!payload?.id) {
-            throw new Error('Failed to create upload session');
+            throw new Error(config.httpErrorMessage || 'Failed to create session');
         }
 
         return payload.id;
+    }
+
+    async _endSession(sessionId, config = {}) {
+        if (!sessionId) {
+            return null;
+        }
+
+        return await window.SidekickNetwork.json(`/api/sessions/${sessionId}`, {
+            method: 'DELETE',
+        }, {
+            timeoutMs: 10000,
+            retries: 0,
+            httpErrorMessage: 'Failed to end session',
+            ...config,
+        });
     }
 
     async _uploadImportedAudio(sessionId, file, extension) {
@@ -528,23 +638,32 @@ class SidekickApp {
 
     async _finalizeUploadSession(sessionId) {
         try {
-            const response = await window.SidekickNetwork.request('/api/sessions/current', {
-                method: 'DELETE',
-            }, {
-                timeoutMs: 10000,
-                retries: 0,
-                networkErrorMessage: 'Network request failed while finalizing upload session',
-                logLabel: 'upload:end_session',
+            const completion = await this._completeRecording(sessionId, {
+                mimeType: 'audio/webm',
+                expectedChunks: 0,
+                allowFallbackBlob: true,
             });
-            if (!response.ok && response.status !== 404) {
-                throw new Error(`HTTP ${response.status}`);
+            if (!completion?.workspace_ready) {
+                throw new Error('Uploaded audio is not ready yet');
             }
             this.state.sessionId = null;
         } catch (error) {
-            console.warn('Failed to end upload session cleanly:', {
+            try {
+                await this._endSession(sessionId, {
+                    networkErrorMessage: 'Network request failed while finalizing upload session',
+                    logLabel: 'upload:end_session',
+                });
+            } catch (endError) {
+                console.warn('Failed to end upload session cleanly after complete fallback:', {
+                    sessionId,
+                    message: endError?.message || 'Failed to end upload session',
+                });
+            }
+            console.warn('Failed to finalize upload session cleanly:', {
                 sessionId,
-                message: error?.message || 'Failed to end upload session',
+                message: error?.message || 'Failed to finalize upload session',
             });
+            throw error;
         }
     }
 
@@ -716,12 +835,129 @@ class SidekickApp {
         }
     }
 
+    _beginRecordingUi(sessionId) {
+        this.state.isRecording = true;
+        this.state.sessionId = sessionId;
+        this.state.lastSessionId = sessionId;
+        this.state.previewConnectionState = 'connecting';
+        this._armRecordingHistoryGuard();
+        this._syncPrimaryControls();
+        this.elements.recordBtn.classList.add('recording');
+        this.elements.recordBtn.textContent = 'Stop';
+        this.elements.recordBtn.setAttribute('aria-pressed', 'true');
+        this._resetLivePreview();
+        this._syncLivePreviewVisibility();
+        this._startTimer();
+        this._flushPendingChunks();
+        this._syncConnectionStatus();
+    }
+
+    _endRecordingUi() {
+        this.state.isRecording = false;
+        this.state.livePreviewEnabled = false;
+        this.state.previewConnectionState = 'idle';
+        this._disarmRecordingHistoryGuard();
+        this._syncPrimaryControls();
+        this.elements.recordBtn.classList.remove('recording');
+        this.elements.recordBtn.textContent = 'Record';
+        this.elements.recordBtn.setAttribute('aria-pressed', 'false');
+        this._syncLivePreviewVisibility();
+        this._stopTimer();
+        this._syncConnectionStatus();
+    }
+
+    _resetRecordingBootstrapState() {
+        this.state.isRecording = false;
+        this.state.livePreviewEnabled = false;
+        this.state.previewConnectionState = 'idle';
+        this.state.sessionId = null;
+        this.state.lastSessionId = null;
+        this.audioUploadPromise = null;
+        this.chunkUploads = new Map();
+        this.chunkResults = new Map();
+        this.pendingChunks = new Map();
+        this.expectedChunkCount = 0;
+        this.captureStopMeta = null;
+        this.fallbackBlob = null;
+        this.fallbackMimeType = null;
+        this.previewAttachPromise = null;
+        this._disarmRecordingHistoryGuard();
+        this.elements.recordBtn.classList.remove('recording');
+        this.elements.recordBtn.textContent = 'Record';
+        this.elements.recordBtn.setAttribute('aria-pressed', 'false');
+        this._stopTimer();
+        this._syncLivePreviewVisibility();
+        this._syncConnectionStatus();
+    }
+
+    async _connectPreviewSocket(sessionId) {
+        if (!sessionId) {
+            return null;
+        }
+        if (this.previewAttachPromise) {
+            return this.previewAttachPromise;
+        }
+
+        this.state.previewConnectionState = 'connecting';
+        this._syncConnectionStatus();
+
+        this.previewAttachPromise = (async () => {
+            try {
+                await this.ws.waitForOpen(5000);
+                const attached = await this.ws.attachSession(sessionId, 5000);
+                this.state.livePreviewEnabled = !!attached?.live_preview_enabled;
+                this.state.previewConnectionState = (
+                    attached?.live_preview_enabled ? 'connected' : 'degraded'
+                );
+                this._syncLivePreviewVisibility();
+                this._syncConnectionStatus();
+                return attached;
+            } catch (error) {
+                this.state.livePreviewEnabled = false;
+                this.state.previewConnectionState = 'degraded';
+                this._syncLivePreviewVisibility();
+                this._syncConnectionStatus();
+                console.warn('Preview connection unavailable; recording will still save:', error?.message || error);
+                try {
+                    this.ws.disconnect();
+                } catch (_disconnectError) {
+                    // no-op: preview is best effort
+                }
+                return null;
+            } finally {
+                this.previewAttachPromise = null;
+            }
+        })();
+
+        return await this.previewAttachPromise;
+    }
+
+    async _disconnectPreviewSocket(sessionId, options = {}) {
+        this.state.livePreviewEnabled = false;
+        this.state.previewConnectionState = 'idle';
+        this.previewAttachPromise = null;
+        this._syncLivePreviewVisibility();
+        this._syncConnectionStatus();
+
+        try {
+            if (sessionId) {
+                await this.ws.detachSession(sessionId, options, 3000);
+            }
+        } finally {
+            this.ws.disconnect();
+        }
+    }
+
     _resetAfterWorkspace(options = {}) {
         const {
             preserveLastSessionId = false,
             statusText = '',
         } = options;
         this.state.isUploadingFile = false;
+        this.state.isStartingRecording = false;
+        this.state.isStoppingRecording = false;
+        this.state.livePreviewEnabled = false;
+        this.state.previewConnectionState = 'idle';
         this.state.elapsedSeconds = 0;
         this.state.recordingStartTime = null;
         this._updateTimerDisplay();
@@ -734,29 +970,18 @@ class SidekickApp {
         this.chunkResults = new Map();
         this.pendingChunks = new Map();
         this.expectedChunkCount = 0;
-        this.finalizedChunkAudio = false;
-        this.captureStoppedPromise = null;
         this.captureStopMeta = null;
-        this.resolveCaptureStopped = null;
         this.fallbackBlob = null;
         this.fallbackMimeType = null;
+        this.previewAttachPromise = null;
         this.elements.statusText.textContent = statusText;
+        this._syncLivePreviewVisibility();
+        this._syncConnectionStatus();
         this._syncPrimaryControls();
     }
 
     _resetLivePreview() {
         this.elements.livePreviewText.textContent = 'Listening...';
-    }
-
-    async _waitForSessionId(timeoutMs = 3000) {
-        const startedAt = Date.now();
-        while (Date.now() - startedAt < timeoutMs) {
-            if (this.state.sessionId) {
-                return this.state.sessionId;
-            }
-            await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-        return null;
     }
 
     async _uploadChunkBestEffort(blob, mimeType, chunkIndex) {
@@ -847,93 +1072,44 @@ class SidekickApp {
         ]).catch(() => {});
     }
 
-    _allChunksSucceeded() {
-        if (this.expectedChunkCount === 0) {
-            return false;
+    async _waitForRecordingCompletion(sessionId, options = {}) {
+        const retryWindowMs = Number.isFinite(options.retryWindowMs) ? options.retryWindowMs : 30000;
+        const retryIntervalMs = Number.isFinite(options.retryIntervalMs) ? options.retryIntervalMs : 500;
+        const startedAt = Date.now();
+        let completion = await this._completeRecording(sessionId, options);
+
+        while (
+            completion
+            && !completion.workspace_ready
+            && completion.recoverable_from_chunks
+            && Date.now() - startedAt < retryWindowMs
+        ) {
+            this.elements.statusText.textContent = 'Waiting for last audio chunks...';
+            await new Promise((resolve) => setTimeout(resolve, retryIntervalMs));
+            completion = await this._completeRecording(sessionId, options);
         }
-        for (let index = 0; index < this.expectedChunkCount; index += 1) {
-            const result = this.chunkResults.get(index);
-            if (!result || !result.success) {
-                return false;
-            }
-        }
-        return true;
+
+        return completion;
     }
 
-    _contiguousUploadedChunkCount() {
-        let count = 0;
-        while (this.chunkResults.get(count)?.success) {
-            count += 1;
-        }
-        return count;
-    }
-
-    async _ensureRecordingAudioPersisted(sessionId) {
-        if (!sessionId) {
-            throw new Error('No recording session found');
-        }
-
-        if (this.captureStoppedPromise) {
-            await this.captureStoppedPromise;
-        }
-
-        this._flushPendingChunks();
-        await this._waitForChunkUploadsToSettle();
-        const allChunksOk = this._allChunksSucceeded();
-        const contiguousUploadedChunks = this._contiguousUploadedChunkCount();
-
-        if (allChunksOk && this.expectedChunkCount > 0 && !this.finalizedChunkAudio) {
-            try {
-                await this._finalizeChunkedAudio(sessionId);
-                this.finalizedChunkAudio = true;
-                return;
-            } catch (error) {
-                if (this._isRecoverableFinalizeError(error)) {
-                    console.warn('Chunk finalization request failed, relying on server-side chunk recovery:', error.message);
-                    return;
-                }
-                console.warn('Chunk finalization failed, falling back to full blob:', error.message);
-            }
-        }
-
-        if (contiguousUploadedChunks > 0) {
-            console.warn('Using server-side chunk recovery without explicit finalize.', {
-                sessionId,
-                contiguousUploadedChunks,
-                expectedChunkCount: this.expectedChunkCount,
-            });
-            return;
-        }
-
-        if (this.fallbackBlob) {
-            this.audioUploadPromise = this._uploadSessionAudio(
-                sessionId,
-                this.fallbackBlob,
-                this.fallbackMimeType
-            );
-            await this.audioUploadPromise;
-        } else if (!this.finalizedChunkAudio) {
-            throw new Error('No audio data available');
-        }
-    }
-
-    async _finalizeChunkedAudio(sessionId) {
-        await window.SidekickNetwork.json(`/api/recordings/${sessionId}/audio/finalize`, {
+    async _completeRecording(sessionId, options = {}) {
+        return await window.SidekickNetwork.json(`/api/recordings/${sessionId}/complete`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'X-Client-ID': this.clientId,
             },
             body: JSON.stringify({
-                mime_type: this.captureStopMeta?.mimeType || this.fallbackMimeType || 'audio/webm',
-                expected_chunks: this.expectedChunkCount,
+                client_id: this.clientId,
+                mime_type: options.mimeType || this.captureStopMeta?.mimeType || this.fallbackMimeType || 'audio/webm',
+                expected_chunks: Number.isFinite(options.expectedChunks) ? options.expectedChunks : this.expectedChunkCount,
+                allow_fallback_blob: !!options.allowFallbackBlob,
             }),
         }, {
-            timeoutMs: 15000,
+            timeoutMs: 30000,
             retries: 1,
-            networkErrorMessage: 'Network request failed while finalizing recording audio',
-            httpErrorMessage: 'Failed to finalize recording audio',
-            logLabel: 'recording_stop:finalize_audio',
+            networkErrorMessage: 'Network request failed while finalizing recording',
+            httpErrorMessage: 'Failed to finalize recording',
+            logLabel: 'recording_stop:complete',
         });
     }
 
@@ -945,7 +1121,7 @@ class SidekickApp {
             },
             body: blob,
         }, {
-            timeoutMs: 15000,
+            timeoutMs: 900000,
             retries: 1,
             networkErrorMessage: 'Network request failed while uploading recording audio',
             logLabel: 'recording_stop:upload_audio',
@@ -957,27 +1133,6 @@ class SidekickApp {
         }
     }
 
-    _isRecoverableFinalizeError(error) {
-        const message = error?.message || '';
-        return (
-            message === 'Network request failed while finalizing recording audio'
-            || message === 'Network request timed out'
-        );
-    }
-
-    _handleWorkspaceOpenFailure(sessionId, error) {
-        const message = error?.message || 'Workspace unavailable';
-        this.state.sessionId = null;
-        this.state.lastSessionId = sessionId;
-        this._resetAfterWorkspace({
-            preserveLastSessionId: true,
-            statusText: 'Workspace unavailable',
-        });
-        alert(
-            `Recording saved, but the workspace could not load. ` +
-            `You can reopen it from History.\n\nDetails: ${message}`
-        );
-    }
 }
 
 document.addEventListener('DOMContentLoaded', () => {

@@ -8,6 +8,7 @@ class SidekickWebSocket {
         this.reconnectInterval = options.reconnectInterval || 3000;
         this.maxReconnectAttempts = options.maxReconnectAttempts || Infinity;
         this.pingInterval = options.pingInterval || 25000; // 25 seconds
+        this.connectionAttemptStartedAt = 0;
 
         this.ws = null;
         this.reconnectAttempts = 0;
@@ -16,6 +17,7 @@ class SidekickWebSocket {
         this.pingTimer = null;
         this.pendingMessages = [];
         this.openWaiters = new Set();
+        this.messageWaiters = new Set();
 
         // Event handlers
         this.onOpen = options.onOpen || (() => {});
@@ -39,6 +41,7 @@ class SidekickWebSocket {
         }
 
         this.shouldReconnect = true;
+        this.connectionAttemptStartedAt = Date.now();
 
         try {
             this.ws = new WebSocket(this.url);
@@ -59,6 +62,7 @@ class SidekickWebSocket {
                 this.isConnected = false;
                 this._stopPing();
                 this._rejectOpenWaiters(new Error(`WebSocket closed (${event.code || 'unknown'})`));
+                this._rejectMessageWaiters(new Error(`WebSocket closed (${event.code || 'unknown'})`));
                 this.onClose(event);
 
                 if (this.shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
@@ -72,6 +76,7 @@ class SidekickWebSocket {
             this.ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
                 this._rejectOpenWaiters(new Error('WebSocket error'));
+                this._rejectMessageWaiters(new Error('WebSocket error'));
                 this.onError(error);
             };
 
@@ -89,6 +94,7 @@ class SidekickWebSocket {
         this.shouldReconnect = false;
         this._stopPing();
         this._rejectOpenWaiters(new Error('WebSocket disconnected'));
+        this._rejectMessageWaiters(new Error('WebSocket disconnected'));
         if (this.ws) {
             this.ws.close();
             this.ws = null;
@@ -118,6 +124,14 @@ class SidekickWebSocket {
 
         try {
             const message = JSON.parse(event.data);
+            if (message.type === 'error') {
+                const error = new Error(message.message || 'WebSocket command failed');
+                this._rejectMessageWaiters(error);
+                console.error('WebSocket command error:', message.message || 'Unknown error');
+                return;
+            }
+
+            this._resolveMessageWaiters(message);
 
             switch (message.type) {
                 case 'state':
@@ -126,6 +140,8 @@ class SidekickWebSocket {
                 case 'transcription':
                     this.onTranscription(message);
                     break;
+                case 'session_attached':
+                case 'session_detached':
                 case 'pong':
                     break;
                 default:
@@ -164,9 +180,45 @@ class SidekickWebSocket {
         this.openWaiters.clear();
     }
 
+    _resolveMessageWaiters(message) {
+        let matched = false;
+        for (const waiter of Array.from(this.messageWaiters)) {
+            if (!waiter.match(message)) {
+                continue;
+            }
+            matched = true;
+            clearTimeout(waiter.timeoutId);
+            this.messageWaiters.delete(waiter);
+            waiter.resolve(message);
+        }
+        return matched;
+    }
+
+    _rejectMessageWaiters(error) {
+        for (const waiter of this.messageWaiters) {
+            clearTimeout(waiter.timeoutId);
+            waiter.reject(error);
+        }
+        this.messageWaiters.clear();
+    }
+
     waitForOpen(timeoutMs = 10000) {
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             return Promise.resolve();
+        }
+
+        if (
+            this.ws
+            && this.ws.readyState === WebSocket.CONNECTING
+            && this.connectionAttemptStartedAt
+            && (Date.now() - this.connectionAttemptStartedAt) >= timeoutMs
+        ) {
+            try {
+                this.ws.close();
+            } catch (_error) {
+                // ignore socket close failures while recovering a stale connect
+            }
+            this.ws = null;
         }
 
         this.connect();
@@ -205,6 +257,22 @@ class SidekickWebSocket {
         this.pendingMessages.push(payload);
     }
 
+    _waitForMessage(match, timeoutMs = 5000) {
+        return new Promise((resolve, reject) => {
+            const waiter = {
+                match,
+                resolve,
+                reject,
+                timeoutId: setTimeout(() => {
+                    this.messageWaiters.delete(waiter);
+                    reject(new Error('WebSocket message timeout'));
+                }, timeoutMs),
+            };
+
+            this.messageWaiters.add(waiter);
+        });
+    }
+
     startSession() {
         let timezoneName = null;
         try {
@@ -222,6 +290,32 @@ class SidekickWebSocket {
 
     endSession() {
         this.sendCommand('end_session');
+    }
+
+    async attachSession(sessionId, timeoutMs = 5000) {
+        await this.waitForOpen(timeoutMs);
+        const waiter = this._waitForMessage(
+            (message) => message.type === 'session_attached' && message.session_id === sessionId,
+            timeoutMs,
+        );
+        this.sendCommand('attach_session', { session_id: sessionId });
+        return await waiter;
+    }
+
+    async detachSession(sessionId, options = {}, timeoutMs = 5000) {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            return null;
+        }
+
+        const waiter = this._waitForMessage(
+            (message) => message.type === 'session_detached' && (!sessionId || message.session_id === sessionId),
+            timeoutMs,
+        );
+        this.sendCommand('detach_session', {
+            session_id: sessionId,
+            flush_buffer: !!options.flushBuffer,
+        });
+        return await waiter;
     }
 
     ping() {

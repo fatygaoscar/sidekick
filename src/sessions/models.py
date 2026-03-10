@@ -26,8 +26,12 @@ class Session(Base):
     timezone_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     timezone_offset_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     has_transcription: Mapped[bool] = mapped_column(Boolean, default=False)
+    recording_status: Mapped[str] = mapped_column(String(20), nullable=False, default="starting")
+    audio_status: Mapped[str] = mapped_column(String(20), nullable=False, default="none")
+    audio_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finalized_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # Relationships

@@ -2,12 +2,14 @@
 
 import asyncio
 import importlib
+import json
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import types
 
 import numpy as np
@@ -137,6 +139,45 @@ class WhisperXRegressionTests(unittest.TestCase):
         )
 
         self.assertFalse(handler._live_preview_enabled())
+
+    def test_websocket_attach_session_acknowledges_current_session(self):
+        session_manager = SimpleNamespace(
+            current_session=SimpleNamespace(
+                id="session-1",
+                started_at=datetime.now(UTC),
+            )
+        )
+        handler = self.websocket.AudioWebSocketHandler(
+            websocket=SimpleNamespace(client="test-client"),
+            session_manager=session_manager,
+            transcription_manager=SimpleNamespace(),
+        )
+        handler._send_json = AsyncMock()
+
+        asyncio.run(handler._handle_command(json.dumps({
+            "command": "attach_session",
+            "session_id": "session-1",
+        })))
+
+        self.assertEqual(handler._attached_session_id, "session-1")
+        payload = handler._send_json.await_args_list[-1].args[0]
+        self.assertEqual(payload["type"], "session_attached")
+        self.assertEqual(payload["session_id"], "session-1")
+
+    def test_websocket_ignores_audio_until_session_is_attached(self):
+        session_manager = SimpleNamespace(
+            current_session=SimpleNamespace(id="session-1")
+        )
+        handler = self.websocket.AudioWebSocketHandler(
+            websocket=SimpleNamespace(client="test-client"),
+            session_manager=session_manager,
+            transcription_manager=SimpleNamespace(),
+        )
+        handler._buffer.add_chunk = AsyncMock()
+
+        asyncio.run(handler._handle_audio(b"\x00\x00" * 8))
+
+        handler._buffer.add_chunk.assert_not_awaited()
 
     def test_transcribe_and_persist_session_uses_engine_segments_directly(self):
         repository = _RepositoryDouble()

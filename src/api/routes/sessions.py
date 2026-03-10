@@ -1,11 +1,13 @@
 """Session and meeting REST endpoints."""
 
+import asyncio
 import json
 import logging
 import os
 import re
 import urllib.parse
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -35,11 +37,14 @@ from src.audio.storage import (
     extension_from_content_type,
     get_audio_dir,
     get_available_chunks,
+    get_chunk_upload_summary,
     get_missing_chunk_indices,
     get_session_audio_candidates,
     get_session_audio_path,
+    read_session_chunk_meta,
     media_type_for_path,
     normalize_audio_extension,
+    recover_session_audio_from_chunks,
     write_chunk,
     write_session_chunk_meta,
 )
@@ -435,6 +440,152 @@ def _build_recording_workspace_state(
     }
 
 
+def _serialize_recording_lifecycle(session, *, audio_path=None) -> dict:
+    recording_status = (getattr(session, "recording_status", None) or "starting").strip() or "starting"
+    audio_status = (getattr(session, "audio_status", None) or "none").strip() or "none"
+    workspace_ready = bool(
+        recording_status == "ready"
+        and audio_status == "finalized"
+        and audio_path is not None
+    )
+    return {
+        "recording_status": recording_status,
+        "audio_status": audio_status,
+        "audio_error": getattr(session, "audio_error", None),
+        "finalized_at": to_utc_iso(getattr(session, "finalized_at", None)),
+        "workspace_ready": workspace_ready,
+    }
+
+
+async def _finalize_chunked_recording_audio(
+    *,
+    session_id: str,
+    client_id: str,
+    mime_type: str | None,
+    expected_chunks: int,
+):
+    """Assemble chunked recording audio when the expected chunk set is complete."""
+    missing = get_missing_chunk_indices(session_id, client_id, expected_chunks)
+    if missing:
+        return None, missing
+
+    extension = extension_from_content_type(mime_type or "")
+    final_path = assemble_chunks(session_id, client_id, expected_chunks, extension)
+    if not final_path:
+        raise HTTPException(status_code=400, detail="Failed to assemble chunks")
+    cleanup_speaker_clip_cache(session_id)
+    return final_path, []
+
+
+def _serialize_chunk_summary(summary: dict | None) -> dict:
+    summary = summary or {}
+    return {
+        "client_id": summary.get("client_id"),
+        "available_count": int(summary.get("available_count") or 0),
+        "highest_index": summary.get("highest_index"),
+        "expected_count": summary.get("expected_count"),
+        "missing_indices": list(summary.get("missing_indices") or []),
+        "is_contiguous": bool(summary.get("is_contiguous")),
+        "is_complete": bool(summary.get("is_complete")),
+    }
+
+
+def _merge_chunk_meta(
+    session_id: str,
+    *,
+    client_id: str | None = None,
+    extension: str | None = None,
+    expected_chunks: int | None = None,
+) -> dict:
+    meta = read_session_chunk_meta(session_id) or {}
+    if client_id:
+        meta["client_id"] = client_id
+    if extension:
+        meta["extension"] = extension
+    if expected_chunks and expected_chunks > 0:
+        meta["expected_chunks"] = int(expected_chunks)
+    write_session_chunk_meta(session_id, meta)
+    return meta
+
+
+async def _recover_recording_audio(
+    *,
+    session_id: str,
+    client_id: str | None,
+    mime_type: str | None,
+    expected_chunks: int | None,
+    settle_timeout_seconds: float = 10.0,
+    poll_interval_seconds: float = 0.25,
+) -> tuple[Path | None, dict | None]:
+    preferred_extension = extension_from_content_type(mime_type or "")
+    stripped_client_id = (client_id or "").strip() or None
+    normalized_expected = int(expected_chunks) if expected_chunks and int(expected_chunks) > 0 else None
+    last_summary: dict | None = None
+
+    if stripped_client_id or preferred_extension or normalized_expected:
+        _merge_chunk_meta(
+            session_id,
+            client_id=stripped_client_id,
+            extension=preferred_extension,
+            expected_chunks=normalized_expected,
+        )
+
+    existing_audio = get_session_audio_path(session_id)
+    if existing_audio:
+        return existing_audio, last_summary
+
+    if stripped_client_id and normalized_expected:
+        attempts = max(1, int(settle_timeout_seconds / poll_interval_seconds))
+        for attempt in range(attempts):
+            summary = get_chunk_upload_summary(
+                session_id,
+                stripped_client_id,
+                normalized_expected,
+            )
+            last_summary = summary
+            logger.info(
+                "recording_complete:chunk_summary session_id=%s client_id=%s attempt=%d available=%d expected=%d missing=%d complete=%s",
+                session_id,
+                stripped_client_id,
+                attempt + 1,
+                summary["available_count"],
+                normalized_expected,
+                len(summary["missing_indices"]),
+                summary["is_complete"],
+            )
+            if summary["is_complete"]:
+                recovered = recover_session_audio_from_chunks(
+                    session_id,
+                    client_id=stripped_client_id,
+                    expected_count=normalized_expected,
+                    preferred_extension=preferred_extension,
+                )
+                if recovered:
+                    cleanup_speaker_clip_cache(session_id)
+                    return recovered, summary
+            if attempt < attempts - 1:
+                await asyncio.sleep(poll_interval_seconds)
+
+    recovered = recover_session_audio_from_chunks(
+        session_id,
+        client_id=stripped_client_id,
+        expected_count=normalized_expected,
+        preferred_extension=preferred_extension,
+    )
+    if recovered:
+        cleanup_speaker_clip_cache(session_id)
+        return recovered, last_summary
+
+    if stripped_client_id:
+        last_summary = last_summary or get_chunk_upload_summary(
+            session_id,
+            stripped_client_id,
+            normalized_expected,
+        )
+
+    return None, last_summary
+
+
 # Request/Response models
 class StartSessionRequest(BaseModel):
     mode: str = "work"
@@ -467,6 +618,13 @@ class FinalizeAudioRequest(BaseModel):
     expected_chunks: Optional[int] = None  # New: total expected chunk count
 
 
+class CompleteRecordingRequest(BaseModel):
+    client_id: Optional[str] = None
+    mime_type: Optional[str] = None
+    expected_chunks: Optional[int] = None
+    allow_fallback_blob: bool = False
+
+
 class SessionResponse(BaseModel):
     id: str
     mode: str
@@ -474,8 +632,12 @@ class SessionResponse(BaseModel):
     timezone_name: Optional[str]
     timezone_offset_minutes: Optional[int]
     is_active: bool
+    recording_status: str
+    audio_status: str
+    audio_error: Optional[str]
     started_at: str
     ended_at: Optional[str]
+    finalized_at: Optional[str]
 
     class Config:
         from_attributes = True
@@ -539,8 +701,12 @@ async def start_session(
         timezone_name=session.timezone_name,
         timezone_offset_minutes=session.timezone_offset_minutes,
         is_active=session.is_active,
+        recording_status=session.recording_status,
+        audio_status=session.audio_status,
+        audio_error=session.audio_error,
         started_at=to_utc_iso(session.started_at),
         ended_at=to_utc_iso(session.ended_at),
+        finalized_at=to_utc_iso(session.finalized_at),
     )
 
 
@@ -559,8 +725,12 @@ async def get_current_session(
         timezone_name=session.timezone_name,
         timezone_offset_minutes=session.timezone_offset_minutes,
         is_active=session.is_active,
+        recording_status=session.recording_status,
+        audio_status=session.audio_status,
+        audio_error=session.audio_error,
         started_at=to_utc_iso(session.started_at),
         ended_at=to_utc_iso(session.ended_at),
+        finalized_at=to_utc_iso(session.finalized_at),
     )
 
 
@@ -573,6 +743,28 @@ async def end_current_session(
     if not session:
         raise HTTPException(status_code=404, detail="No active session")
     return {"status": "ended", "session_id": session.id}
+
+
+@router.delete("/sessions/{session_id}")
+async def end_session_by_id(
+    session_id: str,
+    repository: Repository = Depends(get_repository),
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """End a session by ID."""
+    existing_session = await repository.get_session(session_id)
+    if not existing_session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    was_active = bool(existing_session.is_active)
+    session = await session_manager.end_session_by_id(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return {
+        "status": "ended" if was_active else "already_ended",
+        "session_id": session.id,
+    }
 
 
 # Meeting endpoints
@@ -965,6 +1157,7 @@ async def get_recording_workspace(
     audio_path = get_session_audio_path(session.id)
     if not audio_path and session.ended_at:
         audio_path = ensure_session_audio_path(session.id)
+    lifecycle = _serialize_recording_lifecycle(session, audio_path=audio_path)
 
     settings = get_settings()
     vault_name = (
@@ -1052,6 +1245,7 @@ async def get_recording_workspace(
             "audio_download_url": (
                 f"/api/recordings/{session.id}/audio?download=true" if audio_path else None
             ),
+            **lifecycle,
         },
         "debug_retranscribe_enabled": bool(get_settings().enable_debug_retranscribe),
         "transcript_versions": [
@@ -1604,10 +1798,12 @@ async def get_recording(
     if not session:
         raise HTTPException(status_code=404, detail="Recording not found")
 
+    latest_version = await repository.get_latest_transcript_version(session_id)
+
     # Get segments for this session
     segments = await repository.get_segments(
         session_id=session_id,
-        transcript_version_id=active_version.id if active_version else None,
+        transcript_version_id=latest_version.id if latest_version else None,
     )
 
     # Get meetings and their summaries
@@ -1647,6 +1843,7 @@ async def get_recording(
     audio_path = get_session_audio_path(session.id)
     if not audio_path and session.ended_at:
         audio_path = ensure_session_audio_path(session.id)
+    lifecycle = _serialize_recording_lifecycle(session, audio_path=audio_path)
 
     has_summary = False
     latest_summary = None
@@ -1745,6 +1942,7 @@ async def get_recording(
         "summary_processing_duration": latest_summary.processing_duration_seconds if latest_summary else None,
         "open_in_obsidian_uri": open_in_obsidian_uri,
         "has_audio": audio_path is not None,
+        **lifecycle,
         "audio_url": f"/api/recordings/{session.id}/audio" if audio_path else None,
         "audio_download_url": (
             f"/api/recordings/{session.id}/audio?download=true" if audio_path else None
@@ -1782,8 +1980,9 @@ async def upload_recording_audio(
 ):
     """Upload encoded audio for a completed recording session.
 
-    This is the authoritative, guaranteed upload path. It clears ALL chunk
-    storage for the session (all clients) and overwrites any partial data.
+    This is the authoritative fallback upload path. It overwrites any existing
+    finalized audio file, but retained chunk storage is preserved so the
+    original chunk set remains recoverable.
     """
     session = await repository.get_session(session_id)
     if not session:
@@ -1802,10 +2001,6 @@ async def upload_recording_audio(
     )
 
     audio_dir = get_audio_dir()
-    # Clear old sequential append state
-    clear_session_chunk_upload_state(session_id)
-    # Clear new chunk storage (all clients)
-    cleanup_chunk_storage(session_id)
     cleanup_speaker_clip_cache(session_id)
     # Remove any existing finalized audio
     for existing in get_session_audio_candidates(session_id):
@@ -1813,6 +2008,11 @@ async def upload_recording_audio(
 
     audio_path = audio_dir / f"{session_id}.{extension}"
     audio_path.write_bytes(body)
+    await repository.update_session_recording_state(
+        session_id,
+        audio_status="uploaded",
+        audio_error=None,
+    )
 
     return {
         "status": "uploaded",
@@ -1854,10 +2054,17 @@ async def upload_recording_audio_chunk(
 
     # Store chunk (idempotent - skips if same size already exists)
     chunk_path = write_chunk(session_id, client_id, chunk_index, body)
-    write_session_chunk_meta(session_id, {
-        "extension": extension,
-        "client_id": client_id,
-    })
+    _merge_chunk_meta(
+        session_id,
+        client_id=client_id,
+        extension=extension,
+    )
+    await repository.update_session_recording_state(
+        session_id,
+        recording_status="recording" if session.is_active else session.recording_status,
+        audio_status="chunking",
+        audio_error=None,
+    )
 
     return {
         "status": "stored",
@@ -1887,6 +2094,11 @@ async def finalize_recording_audio(
     # Check for already finalized audio
     existing_audio_path = get_session_audio_path(session_id)
     if existing_audio_path:
+        await repository.update_session_recording_state(
+            session_id,
+            audio_status="finalized",
+            audio_error=None,
+        )
         return {
             "status": "already_finalized",
             "session_id": session_id,
@@ -1902,24 +2114,23 @@ async def finalize_recording_audio(
     if expected_count is None or expected_count <= 0:
         raise HTTPException(status_code=400, detail="expected_chunks or uploaded_chunks required")
 
-    # Check for missing chunks
-    missing = get_missing_chunk_indices(session_id, client_id, expected_count)
+    final_path, missing = await _finalize_chunked_recording_audio(
+        session_id=session_id,
+        client_id=client_id,
+        mime_type=body.mime_type,
+        expected_chunks=expected_count,
+    )
     if missing:
         raise HTTPException(
             status_code=409,
             detail=f"Incomplete chunks: missing {len(missing)} of {expected_count}",
             headers={"X-Missing-Chunks": ",".join(str(i) for i in missing[:20])},
         )
-
-    # Determine extension
-    extension = extension_from_content_type(body.mime_type or "")
-
-    # Assemble chunks from this client
-    final_path = assemble_chunks(session_id, client_id, expected_count, extension)
-    if not final_path:
-        raise HTTPException(status_code=400, detail="Failed to assemble chunks")
-
-    cleanup_speaker_clip_cache(session_id)
+    await repository.update_session_recording_state(
+        session_id,
+        audio_status="finalized",
+        audio_error=None,
+    )
 
     return {
         "status": "finalized",
@@ -1928,6 +2139,139 @@ async def finalize_recording_audio(
         "bytes": final_path.stat().st_size,
         "audio_url": f"/api/recordings/{session_id}/audio",
     }
+
+
+@router.post("/recordings/{session_id}/complete")
+async def complete_recording(
+    session_id: str,
+    body: CompleteRecordingRequest,
+    repository: Repository = Depends(get_repository),
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """Finalize a recording and mark it ready for workspace review."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    client_id = (body.client_id or "").strip() or None
+    expected_chunks = int(body.expected_chunks or 0) or None
+    logger.info(
+        "recording_complete:start session_id=%s client_id=%s expected_chunks=%s allow_fallback_blob=%s",
+        session_id,
+        client_id,
+        expected_chunks,
+        body.allow_fallback_blob,
+    )
+
+    audio_path = get_session_audio_path(session_id)
+    lifecycle = _serialize_recording_lifecycle(session, audio_path=audio_path)
+    if lifecycle["workspace_ready"]:
+        return {
+            "session_id": session_id,
+            **lifecycle,
+            "has_audio": True,
+            "audio_url": f"/api/recordings/{session_id}/audio",
+            "missing_chunks": [],
+            "reason": None,
+            "recoverable_from_chunks": True,
+            "chunk_summary": _serialize_chunk_summary(None),
+        }
+
+    await repository.get_primary_meeting(session_id, create_if_missing=True)
+    await repository.update_session_recording_state(
+        session_id,
+        recording_status="finalizing",
+        audio_status="uploaded" if audio_path else "chunking",
+        audio_error=None,
+    )
+
+    try:
+        if not audio_path:
+            audio_path, chunk_summary = await _recover_recording_audio(
+                session_id=session_id,
+                client_id=client_id,
+                mime_type=body.mime_type,
+                expected_chunks=expected_chunks,
+            )
+            missing_chunks = list((chunk_summary or {}).get("missing_indices") or [])
+
+            if not audio_path:
+                session = await repository.update_session_recording_state(
+                    session_id,
+                    recording_status="finalizing",
+                    audio_status="chunking",
+                    audio_error=None,
+                )
+                lifecycle = _serialize_recording_lifecycle(session, audio_path=None)
+                return {
+                    "session_id": session_id,
+                    **lifecycle,
+                    "has_audio": False,
+                    "audio_url": None,
+                    "missing_chunks": missing_chunks,
+                    "reason": (
+                        "missing_chunks" if missing_chunks else "audio_not_uploaded"
+                    ),
+                    "recoverable_from_chunks": bool(
+                        chunk_summary and chunk_summary.get("available_count")
+                    ),
+                    "chunk_summary": _serialize_chunk_summary(chunk_summary),
+                }
+
+        await repository.update_session_recording_state(
+            session_id,
+            audio_status="finalized",
+            audio_error=None,
+        )
+        await session_manager.end_session_by_id(session_id)
+        session = await repository.mark_session_recording_ready(session_id)
+        audio_path = get_session_audio_path(session_id)
+        lifecycle = _serialize_recording_lifecycle(session, audio_path=audio_path)
+        return {
+            "session_id": session_id,
+            **lifecycle,
+            "has_audio": audio_path is not None,
+            "audio_url": f"/api/recordings/{session_id}/audio" if audio_path else None,
+            "missing_chunks": [],
+            "reason": None,
+            "recoverable_from_chunks": True,
+            "chunk_summary": _serialize_chunk_summary(
+                get_chunk_upload_summary(session_id, client_id, expected_chunks)
+                if client_id
+                else None
+            ),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("recording completion failed", extra={"session_id": session_id})
+        session = await repository.mark_session_recording_failed(
+            session_id,
+            str(exc) or "Failed to finalize recording",
+        )
+        lifecycle = _serialize_recording_lifecycle(session, audio_path=get_session_audio_path(session_id))
+        raise HTTPException(
+            status_code=500,
+            detail=lifecycle["audio_error"] or "Failed to finalize recording",
+        ) from exc
+
+
+@router.post("/recordings/{session_id}/recover-audio")
+async def recover_recording_audio(
+    session_id: str,
+    body: CompleteRecordingRequest,
+    repository: Repository = Depends(get_repository),
+    session_manager: SessionManager = Depends(get_session_manager),
+):
+    """Attempt to recover/finalize recording audio from retained chunks."""
+    payload = await complete_recording(
+        session_id,
+        body,
+        repository=repository,
+        session_manager=session_manager,
+    )
+    payload["recovered"] = bool(payload.get("has_audio"))
+    return payload
 
 
 @router.get("/recordings/{session_id}/audio")

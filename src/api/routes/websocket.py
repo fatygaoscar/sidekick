@@ -46,6 +46,7 @@ class AudioWebSocketHandler:
 
         self._is_running = False
         self._process_task: asyncio.Task | None = None
+        self._attached_session_id: str | None = None
         print("[WebSocket] Handler initialized successfully")
 
     def _live_preview_enabled(self) -> bool:
@@ -105,6 +106,12 @@ class AudioWebSocketHandler:
 
     async def _handle_audio(self, data: bytes) -> None:
         """Handle incoming audio data."""
+        current_session = self._session_manager.current_session
+        if not self._attached_session_id:
+            return
+        if not current_session or current_session.id != self._attached_session_id:
+            return
+
         # Convert bytes to numpy array (expecting 16-bit PCM)
         audio = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
 
@@ -138,8 +145,18 @@ class AudioWebSocketHandler:
 
             elif command == "end_session":
                 await self._flush_buffer()
+                self._attached_session_id = None
                 await self._session_manager.end_session()
                 await self._send_state()
+
+            elif command == "attach_session":
+                await self._attach_session(data.get("session_id"))
+
+            elif command == "detach_session":
+                await self._detach_session(
+                    data.get("session_id"),
+                    flush_buffer=bool(data.get("flush_buffer")),
+                )
 
             elif command == "start_meeting":
                 title = data.get("title")
@@ -171,6 +188,45 @@ class AudioWebSocketHandler:
             await self._send_json({"type": "error", "message": "Invalid JSON"})
         except Exception as e:
             await self._send_json({"type": "error", "message": str(e)})
+
+    async def _attach_session(self, session_id: str | None) -> None:
+        """Bind this websocket connection to the current active session."""
+        current_session = self._session_manager.current_session
+        if not session_id or not current_session or current_session.id != session_id:
+            await self._send_json({
+                "type": "error",
+                "message": "Session attachment failed",
+            })
+            return
+
+        self._attached_session_id = session_id
+        self._buffer.reset()
+        self._buffer.set_session_start(current_session.started_at)
+        await self._send_json({
+            "type": "session_attached",
+            "session_id": session_id,
+            "live_preview_enabled": self._live_preview_enabled(),
+        })
+
+    async def _detach_session(self, session_id: str | None, *, flush_buffer: bool = False) -> None:
+        """Detach any previously attached recording session from this connection."""
+        if session_id and self._attached_session_id and session_id != self._attached_session_id:
+            await self._send_json({
+                "type": "error",
+                "message": "Session detach failed",
+            })
+            return
+
+        detached_session_id = self._attached_session_id or session_id
+        if flush_buffer and self._attached_session_id:
+            await self._flush_buffer()
+
+        self._attached_session_id = None
+        self._buffer.reset()
+        await self._send_json({
+            "type": "session_detached",
+            "session_id": detached_session_id,
+        })
 
     async def _process_buffer(self) -> None:
         """Process audio buffer for optional live preview transcription."""
@@ -224,7 +280,11 @@ class AudioWebSocketHandler:
             return
 
         audio_data, start_offset, _end_offset = result
-        if not self._session_manager.current_session:
+        current_session = self._session_manager.current_session
+        if not current_session:
+            return
+
+        if not self._attached_session_id or current_session.id != self._attached_session_id:
             return
 
         if not self._live_preview_enabled():

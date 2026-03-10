@@ -33,10 +33,10 @@ sidekick/
 │   ├── api/
 │   │   └── routes/
 │   │       ├── export.py             # Async export jobs, diarization, transcription pipeline
-│   │       ├── sessions.py           # Recording CRUD, chunked audio upload, refined saves
-│   │       └── websocket.py          # Live audio stream; preview only for compatible backends
+│   │       ├── sessions.py           # Recording CRUD, workspace/settings APIs, completion/recovery
+│   │       └── websocket.py          # Live audio stream; preview-only transport
 │   ├── audio/
-│   │   └── storage.py                # Audio file management, chunk recovery
+│   │   └── storage.py                # Audio file management, retained chunk recovery
 │   ├── core/
 │   │   ├── datetime_utils.py         # Timezone helpers
 │   │   ├── markdown_utils.py         # SHARED Obsidian note construction logic
@@ -62,26 +62,29 @@ sidekick/
 │       ├── manager.py                # Transcription orchestration
 │       ├── whisper_local.py          # Legacy faster-whisper engine (deprecated runtime path)
 │       └── whisperx_local.py         # WhisperX local engine for authoritative file transcription
+│   └── workspace_chat/
+│       └── service.py                # Experimental meeting assistant persistence/service layer
 │
 ├── web/
 │   ├── index.html                    # Main recording UI
 │   ├── recordings.html               # History / search UI (opens the shared workspace)
+│   ├── settings.html                 # Global settings / feature flags
 │   ├── css/styles.css                # Mobile-optimized (13px text, no double scroll)
 │   └── js/
-│       ├── app.js                    # Recording + export flow + main-page navigation guards
+│       ├── app.js                    # Recording + upload flow + completion/recovery handoff
 │       ├── recordings.js             # History cards, search, optimistic delete, workspace launch
 │       ├── audio.js                  # AudioCapture + DAW-style spectrum analyzer
 │       ├── network.js                # Shared API/media URL resolver + fetch wrapper for go.sidekickgo.app
+│       ├── settings.js               # Global settings page controller
 │       └── websocket.js              # WebSocket client, 25s keepalive ping
 │
 ├── data/                             # Runtime data (gitignored)
 │   ├── sidekick.db                   # SQLite database
-│   ├── sidekick.log                  # App logs (appended across starts; each launch gets a banner)
-│   ├── startup.log                   # Launcher lifecycle log for start/restart/tunnel events
+│   ├── sidekick.log                  # App logs (cleared on each start)
 │   ├── sidekick.pid                  # Managed process PID
 │   └── audio/
 │       ├── {session_id}.webm         # Finalized recordings
-│       └── chunks/{session_id}/{client_id}/  # Temp upload chunks
+│       └── chunks/{session_id}/{client_id}/  # Retained chunk backups for recovery
 │
 └── scripts/
     ├── monitor_ollama.ps1            # PowerShell: Ollama + GPU live watcher
@@ -91,47 +94,42 @@ sidekick/
     └── switch_sidekick_branch.sh     # Stop/stash/switch/restart helper for main/dev workflows
 ```
 
-## Export Pipeline (Full Flow)
+## Recording + Processing Flow
 
 ```
 Browser
   │
-  ├─[during recording]──► WebSocket stream ──► Live preview text (optional, not authoritative)
+  ├─[during recording]──► HTTP session start
+  │                      └─► WebSocket preview attach (best effort only)
   │
-  └─[stop recording]────► Audio saved: data/audio/{session_id}.webm
-                                │
-                     POST /export-obsidian-job
-                     {title, template, custom_prompt}
-                                │
-                    ┌───────────▼────────────┐
-                    │   HAS TRANSCRIPT?      │
-                    └───────┬────────┬───────┘
-                         YES│        │NO
-                            │        ▼
-                            │   WhisperX large-v3 (CUDA, float16, batch 16)
-                            │   transcribe → forced alignment → diarization
-                            │   → aligned speaker-labeled segments → DB
-                                │
-                    ┌───────────▼────────────────────────────────┐
-                    │  Build transcript string                    │
-                    │  [MM:SS] Name/Attendee A: text             │
-                    └───────────┬────────────────────────────────┘
-                                │
-                    ┌───────────▼────────────────────────────────┐
-                    │  SUMMARIZATION                             │
-                    │                                            │
-                    │  cohesive.py two-pass summary              │
-                    │  relevance-first draft + editorial polish  │
-                    └───────────┬────────────────────────────────┘
-                                │
-                    Build Obsidian markdown (markdown_utils.py):
-                    YYYY-MM-DD-HHMM - [Title] [Template] (vN).md
-                    Metadata block + summary + collapsible transcript
-                                │
-                    Write to OBSIDIAN_VAULT_PATH
-                                │
-                    Return job result + obsidian:// URI
+  ├─[recording]─────────► 1s MediaRecorder chunks
+  │                      └─► PUT /api/recordings/{id}/audio/chunks/{n}
+  │
+  ├─[stop recording]────► Recorder stop + wait for chunk uploads
+  │                      └─► POST /api/recordings/{id}/complete
+  │                            • retries chunk-based recovery server-side
+  │                            • marks session ready only when finalized audio exists
+  │                            • falls back to full blob upload only if chunk recovery does not complete
+  │
+  ├─[workspace open]────► Review modal
+  │                      • Speakers
+  │                      • Summary
+  │                      • Settings
+  │                      • Transcript
+  │                      • Chat (experimental, feature-flagged)
+  │
+  └─[transcribe/export]─► WhisperX → diarization → transcript versions
+                         → cohesive.py summary → Obsidian markdown export
 ```
+
+### Recording Durability Rules
+
+- Live preview is optional and never authoritative.
+- Live recordings are stored as retained chunks first, finalized audio second.
+- `data/audio/chunks/{session_id}/{client_id}/` is preserved until the recording is deleted.
+- `POST /api/recordings/{id}/complete` is idempotent and will recover finalized audio from retained chunks when possible.
+- `POST /api/recordings/{id}/recover-audio` exists for stranded recordings whose final file is missing but chunks still exist.
+- `GET /api/recordings/{id}/audio` and workspace/detail reads will auto-attempt chunk recovery if the final file is missing.
 
 ## Key Config (.env)
 
@@ -180,12 +178,15 @@ Default template: `meeting`
 - Recording list cards: `Open` and `Delete` only.
 - Export / re-summarize initiated from the workspace, not from cards.
 - **Unified Workspace:** History `Open` matches post-recording review. Both support AI Refine, Manual Edit, and Undo.
+- **Global Settings:** `/settings` is the app-level feature flag page. Experimental features live there, not in `.env`.
+- **Meeting Assistant:** Experimental, off by default, and hidden unless enabled in global settings.
 - **View Modal Title:** Plain meeting title. Date/time is in the Details section.
 - **Rename flow:** Rename from the editable workspace title after opening the recording. History cards stay `Open` / `Delete` only.
 - **Workspace header metadata:** Simplified to date and time under the title.
 - **Details Section:** Two-column grid — Template (if stored), Recorded, Exported, Length, Processing Time. Updates on version change.
 - **Summary Version label:** "Summary Version" (not "Summary") in view modal.
 - **Summary Version labels:** `vN (Draft)`, `vN (Latest)`, then descending `vN-1 ... v1`.
+- **Transcript Versioning:** Transcript-aware workspaces load one transcript version at a time; summary drafts/saved summaries are tied to that version.
 - **Audio player** is at the bottom of the view modal.
 - **Card titles:** Plain meeting title (no date prefix); date shown separately.
 - **History delete:** Optimistic local removal first, then a non-blocking background refresh. Do not reintroduce a blocking full-list refetch requirement after delete.
@@ -205,14 +206,22 @@ Default template: `meeting`
 | `GET /api/templates` | List templates with prompts |
 | `GET /api/recordings` | List recordings |
 | `GET /api/recordings/{id}` | Recording detail (includes latest `summary` + metadata) |
+| `GET /api/recordings/{id}/workspace` | Unified workspace payload (recording, transcript versions, summaries, speakers, chat gate) |
 | `POST /api/recordings/{id}/summaries` | Save refined/manual summary to DB and vault |
+| `PATCH /api/recordings/{id}/settings` | Update recording title and transcript-version-specific prompt settings |
 | `POST /api/summaries/refine` | General AI refinement endpoint |
 | `POST /api/recordings/{id}/export-obsidian-job` | Start async export |
 | `GET /api/export-jobs/{job_id}` | Poll export job |
 | `POST /api/recordings/{id}/transcription-job` | Transcription only |
 | `PUT /api/recordings/{id}/audio` | Upload audio |
+| `PUT /api/recordings/{id}/audio/chunks/{n}` | Store one retained recording chunk |
+| `POST /api/recordings/{id}/audio/finalize` | Explicit chunk finalize (legacy direct finalize path) |
+| `POST /api/recordings/{id}/complete` | Authoritative recording completion + readiness check |
+| `POST /api/recordings/{id}/recover-audio` | Recover finalized audio from retained chunks |
 | `GET /api/recordings/{id}/speakers` | Get speaker cards and clip metadata for workspace review |
 | `PUT /api/recordings/{id}/speakers` | Save manual speaker name mapping |
+| `GET /api/settings` | Read global app settings / feature flags |
+| `PATCH /api/settings` | Update global app settings / feature flags |
 | `WS /ws/audio` | Live audio stream |
 
 ## Speaker Diarization
@@ -226,8 +235,14 @@ Default template: `meeting`
   3. Enter names in text fields
   4. Save speaker edits, then re-summarize when needed
 
-**Handoff Notes (2026-03-07, latest)**:
+**Handoff Notes (2026-03-10, latest)**:
 - **Model**: `qwen3:8b` (5.2GB, 100% GPU). `OLLAMA_NUM_GPU=99` forces all layers to GPU. `temperature=0.3` added to all calls.
+- **Recording lifecycle**: Session start/stop is HTTP-authoritative. WebSocket is preview-only and attach/detach scoped.
+- **Audio durability**: Retained chunk storage is the recovery artifact. The finalized `.webm` is derived and can be rebuilt.
+- **Stop flow**: Browser waits for chunk uploads, calls `/complete`, retries chunk-based readiness, and only attempts large backup upload after that window.
+- **Recovery path**: `/recover-audio` and `ensure_session_audio_path()` can finalize stranded chunk-only recordings later.
+- **Global settings**: App-level flags live in the singleton `app_settings` table and `/settings` UI. `workspace_chat_enabled` is DB-backed.
+- **Meeting Assistant**: Grounded transcript/summary chat exists behind the experimental global flag and is hidden by default.
 - **Speaker Identity**: Manual-first. The `Speakers` tab is the product-facing source of truth for speaker naming.
 - **Unresolved Speakers**: Raw `SPEAKER_XX` stays visible only in the `Speakers` tab. Transcript and summary views use stable fallback labels: `Attendee`, `Attendee A`, `Attendee B`, etc.
 - **Workspace Summary Gate**: Pending speaker review does not block summary generation. Users can summarize before naming every speaker.
@@ -259,9 +274,9 @@ Default template: `meeting`
 
 - `get_settings()` is LRU-cached — restart required to pick up `.env` changes.
 - Remote use through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The app injects fallback `wss://` and `https://*.trycloudflare.com` transport targets into rendered HTML, and `web/js/network.js` rewrites browser `/api/...` plus recording-media URLs onto that fallback when present.
-- `start.sh` now appends to `data/sidekick.log` and writes launcher events to `data/startup.log`; check both before assuming a restart failed inside FastAPI.
-- `start.sh` uses a 10-second stability window before reporting success. If a restart looks flaky, inspect `data/startup.log` for whether it failed health, bind, or stability checks.
+- `data/sidekick.log` is cleared on each start. If something dies between restarts, capture the log before starting again.
 - Starts triggered from the agent tool context can behave differently from a normal interactive shell because background child processes may be reaped by the execution environment. If a restart only fails when launched by the agent, verify it from the user's own shell before debugging the app itself.
+- Long recordings should finalize from retained chunks first. If the final audio file is missing but chunks exist, use `/recover-audio` or open the recording to trigger auto-recovery.
 - **PWA planning doc:** The current PWA/app-store transition plan lives in `docs/pwa-plan.md` and is mirrored in the Obsidian vault under `Sidekick/pwa-plan.md`.
 - **Frontend cache busting:** If `web/index.html` or `web/recordings.html` changes do not appear after a refresh, bump the `?v=` query string on the referenced `/static/css/*.css` or `/static/js/*.js` asset in the HTML entrypoint you touched. This is the first thing to check when the browser appears stuck on old UI code.
 - **qwen3 vs qwen3.5 thinking**: `qwen3:8b` properly respects `OLLAMA_THINK=false`. `qwen3.5` models always generate 3000-5000 think tokens per call regardless of this setting — not suppressable at the application level.

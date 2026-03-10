@@ -1,21 +1,23 @@
 # Sidekick
 
-Browser-based meeting recorder that transcribes audio, identifies speakers, and exports structured notes to Obsidian — entirely local.
+Browser-based meeting recorder that captures audio, builds transcript versions, generates versioned summaries, and exports structured notes to Obsidian — entirely local.
 
 ## Features
 
-- **High-fidelity audio** — captures and plays back at 48kHz (DVD quality) while downsampling to 16kHz for AI
+- **High-fidelity audio** — captures and plays back at 48kHz while downsampling to 16kHz for AI
+- **Recovery-first recording pipeline** — live recordings are retained as chunk storage first, finalized audio second
 - **Local transcription** via WhisperX large-v3 (CUDA, float16)
 - **Speaker alignment + diarization** via WhisperX forced alignment and diarization pipeline
 - **Manual-first speaker identification** — review speaker clips and assign names directly in the workspace
 - **Readable unresolved speakers** — transcript and summary views use `Attendee`, `Attendee A`, `Attendee B`, etc. instead of raw `SPEAKER_XX`
-- **Eager background processing** — transcription starts in the background as soon as recording stops, so export skips Whisper when you click Process
+- **Authoritative stop flow** — browser waits for chunk uploads, asks the server to finalize, and only uses a large backup upload as a last resort
+- **Auto-recovery** — if a final audio file is missing but retained chunks exist, the app can rebuild it later
+- **Eager background processing** — transcription starts in the background as soon as recording stops
 - **Workspace-first rename** — open a recording and click the workspace title to rename it
-- **History Workspace** — open past recordings from history and use the same workspace for summary review, transcript, speakers, and settings
-- **Unified Review/View** — functionally identical modals for new and past recordings (Refine, Edit, Undo)
+- **Unified workspace** — the same modal is used post-recording and from History
+- **Transcript versioning** — retranscription creates transcript versions; summary drafts and saved summaries are tied to the active version
 - **Prompt Audit Export** — Obsidian exports include the exact Pass 1 / Pass 2 prompts used plus a collapsed transcript section
 - **DAW-style analyzer** — the live recording visualizer uses a higher-resolution log-spaced spectrum analyzer while keeping the same minimal style
-- **Obsidian-Optimized Formatting** — summaries use nested bullet points and clean spacing for maximum scannability
 - **Relevance-first meeting summaries** — `General Meeting` uses the cohesive two-pass summarizer with a selective prompt contract that surfaces only useful, high-signal notes
 - **Smart Versioning** — Obsidian exports append `(v2)`, `(v3)`, etc., to prevent overwriting existing notes
 - **Performance Optimizations** — dynamic context sizing and single-pass early exit for ultra-fast short meeting processing
@@ -23,6 +25,8 @@ Browser-based meeting recorder that transcribes audio, identifies speakers, and 
 - **Editable prompts** — customize any template before export
 - **Real-time progress** — live percent tracking through transcription and summarization
 - **Obsidian export** — writes a dated `.md` file and opens it with `obsidian://`
+- **Global settings page** — app-level feature flags such as the experimental Meeting Assistant
+- **Experimental Meeting Assistant** — transcript-aware workspace chat behind a DB-backed feature flag
 - **Phone access** — ngrok or Cloudflare tunnel support
 
 ## Quick Start
@@ -41,70 +45,64 @@ Then open `http://localhost:8000`.
 
 ## Architecture
 
-### Two Transcription Pipelines
+### Recording Lifecycle
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ LIVE PREVIEW PIPELINE (optional UX only)                    │
-│                                                             │
-│  Microphone → WebSocket chunks → Live preview text         │
-│  src/api/routes/websocket.py                               │
-│  Disabled when TRANSCRIPTION_BACKEND=local (WhisperX).     │
-│  Not source of truth. Not used in export.                  │
-└─────────────────────────────────────────────────────────────┘
+Start recording
+  ├─ POST /api/sessions                      # authoritative session creation
+  ├─ WebSocket attach                        # preview only, best effort
+  └─ MediaRecorder emits 1s chunks
+       └─ PUT /api/recordings/{id}/audio/chunks/{n}
 
-┌─────────────────────────────────────────────────────────────┐
-│ EXPORT PIPELINE (authoritative)                             │
-│                                                             │
-│  Saved audio file → Whisper → Diarization →                │
-│  Humanized transcript → Two-pass summary → Obsidian .md    │
-│  src/api/routes/export.py                                   │
-└─────────────────────────────────────────────────────────────┘
+Stop recording
+  ├─ wait for recorder stop + chunk uploads
+  ├─ POST /api/recordings/{id}/complete
+  │    ├─ chunk-settle retry window on server
+  │    ├─ finalize from retained chunks when possible
+  │    └─ mark session ready only once finalized audio exists
+  └─ fallback full-blob upload only if chunk recovery does not finish in time
+
+Open workspace
+  ├─ speakers
+  ├─ summary
+  ├─ settings
+  ├─ transcript
+  └─ chat (experimental, feature-flagged)
+
+Later reads
+  └─ if finalized audio is missing, Sidekick can rebuild it from retained chunks
 ```
 
-### Export Pipeline — Full Flow
+### Processing Pipeline
 
 ```
 Browser
   │
-  ├─[during recording]──► WebSocket stream ──► Live preview text (not authoritative)
+  ├─[during recording]──► WebSocket stream ──► Live preview text (optional, not authoritative)
   │
-  └─[stop recording]────► Audio saved: data/audio/{session_id}.webm
+  └─[stop recording]────► Retained chunks + finalized audio readiness
+                                │
+                     POST /api/recordings/{id}/transcription-job
+                     or auto-start from workspace
+                                │
+                     WhisperX large-v3 (CUDA, float16, batch 16)
+                     transcribe → forced alignment → diarization
+                     → transcript version + aligned segments
+                                │
+                     cohesive.py summary generation
+                     → draft summary / saved summary
                                 │
                      POST /api/recordings/{id}/export-obsidian-job
-                     {title, template, custom_prompt}
-                                │
-                    ┌───────────▼────────────┐
-                    │   HAS TRANSCRIPT?      │
-                    └───────┬────────┬───────┘
-                         YES│        │NO
-                            │        ▼
-                            │   WhisperX large-v3 (CUDA, float16, batch 16)
-                            │   transcribe → forced alignment → diarization
-                            │   → aligned speaker-labeled segments → DB
-                                │
-                    ┌───────────▼────────────────────────────────┐
-                    │  Build transcript string                    │
-                    │  [MM:SS] Name/Attendee A: text             │
-                    └───────────┬────────────────────────────────┘
-                                │
-                    ┌───────────▼────────────────────────────────┐
-                    │  SUMMARIZATION                             │
-                    │                                            │
-                    │  cohesive.py two-pass summary              │
-                    │  relevance-first draft + editorial polish  │
-                    └───────────┬────────────────────────────────┘
-                                │
-                    Build Obsidian markdown:
-                    YYYY-MM-DD-HHMM - [Title] [Template].md
-                    Metadata block + summary
-                    + Pass 1 / Pass 2 prompt code blocks
-                    + collapsible transcript
-                                │
-                    Write to OBSIDIAN_VAULT_PATH
-                                │
-                    Return job result + obsidian:// URI
+                     → Obsidian markdown with prompt audit + transcript
 ```
+
+### Durability Model
+
+- WebSocket preview is never the source of truth.
+- For live recordings, retained chunks are the durable recovery artifact.
+- Finalized audio files in `data/audio/{session_id}.{ext}` are derived artifacts.
+- `POST /api/recordings/{id}/recover-audio` can recover stranded recordings when chunks still exist.
+- Chunk storage is retained until the recording is deleted.
 
 ### File Structure
 
@@ -120,10 +118,10 @@ sidekick/
 │   ├── api/
 │   │   └── routes/
 │   │       ├── export.py             # Async export jobs, diarization, transcription pipeline
-│   │       ├── sessions.py           # Recording CRUD, chunked audio upload
-│   │       └── websocket.py          # Live audio stream; preview only for compatible backends
+│   │       ├── sessions.py           # Recording CRUD, workspace/settings APIs, completion/recovery
+│   │       └── websocket.py          # Live audio stream; preview only
 │   ├── audio/
-│   │   └── storage.py                # Audio file management, chunk recovery
+│   │   └── storage.py                # Audio file management, retained chunk recovery
 │   ├── core/
 │   │   ├── datetime_utils.py         # Timezone helpers
 │   │   ├── markdown_utils.py         # Shared Obsidian note construction logic
@@ -150,16 +148,20 @@ sidekick/
 │       ├── manager.py                # Transcription orchestration
 │       ├── whisper_local.py          # Legacy faster-whisper engine (deprecated runtime path)
 │       └── whisperx_local.py         # WhisperX local engine for authoritative file transcription
+│   └── workspace_chat/
+│       └── service.py                # Experimental meeting assistant service
 │
 ├── web/
 │   ├── index.html                    # Main recording UI
 │   ├── recordings.html               # History / search / shared workspace UI
+│   ├── settings.html                 # Global settings page
 │   ├── css/styles.css
 │   └── js/
-│       ├── app.js                    # Recording + export flow
+│       ├── app.js                    # Recording + upload + completion/recovery flow
 │       ├── recordings.js             # History list, search, optimistic delete, workspace launch
 │       ├── audio.js                  # AudioCapture, visualizer
 │       ├── network.js                # Shared API/media URL resolver + fetch wrapper
+│       ├── settings.js               # Global settings page controller
 │       └── websocket.js              # WebSocket client, 25s keepalive ping
 │
 ├── data/                             # Runtime data (gitignored)
@@ -168,7 +170,7 @@ sidekick/
 │   ├── sidekick.pid                  # Managed process PID
 │   └── audio/
 │       ├── {session_id}.webm         # Finalized recordings
-│       └── chunks/{session_id}/{client_id}/  # Temp upload chunks
+│       └── chunks/{session_id}/{client_id}/  # Retained chunk backups
 │
 └── scripts/
     ├── monitor_sidekick.sh           # Bash: inline WSL live monitor (GPU, Whisper, Ollama, job, pipeline)
@@ -207,6 +209,14 @@ OLLAMA_CONTEXT_LENGTH=32768
 # Export
 OBSIDIAN_VAULT_PATH=/path/to/your/vault
 ```
+
+### Global Settings
+
+`/settings` is the app-level feature flag page. Today it controls:
+
+- `Meeting Assistant` (`workspace_chat_enabled`)
+
+This setting is stored in the SQLite `app_settings` table, not just in `.env`, so it applies immediately without a restart.
 
 ### Model Selection Guide
 
@@ -332,19 +342,25 @@ Recommended approach:
 |----------|-------------|
 | `GET /` | Main recording UI |
 | `GET /recordings` | History UI |
+| `GET /settings` | Global settings page |
 | `GET /api/templates` | List templates with prompts |
 | `GET /api/recordings` | List recordings |
 | `GET /api/recordings/{id}` | Recording detail |
-| `PATCH /api/recordings/{id}/title` | Rename a recording |
+| `GET /api/recordings/{id}/workspace` | Unified workspace payload |
+| `PATCH /api/recordings/{id}/settings` | Rename/update active transcript-version settings |
 | `POST /api/recordings/{id}/export-obsidian-job` | Start async export |
 | `GET /api/export-jobs/{job_id}` | Poll export job |
 | `POST /api/recordings/{id}/transcription-job` | Transcription only (no summary) |
 | `GET /api/transcription-jobs/{job_id}` | Poll transcription job |
+| `POST /api/recordings/{id}/complete` | Authoritative recording completion + readiness |
+| `POST /api/recordings/{id}/recover-audio` | Recover finalized audio from retained chunks |
 | `PUT /api/recordings/{id}/audio` | Upload full audio blob (fallback) |
 | `PUT /api/recordings/{id}/audio/chunks/{n}` | Upload chunk (needs `X-Client-ID`) |
 | `POST /api/recordings/{id}/audio/finalize` | Finalize chunks (needs `X-Client-ID`) |
 | `GET /api/recordings/{id}/speakers` | Get speaker cards and clip metadata for workspace review |
 | `PUT /api/recordings/{id}/speakers` | Save manual speaker name mapping |
+| `GET /api/settings` | Read global feature flags |
+| `PATCH /api/settings` | Update global feature flags |
 | `WS /ws/audio` | Live audio stream |
 
 ## Debugging

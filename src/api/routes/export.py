@@ -906,10 +906,13 @@ async def _run_transcription_job(
 
         meetings = sorted(session.meetings, key=lambda m: m.key_start) if session.meetings else []
         if meetings:
-            primary_meeting_id = meetings[0].id
+            primary_meeting = meetings[0]
         else:
-            meeting = await repository.create_meeting(session_id=session.id, title="Untitled Recording")
-            primary_meeting_id = meeting.id
+            primary_meeting = await repository.create_meeting(
+                session_id=session.id,
+                title="Untitled Recording",
+            )
+        primary_meeting_id = primary_meeting.id
 
         await repository.ensure_transcript_versions(session_id)
         latest_version = await repository.get_latest_transcript_version(
@@ -956,8 +959,10 @@ async def _run_transcription_job(
                 version_number=1,
                 status="processing",
                 source_type="initial_transcription",
-                template_key=normalize_template_key(meeting.template_key or DEFAULT_TEMPLATE_KEY),
-                custom_prompt=meeting.custom_prompt,
+                template_key=normalize_template_key(
+                    primary_meeting.template_key or DEFAULT_TEMPLATE_KEY
+                ),
+                custom_prompt=primary_meeting.custom_prompt,
             )
             created_version_id = transcript_version.id
 
@@ -1009,6 +1014,15 @@ async def _run_transcription_job(
     except Exception as exc:
         if 'created_version_id' in locals() and created_version_id:
             await repository.update_transcript_version(created_version_id, status="failed")
+        logger.exception(
+            "transcription job failed",
+            extra={
+                "job_id": job_id,
+                "session_id": session_id,
+                "mode": mode,
+                "source_transcript_version_id": source_transcript_version_id,
+            },
+        )
         _update_transcription_job(
             job_id,
             status="failed",

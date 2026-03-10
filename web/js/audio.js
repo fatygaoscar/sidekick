@@ -22,6 +22,8 @@ class AudioCapture {
         this.chunkIndex = 0;
         this.isCapturing = false;
         this._pendingStopCleanup = null;
+        this._stopPromise = null;
+        this._resolveStop = null;
 
         // Resampling state
         this.resampleBuffer = [];
@@ -235,17 +237,19 @@ class AudioCapture {
         };
 
         this.mediaRecorder.onstop = () => {
+            const stopMeta = {
+                chunkCount: this.chunkIndex,
+                mimeType: this.recordedMimeType,
+            };
             if (this.recordedChunks.length) {
                 const blob = new Blob(this.recordedChunks, { type: this.recordedMimeType });
                 this.onEncodedAudio(blob, this.recordedMimeType);
             }
-            this.onCaptureStopped({
-                chunkCount: this.chunkIndex,
-                mimeType: this.recordedMimeType,
-            });
+            this.onCaptureStopped(stopMeta);
             this.recordedChunks = [];
             this.chunkIndex = 0;
             this._runPendingStopCleanup();
+            this._resolveStopPromise(stopMeta);
         };
 
         this.mediaRecorder.start(1000);
@@ -289,19 +293,38 @@ class AudioCapture {
                 this.mediaRecorder.stop();
                 window.setTimeout(() => {
                     this._runPendingStopCleanup();
+                    this._resolveStopPromise({
+                        chunkCount: this.chunkIndex,
+                        mimeType: this.recordedMimeType || 'audio/webm',
+                    });
                 }, 1500);
             }
             this.mediaRecorder = null;
         }
 
         if (!awaitingMediaRecorderStop) {
-            cleanup();
-            this.onCaptureStopped({
+            const stopMeta = {
                 chunkCount: this.chunkIndex,
                 mimeType: this.recordedMimeType || 'audio/webm',
-            });
+            };
+            cleanup();
+            this.onCaptureStopped(stopMeta);
             this.chunkIndex = 0;
+            this._resolveStopPromise(stopMeta);
         }
+    }
+
+    stopAndWait() {
+        if (this._stopPromise) {
+            return this._stopPromise;
+        }
+
+        this._stopPromise = new Promise((resolve) => {
+            this._resolveStop = resolve;
+        });
+
+        this.stop();
+        return this._stopPromise;
     }
 
     _runPendingStopCleanup() {
@@ -311,6 +334,17 @@ class AudioCapture {
         const cleanup = this._pendingStopCleanup;
         this._pendingStopCleanup = null;
         cleanup();
+    }
+
+    _resolveStopPromise(meta) {
+        if (!this._resolveStop) {
+            this._stopPromise = null;
+            return;
+        }
+        const resolve = this._resolveStop;
+        this._resolveStop = null;
+        this._stopPromise = null;
+        resolve(meta);
     }
 }
 
