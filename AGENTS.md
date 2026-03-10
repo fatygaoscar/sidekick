@@ -180,6 +180,7 @@ Default template: `meeting`
 - **Unified Workspace:** History `Open` matches post-recording review. Both support AI Refine, Manual Edit, and Undo.
 - **Global Settings:** `/settings` is the app-level feature flag page. Experimental features live there, not in `.env`.
 - **Meeting Assistant:** Experimental, off by default, and hidden unless enabled in global settings.
+- **Recordings Search:** AI-assisted search is answer-first and transcript-grounded. The recordings page shows a summary answer, follow-up chips, and grouped recording results with `Open Summary` / `Open Transcript`.
 - **View Modal Title:** Plain meeting title. Date/time is in the Details section.
 - **Rename flow:** Rename from the editable workspace title after opening the recording. History cards stay `Open` / `Delete` only.
 - **Workspace header metadata:** Simplified to date and time under the title.
@@ -207,6 +208,7 @@ Default template: `meeting`
 | `GET /api/recordings` | List recordings |
 | `GET /api/recordings/{id}` | Recording detail (includes latest `summary` + metadata) |
 | `GET /api/recordings/{id}/workspace` | Unified workspace payload (recording, transcript versions, summaries, speakers, chat gate) |
+| `POST /api/search/recordings` | Cross-recording transcript search with grouped grounded results |
 | `POST /api/recordings/{id}/summaries` | Save refined/manual summary to DB and vault |
 | `PATCH /api/recordings/{id}/settings` | Update recording title and transcript-version-specific prompt settings |
 | `POST /api/summaries/refine` | General AI refinement endpoint |
@@ -243,6 +245,7 @@ Default template: `meeting`
 - **Recovery path**: `/recover-audio` and `ensure_session_audio_path()` can finalize stranded chunk-only recordings later.
 - **Global settings**: App-level flags live in the singleton `app_settings` table and `/settings` UI. `workspace_chat_enabled` is DB-backed.
 - **Meeting Assistant**: Grounded transcript/summary chat exists behind the experimental global flag and is hidden by default.
+- **Recordings search**: Cross-recording AI search remains transcript-grounded, but now returns structured answer metadata (`answer_type`, `reasoning_note`, follow-up queries) plus grouped recording cards for faster navigation.
 - **Speaker Identity**: Manual-first. The `Speakers` tab is the product-facing source of truth for speaker naming.
 - **Unresolved Speakers**: Raw `SPEAKER_XX` stays visible only in the `Speakers` tab. Transcript and summary views use stable fallback labels: `Attendee`, `Attendee A`, `Attendee B`, etc.
 - **Workspace Summary Gate**: Pending speaker review does not block summary generation. Users can summarize before naming every speaker.

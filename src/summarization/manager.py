@@ -621,6 +621,9 @@ class SummarizationManager:
                 "answer": "I didn’t find grounded transcript evidence for that.",
                 "citations": [],
                 "confidence": "low",
+                "answer_type": "insufficient_evidence",
+                "reasoning_note": "No grounded transcript evidence was retrieved.",
+                "follow_up_queries": [],
             }
 
         evidence_lines = []
@@ -641,9 +644,12 @@ class SummarizationManager:
             "You answer questions about meeting recordings using only the provided evidence windows. "
             "Do not infer facts that are not grounded in the snippets. "
             "If the evidence is insufficient, say that clearly. "
-            "Return JSON only with keys: answer, citations, confidence. "
+            "Return JSON only with keys: answer, citations, confidence, answer_type, reasoning_note, follow_up_queries. "
             "confidence must be one of high, medium, low. "
             "citations must be an array of integer window indexes. "
+            "answer_type must be one of direct_answer, multi_recording, partial, insufficient_evidence. "
+            "reasoning_note should be a short user-facing explanation, 1 sentence max. "
+            "follow_up_queries should be an array with 0 to 3 short next-search suggestions. "
             "Keep the answer concise and factual."
         )
         user_prompt = (
@@ -670,6 +676,15 @@ class SummarizationManager:
         confidence = str(parsed.get("confidence") or "low").strip().lower()
         if confidence not in {"high", "medium", "low"}:
             confidence = "low"
+        answer_type = str(parsed.get("answer_type") or "partial").strip().lower()
+        if answer_type not in {
+            "direct_answer",
+            "multi_recording",
+            "partial",
+            "insufficient_evidence",
+        }:
+            answer_type = "partial"
+        reasoning_note = str(parsed.get("reasoning_note") or "").strip() or None
 
         citations: list[int] = []
         for raw in parsed.get("citations", []):
@@ -678,10 +693,21 @@ class SummarizationManager:
             except (TypeError, ValueError):
                 continue
 
+        follow_up_queries: list[str] = []
+        for raw in parsed.get("follow_up_queries", []):
+            normalized = " ".join(str(raw or "").strip().split())
+            if normalized:
+                follow_up_queries.append(normalized)
+            if len(follow_up_queries) >= 3:
+                break
+
         return {
             "answer": answer,
             "citations": citations,
             "confidence": confidence,
+            "answer_type": answer_type,
+            "reasoning_note": reasoning_note,
+            "follow_up_queries": follow_up_queries,
         }
 
     async def _summarize_with_timeout(

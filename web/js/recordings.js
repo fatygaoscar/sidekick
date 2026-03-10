@@ -13,7 +13,11 @@ class RecordingsPage {
             query: '',
             answer: null,
             confidence: 'low',
+            answerType: 'partial',
+            reasoningNote: null,
+            followUpQueries: [],
             results: [],
+            groups: [],
             loading: false,
             error: null,
             filtersOpen: false,
@@ -127,7 +131,13 @@ class RecordingsPage {
 
             this.searchState.answer = payload.answer || null;
             this.searchState.confidence = payload.confidence || 'low';
+            this.searchState.answerType = payload.answer_type || 'partial';
+            this.searchState.reasoningNote = payload.reasoning_note || null;
+            this.searchState.followUpQueries = Array.isArray(payload.follow_up_queries)
+                ? payload.follow_up_queries.filter(Boolean).slice(0, 3)
+                : [];
             this.searchState.results = Array.isArray(payload.results) ? payload.results : [];
+            this.searchState.groups = Array.isArray(payload.groups) ? payload.groups : [];
             console.info('[recordings:search:ok]', {
                 query,
                 resultCount: this.searchState.results.length,
@@ -140,7 +150,11 @@ class RecordingsPage {
             });
             this.searchState.error = error.message || 'Search failed';
             this.searchState.answer = null;
+            this.searchState.answerType = 'partial';
+            this.searchState.reasoningNote = null;
+            this.searchState.followUpQueries = [];
             this.searchState.results = [];
+            this.searchState.groups = [];
         } finally {
             this.searchState.loading = false;
             this._renderSearch();
@@ -155,6 +169,9 @@ class RecordingsPage {
         const hasContent = this.searchState.loading
             || this.searchState.error
             || this.searchState.answer
+            || this.searchState.reasoningNote
+            || this.searchState.followUpQueries.length > 0
+            || this.searchState.groups.length > 0
             || this.searchState.results.length > 0;
 
         this.elements.searchFilters.classList.toggle('hidden', !this.searchState.filtersOpen);
@@ -189,32 +206,33 @@ class RecordingsPage {
             return;
         }
 
-        const answerBlock = this.searchState.answer
-            ? `
-                <div class="recordings-search-answer">
-                    <div class="recordings-search-answer-meta">
-                        <span class="recordings-search-answer-label">Answer</span>
+        const answerLabel = this.searchState.answer
+            ? 'Search Summary'
+            : 'Evidence Only';
+        const answerBlock = `
+            <div class="recordings-search-answer${this.searchState.answer ? '' : ' recordings-search-answer-muted'}">
+                <div class="recordings-search-answer-meta">
+                    <span class="recordings-search-answer-label">${this._escapeHtml(answerLabel)}</span>
+                    <div class="recordings-search-answer-tags">
+                        <span class="recordings-search-answer-type">${this._escapeHtml(this._searchAnswerTypeLabel(this.searchState.answerType))}</span>
                         <span class="recordings-search-answer-confidence">${this._escapeHtml(this.searchState.confidence)}</span>
                     </div>
-                    <p class="recordings-search-answer-copy">${this._escapeHtml(this.searchState.answer)}</p>
                 </div>
-            `
-            : `
-                <div class="recordings-search-answer recordings-search-answer-muted">
-                    <div class="recordings-search-answer-meta">
-                        <span class="recordings-search-answer-label">Evidence Only</span>
-                    </div>
-                    <p class="recordings-search-answer-copy">Showing transcript evidence because the AI answer was unavailable.</p>
-                </div>
-            `;
+                <p class="recordings-search-answer-copy">${this._escapeHtml(this.searchState.answer || 'Showing transcript evidence because the AI answer was unavailable.')}</p>
+                ${this.searchState.reasoningNote ? `<p class="recordings-search-answer-note">${this._escapeHtml(this.searchState.reasoningNote)}</p>` : ''}
+                ${this._renderFollowUpQueries()}
+            </div>
+        `;
 
-        const results = this.searchState.results.length > 0
-            ? this.searchState.results.map((result) => this._renderSearchResult(result)).join('')
-            : `
-                <div class="recordings-search-empty">
-                    No grounded matches found across your recordings. Try fewer specifics or a shorter question.
-                </div>
-            `;
+        const results = this.searchState.groups.length > 0
+            ? this.searchState.groups.map((group, index) => this._renderSearchGroup(group, index)).join('')
+            : this.searchState.results.length > 0
+                ? this.searchState.results.map((result) => this._renderSearchResult(result)).join('')
+                : `
+                    <div class="recordings-search-empty">
+                        No grounded matches found across your recordings. Try fewer specifics or a shorter question.
+                    </div>
+                `;
 
         this.elements.searchResults.innerHTML = `
             ${answerBlock}
@@ -230,6 +248,110 @@ class RecordingsPage {
                 void this._openWorkspaceFromCitation(result);
             });
         });
+
+        this.elements.searchResults.querySelectorAll('.search-follow-up-btn').forEach((button) => {
+            button.addEventListener('click', () => {
+                const query = (button.dataset.query || '').trim();
+                if (!query || !this.elements.searchInput) {
+                    return;
+                }
+                this.elements.searchInput.value = query;
+                this.searchState.query = query;
+                this._syncSearchControls();
+                void this._runSearch();
+            });
+        });
+
+        this.elements.searchResults.querySelectorAll('.search-group-open-transcript-btn').forEach((button) => {
+            button.addEventListener('click', () => {
+                const group = this.searchState.groups[Number(button.dataset.groupIndex)];
+                if (!group) {
+                    return;
+                }
+                void this._openWorkspaceTranscriptFromGroup(group);
+            });
+        });
+
+        this.elements.searchResults.querySelectorAll('.search-group-open-summary-btn').forEach((button) => {
+            button.addEventListener('click', () => {
+                const group = this.searchState.groups[Number(button.dataset.groupIndex)];
+                if (!group) {
+                    return;
+                }
+                void this._openWorkspaceSummaryFromGroup(group);
+            });
+        });
+    }
+
+    _renderFollowUpQueries() {
+        if (!this.searchState.followUpQueries.length) {
+            return '';
+        }
+        return `
+            <div class="recordings-search-follow-ups">
+                <div class="recordings-search-follow-ups-label">Try next</div>
+                <div class="recordings-search-follow-ups-list">
+                    ${this.searchState.followUpQueries.map((query) => `
+                        <button type="button" class="btn btn-small search-follow-up-btn" data-query="${this._escapeHtml(query)}">${this._escapeHtml(query)}</button>
+                    `).join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    _searchAnswerTypeLabel(answerType) {
+        switch (String(answerType || '').toLowerCase()) {
+            case 'direct_answer':
+                return 'Direct Answer';
+            case 'multi_recording':
+                return 'Multiple Meetings';
+            case 'insufficient_evidence':
+                return 'No Grounded Match';
+            default:
+                return 'Partial';
+        }
+    }
+
+    _renderSearchGroup(group, index) {
+        const citedBadge = group.has_cited_evidence
+            ? '<span class="workspace-badge workspace-badge-accent">Cited</span>'
+            : '<span class="workspace-badge">Evidence</span>';
+        const snippets = Array.isArray(group.snippets)
+            ? group.snippets.map((snippet) => `
+                <div class="recordings-search-group-snippet${snippet.is_cited ? ' recordings-search-group-snippet-cited' : ''}">
+                    <div class="recordings-search-group-snippet-meta">
+                        ${snippet.speaker ? `<span>${this._escapeHtml(snippet.speaker)}</span><span aria-hidden="true">&middot;</span>` : ''}
+                        <span>${this._escapeHtml(snippet.timestamp)}</span>
+                        ${snippet.is_cited ? '<span aria-hidden="true">&middot;</span><span>Cited</span>' : ''}
+                    </div>
+                    <p class="recordings-search-card-snippet">${this._escapeHtml(snippet.snippet)}</p>
+                </div>
+            `).join('')
+            : `
+                <div class="recordings-search-empty">
+                    No grounded matches found across your recordings. Try fewer specifics or a shorter question.
+                </div>
+            `;
+
+        return `
+            <article class="recordings-search-card recordings-search-group-card">
+                <div class="recordings-search-card-head">
+                    <div class="recordings-search-card-meta">
+                        <span>${this._escapeHtml(group.recorded_date_label)}</span>
+                        <span aria-hidden="true">&middot;</span>
+                        <span>${this._escapeHtml(group.recorded_time_label)}</span>
+                    </div>
+                    <div class="recordings-search-card-badges">${citedBadge}</div>
+                </div>
+                <div class="recordings-search-card-title">${this._escapeHtml(group.recording_title || 'Untitled Recording')}</div>
+                <p class="recordings-search-group-reason">${this._escapeHtml(group.match_reason || 'Relevant transcript evidence found in this recording.')}</p>
+                <div class="recordings-search-group-snippets">${snippets}</div>
+                <div class="recordings-search-card-footer">
+                    <button class="btn btn-small search-group-open-summary-btn" data-group-index="${index}">Open Summary</button>
+                    <button class="btn btn-small search-group-open-transcript-btn" data-group-index="${index}">Open Transcript</button>
+                </div>
+            </article>
+        `;
     }
 
     _syncSearchControls() {
@@ -277,6 +399,33 @@ class RecordingsPage {
                 workspaceVersionId: result.transcript_version_id || null,
                 highlightSegmentIds: result.transcript_segment_ids || [],
                 focusStartTime: result.start_time,
+            });
+        } catch (error) {
+            alert(error.message || 'Failed to open recording workspace');
+        }
+    }
+
+    async _openWorkspaceTranscriptFromGroup(group) {
+        const preferredSnippet = Array.isArray(group.snippets)
+            ? group.snippets.find((snippet) => snippet.is_cited) || group.snippets[0]
+            : null;
+        try {
+            await this.workspace.open(group.session_id, {
+                initialTab: 'transcript',
+                workspaceVersionId: group.transcript_version_id || null,
+                highlightSegmentIds: preferredSnippet?.transcript_segment_ids || [],
+                focusStartTime: preferredSnippet?.start_time ?? 0,
+            });
+        } catch (error) {
+            alert(error.message || 'Failed to open recording workspace');
+        }
+    }
+
+    async _openWorkspaceSummaryFromGroup(group) {
+        try {
+            await this.workspace.open(group.session_id, {
+                initialTab: 'summary',
+                workspaceVersionId: group.transcript_version_id || null,
             });
         } catch (error) {
             alert(error.message || 'Failed to open recording workspace');

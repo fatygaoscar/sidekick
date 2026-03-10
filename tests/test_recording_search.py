@@ -270,6 +270,12 @@ class RecordingSearchServiceTests(unittest.IsolatedAsyncioTestCase):
                     "answer": "Greg said the rollout should stay phased until exceptions stabilize.",
                     "citations": [0],
                     "confidence": "high",
+                    "answer_type": "direct_answer",
+                    "reasoning_note": "One recording clearly answers the question.",
+                    "follow_up_queries": [
+                        "What decision was made about the rollout?",
+                        "Show action items related to the rollout",
+                    ],
                 }
 
         service = RecordingSearchService(FakeRepository(), FakeSummarizationManager())
@@ -277,10 +283,150 @@ class RecordingSearchServiceTests(unittest.IsolatedAsyncioTestCase):
         result = await service.search(query="What did Greg say about inventory planner rollout?")
 
         self.assertEqual(result["confidence"], "high")
+        self.assertEqual(result["answer_type"], "direct_answer")
+        self.assertEqual(result["reasoning_note"], "One recording clearly answers the question.")
+        self.assertEqual(len(result["follow_up_queries"]), 2)
         self.assertEqual(result["results"][0]["transcript_segment_ids"], ["seg-1", "seg-2", "seg-3"])
         self.assertEqual(result["results"][0]["transcript_version_id"], "tv-2")
         self.assertTrue(result["results"][0]["is_cited"])
+        self.assertEqual(len(result["groups"]), 1)
+        self.assertTrue(result["groups"][0]["has_cited_evidence"])
+        self.assertEqual(result["groups"][0]["snippets"][0]["transcript_segment_ids"], ["seg-1", "seg-2", "seg-3"])
         self.assertIn("Greg said", result["answer"])
+
+    async def test_service_groups_results_by_recording_and_cited_snippet_first(self):
+        class FakeRepository:
+            async def search_transcript_segments(self, **kwargs):
+                return [
+                    {
+                        "segment_id": "seg-2",
+                        "session_id": "session-1",
+                        "meeting_id": "meeting-1",
+                        "transcript_version_id": "tv-1",
+                        "text": "Decision: keep pricing flat for Q2.",
+                        "start_time": 20.0,
+                        "end_time": 28.0,
+                        "is_important": 1,
+                        "speaker": "Ava",
+                        "speaker_cluster": "SPEAKER_01",
+                        "meeting_title": "Pricing Review",
+                        "session_started_at": datetime(2026, 3, 7, 18, 0),
+                        "timezone_name": "America/Chicago",
+                        "timezone_offset_minutes": 360,
+                        "rank": 0.05,
+                    },
+                    {
+                        "segment_id": "seg-3",
+                        "session_id": "session-1",
+                        "meeting_id": "meeting-1",
+                        "transcript_version_id": "tv-1",
+                        "text": "Action item: write pricing FAQ.",
+                        "start_time": 35.0,
+                        "end_time": 42.0,
+                        "is_important": 0,
+                        "speaker": "Ben",
+                        "speaker_cluster": "SPEAKER_02",
+                        "meeting_title": "Pricing Review",
+                        "session_started_at": datetime(2026, 3, 7, 18, 0),
+                        "timezone_name": "America/Chicago",
+                        "timezone_offset_minutes": 360,
+                        "rank": 0.2,
+                    },
+                    {
+                        "segment_id": "seg-9",
+                        "session_id": "session-2",
+                        "meeting_id": "meeting-2",
+                        "transcript_version_id": "tv-2",
+                        "text": "We revisited pricing, but no new decision was made.",
+                        "start_time": 14.0,
+                        "end_time": 22.0,
+                        "is_important": 0,
+                        "speaker": "Cara",
+                        "speaker_cluster": "SPEAKER_03",
+                        "meeting_title": "Follow-up Sync",
+                        "session_started_at": datetime(2026, 3, 8, 18, 0),
+                        "timezone_name": "America/Chicago",
+                        "timezone_offset_minutes": 360,
+                        "rank": 0.1,
+                    },
+                ]
+
+            async def get_segments(self, session_id=None, meeting_id=None, transcript_version_id=None, important_only=False):
+                if session_id == "session-1":
+                    return [
+                        SimpleNamespace(id="seg-1", start_time=12.0, end_time=19.0, text="We reviewed Q2 pricing options.", speaker="Ava", speaker_cluster="SPEAKER_01"),
+                        SimpleNamespace(id="seg-2", start_time=20.0, end_time=28.0, text="Decision: keep pricing flat for Q2.", speaker="Ava", speaker_cluster="SPEAKER_01"),
+                        SimpleNamespace(id="seg-3", start_time=35.0, end_time=42.0, text="Action item: write pricing FAQ.", speaker="Ben", speaker_cluster="SPEAKER_02"),
+                    ]
+                return [
+                    SimpleNamespace(id="seg-8", start_time=8.0, end_time=13.0, text="We revisited pricing assumptions.", speaker="Cara", speaker_cluster="SPEAKER_03"),
+                    SimpleNamespace(id="seg-9", start_time=14.0, end_time=22.0, text="We revisited pricing, but no new decision was made.", speaker="Cara", speaker_cluster="SPEAKER_03"),
+                ]
+
+        class FakeSummarizationManager:
+            async def answer_question_with_citations(self, **kwargs):
+                return {
+                    "answer": "The clearest pricing decision was to keep pricing flat for Q2.",
+                    "citations": [1],
+                    "confidence": "high",
+                    "answer_type": "multi_recording",
+                    "reasoning_note": "Two meetings mention pricing, but only one contains a clear decision.",
+                    "follow_up_queries": [],
+                }
+
+        service = RecordingSearchService(FakeRepository(), FakeSummarizationManager())
+
+        result = await service.search(query="What was the pricing decision?")
+
+        self.assertEqual(len(result["groups"]), 2)
+        first_group = result["groups"][0]
+        self.assertEqual(first_group["session_id"], "session-1")
+        self.assertTrue(first_group["has_cited_evidence"])
+        self.assertTrue(first_group["snippets"][0]["is_cited"])
+        self.assertIn("pricing", first_group["match_reason"].lower())
+        self.assertEqual(len(result["follow_up_queries"]), 3)
+
+    async def test_service_returns_grouped_evidence_when_llm_answer_fails(self):
+        class FakeRepository:
+            async def search_transcript_segments(self, **kwargs):
+                return [
+                    {
+                        "segment_id": "seg-1",
+                        "session_id": "session-1",
+                        "meeting_id": "meeting-1",
+                        "transcript_version_id": "tv-1",
+                        "text": "Sam flagged a latency spike during rollout.",
+                        "start_time": 10.0,
+                        "end_time": 18.0,
+                        "is_important": 1,
+                        "speaker": "Sam",
+                        "speaker_cluster": "SPEAKER_01",
+                        "meeting_title": "Latency Review",
+                        "session_started_at": datetime(2026, 3, 9, 18, 0),
+                        "timezone_name": "America/Chicago",
+                        "timezone_offset_minutes": 360,
+                        "rank": 0.05,
+                    }
+                ]
+
+            async def get_segments(self, session_id=None, meeting_id=None, transcript_version_id=None, important_only=False):
+                return [
+                    SimpleNamespace(id="seg-1", start_time=10.0, end_time=18.0, text="Sam flagged a latency spike during rollout.", speaker="Sam", speaker_cluster="SPEAKER_01"),
+                ]
+
+        class FakeSummarizationManager:
+            async def answer_question_with_citations(self, **kwargs):
+                raise RuntimeError("model unavailable")
+
+        service = RecordingSearchService(FakeRepository(), FakeSummarizationManager())
+
+        result = await service.search(query="Did Sam mention latency?")
+
+        self.assertIsNone(result["answer"])
+        self.assertEqual(result["confidence"], "low")
+        self.assertEqual(result["answer_type"], "partial")
+        self.assertEqual(len(result["groups"]), 1)
+        self.assertEqual(result["groups"][0]["recording_title"], "Latency Review")
 
 
 if __name__ == "__main__":

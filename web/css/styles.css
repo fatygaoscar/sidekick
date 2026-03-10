@@ -1070,6 +1070,14 @@ textarea.form-input {
     margin-bottom: 10px;
 }
 
+.recordings-search-answer-tags {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.recordings-search-answer-type,
 .recordings-search-answer-confidence {
     font-size: 11px;
     letter-spacing: 0.08em;
@@ -1077,9 +1085,53 @@ textarea.form-input {
     color: var(--text-dim);
 }
 
+.recordings-search-answer-type {
+    padding: 3px 8px;
+    border: 1px solid color-mix(in srgb, var(--border) 82%, var(--accent));
+    color: var(--text);
+    background: color-mix(in srgb, var(--bg) 88%, var(--accent) 12%);
+}
+
 .recordings-search-answer-copy {
     color: var(--text);
     line-height: 1.7;
+}
+
+.recordings-search-answer-note {
+    margin-top: 8px;
+    color: var(--text-dim);
+    line-height: 1.6;
+}
+
+.recordings-search-follow-ups {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.recordings-search-follow-ups-label {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+
+.recordings-search-follow-ups-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.search-follow-up-btn {
+    background: transparent;
+    color: var(--text-dim);
+    border-color: color-mix(in srgb, var(--border) 80%, var(--accent));
+}
+
+.search-follow-up-btn:hover:not(:disabled) {
+    color: var(--accent);
+    border-color: var(--accent);
 }
 
 .recordings-search-list {
@@ -1142,6 +1194,8 @@ textarea.form-input {
     margin-top: 10px;
     display: flex;
     justify-content: flex-start;
+    gap: 8px;
+    flex-wrap: wrap;
 }
 
 .search-open-btn {
@@ -1152,6 +1206,44 @@ textarea.form-input {
 .search-open-btn:hover:not(:disabled) {
     border-color: var(--accent);
     color: var(--accent);
+}
+
+.recordings-search-group-card {
+    padding: 14px;
+}
+
+.recordings-search-group-reason {
+    margin-top: 6px;
+    color: var(--text);
+    line-height: 1.6;
+}
+
+.recordings-search-group-snippets {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.recordings-search-group-snippet {
+    border-left: 2px solid color-mix(in srgb, var(--border) 80%, transparent);
+    padding-left: 10px;
+}
+
+.recordings-search-group-snippet-cited {
+    border-left-color: var(--accent);
+}
+
+.recordings-search-group-snippet-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    align-items: center;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 4px;
 }
 
 .recordings-list {

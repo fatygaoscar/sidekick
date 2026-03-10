@@ -15,6 +15,7 @@ Browser-based meeting recorder that captures audio, builds transcript versions, 
 - **Eager background processing** — transcription starts in the background as soon as recording stops
 - **Workspace-first rename** — open a recording and click the workspace title to rename it
 - **Unified workspace** — the same modal is used post-recording and from History
+- **Answer-first recordings search** — cross-recording AI search returns a grounded answer, follow-up suggestions, and grouped recording hits
 - **Transcript versioning** — retranscription creates transcript versions; summary drafts and saved summaries are tied to the active version
 - **Prompt Audit Export** — Obsidian exports include the exact Pass 1 / Pass 2 prompts used plus a collapsed transcript section
 - **DAW-style analyzer** — the live recording visualizer uses a higher-resolution log-spaced spectrum analyzer while keeping the same minimal style
@@ -68,6 +69,12 @@ Open workspace
   ├─ settings
   ├─ transcript
   └─ chat (experimental, feature-flagged)
+
+Search history
+  └─ POST /api/search/recordings
+       ├─ transcript-grounded retrieval
+       ├─ structured answer metadata
+       └─ grouped recording results with direct open actions
 
 Later reads
   └─ if finalized audio is missing, Sidekick can rebuild it from retained chunks

@@ -77,7 +77,11 @@ class RecordingSearchService:
                 "query": normalized_query,
                 "answer": "I didn’t find grounded transcript evidence for that in the searched recordings.",
                 "confidence": "low",
+                "answer_type": "insufficient_evidence",
+                "reasoning_note": "No grounded transcript evidence matched the search.",
+                "follow_up_queries": [],
                 "results": [],
+                "groups": [],
                 "retrieval_count": 0,
             }
 
@@ -91,13 +95,20 @@ class RecordingSearchService:
                 "query": normalized_query,
                 "answer": "I didn’t find grounded transcript evidence for that in the searched recordings.",
                 "confidence": "low",
+                "answer_type": "insufficient_evidence",
+                "reasoning_note": "No grounded transcript evidence matched the search.",
+                "follow_up_queries": [],
                 "results": [],
+                "groups": [],
                 "retrieval_count": 0,
             }
 
         answer = None
         confidence = "low"
+        answer_type = "partial"
+        reasoning_note = None
         cited_indexes: list[int] = []
+        follow_up_queries: list[str] = []
         try:
             answer_payload = await self._summarization_manager.answer_question_with_citations(
                 question=normalized_query,
@@ -114,14 +125,26 @@ class RecordingSearchService:
             )
             answer = answer_payload.get("answer") or None
             confidence = str(answer_payload.get("confidence") or "low")
+            answer_type = str(answer_payload.get("answer_type") or "partial")
+            reasoning_note = self._normalize_optional_text(answer_payload.get("reasoning_note"))
             cited_indexes = [
                 int(index)
                 for index in answer_payload.get("citations", [])
                 if isinstance(index, int) and 0 <= int(index) < len(windows)
             ]
+            follow_up_queries = [
+                query_text
+                for query_text in (
+                    self._normalize_optional_text(value)
+                    for value in answer_payload.get("follow_up_queries", [])
+                )
+                if query_text
+            ][:3]
         except Exception:
             answer = None
             confidence = "low"
+            answer_type = "partial"
+            reasoning_note = None
 
         results = []
         cited_set = set(cited_indexes)
@@ -153,13 +176,194 @@ class RecordingSearchService:
                 }
             )
 
+        groups = self._build_groups(
+            windows=windows,
+            results=results,
+            query=normalized_query,
+            cited_set=cited_set,
+        )
+        answer_type = self._normalize_answer_type(
+            answer_type,
+            answer=answer,
+            groups=groups,
+        )
+        if not follow_up_queries:
+            follow_up_queries = self._build_follow_up_queries(
+                query=normalized_query,
+                groups=groups,
+                answer_type=answer_type,
+            )
+
         return {
             "query": normalized_query,
             "answer": answer,
             "confidence": confidence,
+            "answer_type": answer_type,
+            "reasoning_note": reasoning_note,
+            "follow_up_queries": follow_up_queries,
             "results": results,
+            "groups": groups,
             "retrieval_count": len(results),
         }
+
+    def _build_groups(
+        self,
+        *,
+        windows: list[SearchWindow],
+        results: list[dict[str, Any]],
+        query: str,
+        cited_set: set[int],
+    ) -> list[dict[str, Any]]:
+        grouped: defaultdict[tuple[str, str | None], list[tuple[int, SearchWindow, dict[str, Any]]]] = defaultdict(list)
+        for index, (window, result) in enumerate(zip(windows, results, strict=False)):
+            grouped[(window.session_id, window.transcript_version_id)].append((index, window, result))
+
+        query_tokens = set(self._ordered_query_tokens(query))
+        groups: list[dict[str, Any]] = []
+        for (_, _), entries in grouped.items():
+            entries.sort(
+                key=lambda item: (
+                    item[0] not in cited_set,
+                    -float(item[1].score),
+                    item[1].start_time,
+                )
+            )
+            top_index, top_window, top_result = entries[0]
+            snippets = []
+            for index, window, result in entries[:3]:
+                snippets.append(
+                    {
+                        "citation_id": result["citation_id"],
+                        "speaker": result.get("speaker"),
+                        "speaker_cluster": result.get("speaker_cluster"),
+                        "timestamp": result["timestamp"],
+                        "snippet": result["snippet"],
+                        "transcript_segment_ids": result["transcript_segment_ids"],
+                        "start_time": result["start_time"],
+                        "end_time": result["end_time"],
+                        "is_cited": index in cited_set,
+                        "score": result["score"],
+                    }
+                )
+
+            groups.append(
+                {
+                    "session_id": top_window.session_id,
+                    "meeting_id": top_window.meeting_id,
+                    "transcript_version_id": top_window.transcript_version_id,
+                    "recording_title": top_window.recording_title,
+                    "recorded_at": top_window.recorded_at.isoformat().replace("+00:00", "Z"),
+                    "recorded_date_label": top_result["recorded_date_label"],
+                    "recorded_time_label": top_result["recorded_time_label"],
+                    "top_score": round(float(top_window.score), 4),
+                    "match_reason": self._build_match_reason(
+                        query_tokens=query_tokens,
+                        recording_title=top_window.recording_title,
+                        snippets=snippets,
+                        has_cited=any(snippet["is_cited"] for snippet in snippets),
+                    ),
+                    "has_cited_evidence": any(snippet["is_cited"] for snippet in snippets),
+                    "snippets": snippets,
+                }
+            )
+
+        groups.sort(
+            key=lambda item: (
+                not item["has_cited_evidence"],
+                -float(item["top_score"]),
+                item["recorded_at"],
+            )
+        )
+        return groups[:4]
+
+    def _build_match_reason(
+        self,
+        *,
+        query_tokens: set[str],
+        recording_title: str,
+        snippets: list[dict[str, Any]],
+        has_cited: bool,
+    ) -> str:
+        title_tokens = set(self._ordered_query_tokens(recording_title))
+        snippet_tokens: set[str] = set()
+        speaker_tokens: set[str] = set()
+        for snippet in snippets:
+            snippet_tokens.update(self._ordered_query_tokens(snippet.get("snippet")))
+            speaker_tokens.update(self._ordered_query_tokens(snippet.get("speaker")))
+
+        overlap = sorted(query_tokens & (title_tokens | snippet_tokens | speaker_tokens))
+        if overlap:
+            label = ", ".join(overlap[:3])
+            return (
+                f"Contains cited evidence mentioning {label}."
+                if has_cited
+                else f"Matched transcript mentions of {label}."
+            )
+        if has_cited:
+            return "Contains cited evidence used in the answer."
+        return "Relevant transcript evidence found in this recording."
+
+    def _normalize_answer_type(
+        self,
+        raw_answer_type: str,
+        *,
+        answer: str | None,
+        groups: list[dict[str, Any]],
+    ) -> str:
+        normalized = str(raw_answer_type or "").strip().lower()
+        if normalized not in {
+            "direct_answer",
+            "multi_recording",
+            "partial",
+            "insufficient_evidence",
+        }:
+            normalized = "partial"
+        if not answer and not groups:
+            return "insufficient_evidence"
+        if normalized == "partial" and len(groups) > 1:
+            return "multi_recording"
+        if normalized == "insufficient_evidence" and groups:
+            return "partial"
+        return normalized
+
+    def _build_follow_up_queries(
+        self,
+        *,
+        query: str,
+        groups: list[dict[str, Any]],
+        answer_type: str,
+    ) -> list[str]:
+        normalized_query = self._normalize_query(query)
+        if not groups:
+            return [
+                f"What decision was made about {normalized_query}?",
+                f"Show action items related to {normalized_query}",
+            ][:2]
+
+        suggestions: list[str] = []
+        if answer_type == "multi_recording":
+            suggestions.append(f"Which meeting discussed {normalized_query} most recently?")
+        suggestions.append(f"What decision was made about {normalized_query}?")
+        suggestions.append(f"Show action items related to {normalized_query}")
+        top_group = groups[0]
+        title = self._normalize_optional_text(top_group.get("recording_title"))
+        if title:
+            suggestions.append(f"Summarize what this meeting said about {normalized_query}")
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for suggestion in suggestions:
+            normalized = self._normalize_optional_text(suggestion)
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            unique.append(normalized)
+            seen.add(lowered)
+            if len(unique) >= 3:
+                break
+        return unique
 
     async def _build_windows(
         self,

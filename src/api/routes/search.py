@@ -67,11 +67,42 @@ class RecordingSearchResult(BaseModel):
     is_cited: bool = False
 
 
+class RecordingSearchSnippet(BaseModel):
+    citation_id: str
+    speaker: Optional[str] = None
+    speaker_cluster: Optional[str] = None
+    timestamp: str
+    snippet: str
+    transcript_segment_ids: list[str]
+    start_time: float
+    end_time: float
+    score: float
+    is_cited: bool = False
+
+
+class RecordingSearchGroup(BaseModel):
+    session_id: str
+    meeting_id: Optional[str] = None
+    transcript_version_id: Optional[str] = None
+    recording_title: str
+    recorded_at: str
+    recorded_date_label: str
+    recorded_time_label: str
+    top_score: float
+    match_reason: str
+    has_cited_evidence: bool = False
+    snippets: list[RecordingSearchSnippet]
+
+
 class RecordingSearchResponse(BaseModel):
     query: str
     answer: Optional[str] = None
     confidence: str = "low"
+    answer_type: str = "partial"
+    reasoning_note: Optional[str] = None
+    follow_up_queries: list[str] = []
     results: list[RecordingSearchResult]
+    groups: list[RecordingSearchGroup] = []
     retrieval_count: int
 
 
