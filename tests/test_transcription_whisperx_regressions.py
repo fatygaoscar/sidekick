@@ -9,7 +9,7 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import types
 
 import numpy as np
@@ -297,3 +297,31 @@ class WhisperXRegressionTests(unittest.TestCase):
         self.assertEqual(result.text, "Hello world")
         self.assertEqual(result.segments[0].speaker_cluster, "SPEAKER_00")
         self.assertEqual(len(diarization_inputs), 1)
+
+    def test_whisperx_unload_releases_cached_models_and_cuda_memory(self):
+        engine = self.whisperx_local.WhisperXLocalEngine()
+        engine._initialized = True
+        engine._model = object()
+        engine._diarization_pipeline = object()
+        engine._align_models["en"] = (object(), object())
+
+        fake_cuda = SimpleNamespace(
+            is_available=MagicMock(return_value=True),
+            empty_cache=MagicMock(),
+            ipc_collect=MagicMock(),
+        )
+        fake_torch = SimpleNamespace(cuda=fake_cuda)
+
+        with patch.object(self.whisperx_local.gc, "collect") as gc_collect, patch.dict(
+            sys.modules,
+            {"torch": fake_torch},
+        ):
+            asyncio.run(engine.unload())
+
+        self.assertIsNone(engine._model)
+        self.assertIsNone(engine._diarization_pipeline)
+        self.assertEqual(engine._align_models, {})
+        self.assertFalse(engine._initialized)
+        gc_collect.assert_called_once_with()
+        fake_cuda.empty_cache.assert_called_once_with()
+        fake_cuda.ipc_collect.assert_called_once_with()

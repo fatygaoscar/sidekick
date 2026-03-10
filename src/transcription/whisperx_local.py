@@ -1,6 +1,7 @@
 """Local authoritative transcription using WhisperX."""
 
 import asyncio
+import gc
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -112,18 +113,31 @@ class WhisperXLocalEngine(TranscriptionEngine):
             )
         return self._diarization_pipeline
 
-    async def unload(self) -> None:
+    def _release_resources(self) -> None:
         self._model = None
         self._diarization_pipeline = None
         self._align_models.clear()
         self._initialized = False
 
+        gc.collect()
+
+        try:
+            import torch
+        except Exception:
+            return
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            ipc_collect = getattr(torch.cuda, "ipc_collect", None)
+            if callable(ipc_collect):
+                ipc_collect()
+
+    async def unload(self) -> None:
+        self._release_resources()
+
     async def shutdown(self) -> None:
-        self._model = None
-        self._diarization_pipeline = None
-        self._align_models.clear()
+        self._release_resources()
         self._executor.shutdown(wait=False)
-        self._initialized = False
 
     async def transcribe(
         self,

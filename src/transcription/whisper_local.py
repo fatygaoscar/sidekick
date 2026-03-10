@@ -1,6 +1,7 @@
 """Local transcription using faster-whisper."""
 
 import asyncio
+import gc
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
@@ -80,16 +81,31 @@ class WhisperLocalEngine(TranscriptionEngine):
             compute_type=compute_type,
         )
 
-    async def unload(self) -> None:
-        """Unload the model from VRAM to free memory for other models."""
+    def _release_resources(self) -> None:
         self._model = None
         self._initialized = False
 
+        gc.collect()
+
+        try:
+            import torch
+        except Exception:
+            return
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            ipc_collect = getattr(torch.cuda, "ipc_collect", None)
+            if callable(ipc_collect):
+                ipc_collect()
+
+    async def unload(self) -> None:
+        """Unload the model from VRAM to free memory for other models."""
+        self._release_resources()
+
     async def shutdown(self) -> None:
         """Shutdown the engine."""
-        self._model = None
+        self._release_resources()
         self._executor.shutdown(wait=False)
-        self._initialized = False
 
     async def transcribe(
         self,

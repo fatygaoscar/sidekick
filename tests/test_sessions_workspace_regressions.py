@@ -545,7 +545,8 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             update_transcript_version=AsyncMock(return_value=transcript_version),
         )
         transcription_manager = SimpleNamespace(
-            active_engine=SimpleNamespace(name="whisperx-test")
+            active_engine=SimpleNamespace(name="whisperx-test"),
+            unload=AsyncMock(),
         )
 
         with patch.object(
@@ -573,6 +574,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             template_key=self.export.normalize_template_key("working_session"),
             custom_prompt="Focus on implementation details.",
         )
+        transcription_manager.unload.assert_awaited_once_with()
 
     def test_transcription_job_logs_unexpected_exceptions_with_traceback(self):
         primary_meeting = SimpleNamespace(
@@ -600,6 +602,8 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             update_transcript_version=AsyncMock(return_value=transcript_version),
         )
 
+        transcription_manager = SimpleNamespace(unload=AsyncMock())
+
         with patch.object(
             self.export,
             "_transcribe_and_persist_session",
@@ -610,13 +614,14 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
                     job_id="job-1",
                     session_id="session-1",
                     repository=repository,
-                    transcription_manager=SimpleNamespace(),
+                    transcription_manager=transcription_manager,
                     mode="initial",
                 )
             )
 
         repository.update_transcript_version.assert_any_await("tv-1", status="failed")
         mock_exception.assert_called_once()
+        transcription_manager.unload.assert_awaited_once_with()
 
     def test_revise_summary_draft_returns_updated_draft(self):
         draft = SimpleNamespace(id="draft-1", status="draft", content="Original summary")

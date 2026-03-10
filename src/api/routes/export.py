@@ -1030,6 +1030,21 @@ async def _run_transcription_job(
             message="Transcription failed",
             error=str(exc),
         )
+    finally:
+        try:
+            await transcription_manager.unload()
+            logger.info(
+                "[step] transcription_cleanup | done | job_id=%s | session_id=%s",
+                job_id,
+                session_id,
+            )
+        except Exception:
+            logger.warning(
+                "[step] transcription_cleanup | failed | job_id=%s | session_id=%s",
+                job_id,
+                session_id,
+                exc_info=True,
+            )
 
 
 async def _build_summary_save_params(
