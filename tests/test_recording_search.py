@@ -168,6 +168,47 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(new_results), 1)
         self.assertEqual(new_results[0]["transcript_version_id"], version_two.id)
 
+    async def test_workspace_chat_thread_persists_messages_and_aggregates_feedback(self):
+        session = await self.repo.create_session()
+        meeting = await self.repo.create_meeting(session.id, title="Chat Feedback")
+        thread = await self.repo.get_or_create_workspace_chat_thread(session.id, meeting.id)
+        self.assertIsNotNone(thread.id)
+
+        await self.repo.add_workspace_chat_message(
+            thread_id=thread.id,
+            session_id=session.id,
+            meeting_id=meeting.id,
+            role="assistant",
+            message_type="assistant_answer",
+            content="Add the blocker callout to the summary.",
+            intent_label="surface_risk",
+            intent_confidence=0.92,
+            suggests_summary_change=True,
+            suggested_change_kind="add",
+            apply_ready=True,
+            applied_at=datetime.now(UTC).replace(tzinfo=None),
+            template_key="meeting",
+        )
+
+        messages = await self.repo.list_workspace_chat_messages(thread.id)
+        aggregates = await self.repo.aggregate_workspace_chat_feedback(applied_only=True)
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].intent_label, "surface_risk")
+        self.assertEqual(aggregates["total_messages"], 1)
+        self.assertEqual(aggregates["by_intent"]["surface_risk"], 1)
+
+    async def test_app_settings_bootstrap_and_update(self):
+        settings = await self.repo.get_app_settings()
+        self.assertIsNotNone(settings)
+        self.assertFalse(settings.workspace_chat_enabled)
+
+        updated = await self.repo.update_app_settings(workspace_chat_enabled=True)
+        reloaded = await self.repo.get_app_settings()
+
+        self.assertTrue(updated.workspace_chat_enabled)
+        self.assertTrue(reloaded.workspace_chat_enabled)
+
 
 class RecordingSearchServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_service_returns_cited_answer_and_window_segment_ids(self):

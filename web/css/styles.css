@@ -131,6 +131,21 @@ body.main-page .main-content {
     color: var(--accent);
 }
 
+.header-icon-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+}
+
+.header-icon-link svg {
+    width: 16px;
+    height: 16px;
+    display: block;
+}
+
 .mobile-history-bar,
 .mobile-page-bar {
     display: none;
@@ -787,6 +802,14 @@ textarea.form-input {
     border-bottom: 1px solid var(--border);
 }
 
+.page-header-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-right: 4px;
+}
+
 .back-link {
     font-size: 12px;
     letter-spacing: 0.1em;
@@ -808,6 +831,135 @@ textarea.form-input {
 
 .recordings-search-region {
     padding: 24px 24px 0;
+}
+
+.settings-page {
+    flex: 1;
+    padding: 24px;
+}
+
+.settings-shell {
+    max-width: 840px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.settings-section {
+    padding: 16px;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.settings-section-head h4 {
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+
+.settings-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.settings-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+}
+
+.settings-item-copy {
+    flex: 1;
+    min-width: 0;
+}
+
+.settings-item-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.settings-item-head h5 {
+    font-size: 14px;
+    font-weight: 400;
+}
+
+.settings-item-description {
+    margin-top: 6px;
+    color: var(--text-dim);
+}
+
+.settings-item-meta {
+    margin-top: 8px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.settings-toggle {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    cursor: pointer;
+}
+
+.settings-toggle-input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.settings-toggle-ui {
+    position: relative;
+    display: inline-block;
+    width: 54px;
+    height: 30px;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.settings-toggle-ui::after {
+    content: "";
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    width: 20px;
+    height: 20px;
+    background: var(--text-dim);
+    transition: transform 0.2s ease, background-color 0.2s ease;
+}
+
+.settings-toggle-input:checked + .settings-toggle-ui {
+    border-color: var(--accent);
+    background: var(--bg-elevated);
+}
+
+.settings-toggle-input:checked + .settings-toggle-ui::after {
+    transform: translateX(24px);
+    background: var(--accent);
+}
+
+.settings-toggle-input:disabled + .settings-toggle-ui {
+    opacity: 0.6;
+}
+
+.mobile-page-links {
+    display: flex;
+    gap: 12px;
 }
 
 .recordings-search-shell {
@@ -1307,6 +1459,17 @@ textarea.form-input {
         display: none;
     }
 
+    body.main-page .header-right {
+        display: flex;
+        margin-left: auto;
+        gap: 0;
+        margin-right: 4px;
+    }
+
+    body.main-page .header-right .header-link:not(.header-icon-link) {
+        display: none;
+    }
+
     .main-content {
         padding-bottom: 20px;
     }
@@ -1330,10 +1493,29 @@ textarea.form-input {
 
     .mobile-history-link,
     .mobile-page-link {
-        width: 100%;
+        width: auto;
+        flex: 1 1 0;
         justify-content: center;
         min-height: 48px;
         font-size: 11px;
+    }
+
+    .page-header {
+        gap: 12px;
+    }
+
+    .page-header-actions {
+        margin-left: auto;
+        margin-right: 4px;
+    }
+
+    .settings-page {
+        padding: 16px;
+    }
+
+    .settings-item {
+        align-items: flex-start;
+        flex-direction: column;
     }
 
     .status-bar {
@@ -2075,6 +2257,110 @@ textarea.form-input {
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--text-dim);
+}
+
+.workspace-chat-messages {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.workspace-chat-message {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    padding: 14px;
+    overflow: visible;
+}
+
+.workspace-chat-message-user {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.workspace-chat-message-system {
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+
+.workspace-chat-system-copy {
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+
+.workspace-chat-message-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
+
+.workspace-chat-body {
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--text);
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.workspace-chat-body-collapsed {
+    position: relative;
+    max-height: 240px;
+    overflow: hidden;
+}
+
+.workspace-chat-body-collapsed::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 56px;
+    background: linear-gradient(to bottom, transparent, var(--bg));
+}
+
+.workspace-chat-message-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.workspace-chat-composer {
+    margin-top: 16px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    padding: 12px;
+}
+
+.workspace-chat-input {
+    width: 100%;
+    min-height: 84px;
+    resize: vertical;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    padding: 10px 12px;
+    font: inherit;
+    line-height: 1.6;
+}
+
+.workspace-chat-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.workspace-chat-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 10px;
 }
 
 @media (max-width: 900px) {

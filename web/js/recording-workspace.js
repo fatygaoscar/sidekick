@@ -51,6 +51,10 @@
                 banner: null,
                 pendingResetSummaryId: null,
                 lastCustomPrompt: '',
+                chatInput: '',
+                chatSending: false,
+                chatApplyingMessageId: null,
+                expandedChatMessageIds: {},
             };
 
             this._ensureDom();
@@ -94,6 +98,10 @@
             this.state.banner = null;
             this.state.pendingResetSummaryId = null;
             this.state.lastCustomPrompt = '';
+            this.state.chatInput = '';
+            this.state.chatSending = false;
+            this.state.chatApplyingMessageId = null;
+            this.state.expandedChatMessageIds = {};
             this.elements.modal.classList.toggle('workspace-native-scroll-timeline', this._useNativeScrollTimeline);
             this.elements.modal.classList.remove('hidden');
             this._lockBodyScroll();
@@ -162,6 +170,9 @@
             this.state.selectedSavedSummaryId = null;
             this.state.pendingResetSummaryId = null;
             this.state.lastCustomPrompt = '';
+            this.state.chatInput = '';
+            this.state.chatSending = false;
+            this.state.chatApplyingMessageId = null;
             this._settingsSavePromise = null;
             this._resetTabScrollStage();
             this._stopSpeakerPlayback();
@@ -233,6 +244,9 @@
                 this.state.activeTab = previousTab;
             } else {
                 this.state.activeTab = this._defaultTab();
+            }
+            if (!payload.chat?.enabled && this.state.activeTab === 'chat') {
+                this.state.activeTab = 'summary';
             }
 
             if (!payload.draft_summary && this.state.editMode) {
@@ -322,6 +336,7 @@
                             <div class="workspace-tab-row" role="tablist" aria-label="Workspace sections">
                                 <button type="button" class="workspace-tab active" id="workspace-tab-speakers" data-tab="speakers" role="tab" aria-controls="workspace-panel-speakers" aria-selected="true">Speakers</button>
                                 <button type="button" class="workspace-tab" id="workspace-tab-summary" data-tab="summary" role="tab" aria-controls="workspace-panel-summary" aria-selected="false">Summary</button>
+                                <button type="button" class="workspace-tab" id="workspace-tab-chat" data-tab="chat" role="tab" aria-controls="workspace-panel-chat" aria-selected="false">Chat</button>
                                 <button type="button" class="workspace-tab" id="workspace-tab-settings" data-tab="settings" role="tab" aria-controls="workspace-panel-settings" aria-selected="false">Settings</button>
                                 <button type="button" class="workspace-tab" id="workspace-tab-transcript" data-tab="transcript" role="tab" aria-controls="workspace-panel-transcript" aria-selected="false">Transcript</button>
                             </div>
@@ -359,6 +374,20 @@
                                             <input type="text" id="workspace-refine-input" class="refine-input" placeholder="e.g. tighten the takeaways, make it more technical">
                                             <button type="button" class="btn" id="workspace-refine-cancel">Cancel</button>
                                             <button type="button" class="btn btn-primary" id="workspace-refine-submit">Revise</button>
+                                        </div>
+                                    </div>
+                                </section>
+                                <section class="workspace-panel hidden" id="workspace-panel-chat" data-panel="chat" role="tabpanel" aria-labelledby="workspace-tab-chat" aria-hidden="true">
+                                    <div class="workspace-panel-copy">
+                                        <h3>Meeting Assistant</h3>
+                                        <p id="workspace-chat-copy" class="workspace-copy">Ask grounded questions about this recording, then apply useful changes back to the draft.</p>
+                                    </div>
+                                    <div id="workspace-chat-context" class="summary-meta"></div>
+                                    <div id="workspace-chat-messages" class="workspace-chat-messages"></div>
+                                    <div class="workspace-chat-composer">
+                                        <textarea id="workspace-chat-input" class="workspace-chat-input" placeholder="Ask about the transcript or request a grounded summary change." rows="3"></textarea>
+                                        <div class="workspace-chat-actions">
+                                            <button type="button" class="btn btn-primary" id="workspace-chat-send">Send</button>
                                         </div>
                                     </div>
                                 </section>
@@ -452,6 +481,11 @@
                 refineInput: modal.querySelector('#workspace-refine-input'),
                 refineCancel: modal.querySelector('#workspace-refine-cancel'),
                 refineSubmit: modal.querySelector('#workspace-refine-submit'),
+                chatCopy: modal.querySelector('#workspace-chat-copy'),
+                chatContext: modal.querySelector('#workspace-chat-context'),
+                chatMessages: modal.querySelector('#workspace-chat-messages'),
+                chatInput: modal.querySelector('#workspace-chat-input'),
+                chatSend: modal.querySelector('#workspace-chat-send'),
                 transcript: modal.querySelector('#workspace-transcript'),
                 templateGrid: modal.querySelector('#workspace-template-grid'),
                 promptDisplay: modal.querySelector('#workspace-prompt-display'),
@@ -578,6 +612,39 @@
                 this.state.editBuffer = this.elements.summaryEdit.value;
                 this._autoResizeTextarea(this.elements.summaryEdit);
             });
+            this.elements.chatSend.addEventListener('click', () => {
+                void this._sendChatMessage();
+            });
+            this.elements.chatInput.addEventListener('input', () => {
+                this.state.chatInput = this.elements.chatInput.value;
+                this._autoResizeTextarea(this.elements.chatInput);
+                this._syncChatComposer();
+            });
+            this.elements.chatInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    void this._sendChatMessage();
+                }
+            });
+            this.elements.chatMessages.addEventListener('click', (event) => {
+                const applyButton = event.target.closest('[data-chat-apply-id]');
+                if (applyButton) {
+                    void this._applyChatMessage(applyButton.dataset.chatApplyId);
+                    return;
+                }
+                const citationButton = event.target.closest('[data-chat-citation-message-id][data-chat-citation-index]');
+                if (citationButton) {
+                    this._openChatCitation(
+                        citationButton.dataset.chatCitationMessageId,
+                        Number(citationButton.dataset.chatCitationIndex)
+                    );
+                    return;
+                }
+                const toggleButton = event.target.closest('[data-chat-toggle-id]');
+                if (toggleButton) {
+                    this._toggleChatMessageExpansion(toggleButton.dataset.chatToggleId);
+                }
+            });
 
             this.elements.openObsidianBtn.addEventListener('click', () => this._openInObsidian());
             this.elements.secondaryBtn.addEventListener('click', () => this.close());
@@ -633,6 +700,7 @@
             this._renderTabs();
             this._renderSpeakers();
             this._renderSummary();
+            this._renderChat();
             this._renderTranscript();
             this._renderSettings();
             this._renderFooter();
@@ -737,13 +805,32 @@
         }
 
         _renderTabs() {
+            const chatEnabled = this._workspaceChatEnabled();
+            if (!chatEnabled && this.state.activeTab === 'chat') {
+                this.state.activeTab = 'summary';
+            }
             this.elements.tabButtons.forEach((button) => {
+                const hidden = button.dataset.tab === 'chat' && !chatEnabled;
+                button.classList.toggle('hidden', hidden);
+                button.setAttribute('aria-hidden', hidden ? 'true' : 'false');
+                if (hidden) {
+                    button.classList.remove('active');
+                    button.setAttribute('aria-selected', 'false');
+                    button.tabIndex = -1;
+                    return;
+                }
                 const active = button.dataset.tab === this.state.activeTab;
                 button.classList.toggle('active', active);
                 button.setAttribute('aria-selected', active ? 'true' : 'false');
                 button.tabIndex = active ? 0 : -1;
             });
             this.elements.panels.forEach((panel) => {
+                const hidden = panel.dataset.panel === 'chat' && !chatEnabled;
+                if (hidden) {
+                    panel.classList.add('hidden');
+                    panel.setAttribute('aria-hidden', 'true');
+                    return;
+                }
                 const active = panel.dataset.panel === this.state.activeTab;
                 panel.classList.toggle('hidden', !active);
                 panel.setAttribute('aria-hidden', active ? 'false' : 'true');
@@ -1190,6 +1277,126 @@
             this.elements.refineSubmit.textContent = refineLocked ? 'Revising...' : 'Revise';
         }
 
+        _renderChat() {
+            const workspace = this.state.workspace;
+            const messages = this._chatMessages();
+            const currentSummary = this._currentSummary();
+            const transcriptVersion = workspace?.active_transcript_version || null;
+            const contextParts = [];
+            if (transcriptVersion?.label) {
+                contextParts.push(`Transcript ${this._escapeHtml(transcriptVersion.label)}`);
+            }
+            if (currentSummary) {
+                const summaryLabel = currentSummary.status === 'draft'
+                    ? `v${(workspace?.saved_summaries || []).length + 1} (Draft)`
+                    : this._selectedSummaryVersionLabel();
+                contextParts.push(`Summary ${this._escapeHtml(summaryLabel)}`);
+            } else {
+                contextParts.push('Summary unavailable');
+            }
+            this.elements.chatContext.innerHTML = contextParts.join(' &middot; ');
+
+            if (!workspace?.recording?.has_transcription) {
+                this.elements.chatMessages.innerHTML = '<div class="workspace-empty">Chat becomes available after transcription finishes.</div>';
+                this.elements.chatInput.disabled = true;
+                this.elements.chatSend.disabled = true;
+                this.elements.chatSend.textContent = 'Send';
+                return;
+            }
+
+            if (!messages.length) {
+                this.elements.chatMessages.innerHTML = '<div class="workspace-empty">Ask about the meeting transcript or request a grounded summary improvement.</div>';
+            } else {
+                this.elements.chatMessages.innerHTML = messages.map((message) => this._renderChatMessage(message)).join('');
+            }
+
+            if (document.activeElement !== this.elements.chatInput) {
+                this.elements.chatInput.value = this.state.chatInput;
+            }
+            this._autoResizeTextarea(this.elements.chatInput);
+            this._syncChatComposer();
+        }
+
+        _renderChatMessage(message) {
+            const role = message.role || 'assistant';
+            const roleClass = `workspace-chat-message-${this._escapeHtml(role)}`;
+            const header = role === 'user'
+                ? 'You'
+                : (role === 'system' ? 'Timeline' : 'Assistant');
+            const timestamp = this._formatChatTimestamp(message.created_at);
+            const citations = Array.isArray(message.citations) ? message.citations : [];
+            const retrievalWindows = Array.isArray(message.retrieval_windows) ? message.retrieval_windows : [];
+            const citationButtons = citations
+                .map((citationIndex) => {
+                    const windowData = retrievalWindows[citationIndex];
+                    if (!windowData) {
+                        return '';
+                    }
+                    const label = `${windowData.timestamp || '[--:--]'}${windowData.speaker ? ` · ${windowData.speaker}` : ''}`;
+                    return `<button type="button" class="btn btn-small workspace-chat-citation" data-chat-citation-message-id="${this._escapeHtml(message.id)}" data-chat-citation-index="${this._escapeHtml(String(citationIndex))}">${this._escapeHtml(label)}</button>`;
+                })
+                .join('');
+            const canApply = this._canApplyChatMessage(message);
+            const applyLabel = this.state.chatApplyingMessageId === message.id ? 'Applying...' : 'Apply to Draft';
+            const shouldCollapse = this._shouldCollapseChatMessage(message);
+            const isExpanded = Boolean(this.state.expandedChatMessageIds?.[message.id]);
+            const toggleLabel = isExpanded ? 'Show Less' : 'Show More';
+            const applyButton = canApply
+                ? `<button type="button" class="btn btn-small workspace-chat-apply" data-chat-apply-id="${this._escapeHtml(message.id)}" ${this.state.chatApplyingMessageId === message.id ? 'disabled' : ''}>${applyLabel}</button>`
+                : '';
+            const toggleButton = shouldCollapse
+                ? `<button type="button" class="btn btn-small workspace-chat-toggle" data-chat-toggle-id="${this._escapeHtml(message.id)}">${toggleLabel}</button>`
+                : '';
+
+            if (role === 'system') {
+                return `
+                    <div class="workspace-chat-message workspace-chat-message-system">
+                        <div class="workspace-chat-system-copy">${this._escapeHtml(message.content || '')}</div>
+                    </div>
+                `;
+            }
+
+            return `
+                <article class="workspace-chat-message ${roleClass}">
+                    <div class="workspace-chat-message-head">
+                        <span class="workspace-chat-role">${this._escapeHtml(header)}</span>
+                        <span class="workspace-chat-time">${this._escapeHtml(timestamp)}</span>
+                    </div>
+                    <div class="workspace-chat-body ${shouldCollapse && !isExpanded ? 'workspace-chat-body-collapsed' : ''}">${this._escapeHtml(message.content || '').replace(/\n/g, '<br>')}</div>
+                    ${(citationButtons || applyButton || toggleButton) ? `
+                        <div class="workspace-chat-message-actions">
+                            ${toggleButton}
+                            ${citationButtons}
+                            ${applyButton}
+                        </div>
+                    ` : ''}
+                </article>
+            `;
+        }
+
+        _shouldCollapseChatMessage(message) {
+            const content = typeof message?.content === 'string' ? message.content.trim() : '';
+            if (!content) {
+                return false;
+            }
+            const lineCount = content.split(/\r?\n/).length;
+            return content.length > 700 || lineCount > 10;
+        }
+
+        _toggleChatMessageExpansion(messageId) {
+            if (!messageId) {
+                return;
+            }
+            const expanded = { ...(this.state.expandedChatMessageIds || {}) };
+            if (expanded[messageId]) {
+                delete expanded[messageId];
+            } else {
+                expanded[messageId] = true;
+            }
+            this.state.expandedChatMessageIds = expanded;
+            this._renderChat();
+        }
+
         _renderTranscript() {
             const workspace = this.state.workspace;
             const transcript = this.state.workspace?.transcript || [];
@@ -1399,6 +1606,12 @@
             if (!workspace) {
                 return 'Loading workspace...';
             }
+            if (this.state.chatSending) {
+                return 'Sending chat message...';
+            }
+            if (this.state.chatApplyingMessageId) {
+                return 'Applying assistant change to draft...';
+            }
             if (this.state.isRefiningSummary) {
                 return 'Revising summary...';
             }
@@ -1504,6 +1717,127 @@
                 default:
                     break;
             }
+        }
+
+        async _sendChatMessage() {
+            if (this.state.chatSending || !this.state.sessionId || !this.state.workspace?.recording?.has_transcription) {
+                return;
+            }
+            const content = (this.elements.chatInput.value || '').trim();
+            if (!content) {
+                this.elements.chatInput.focus();
+                return;
+            }
+
+            this.state.chatSending = true;
+            this.state.chatInput = content;
+            this._renderChat();
+            this._renderFooter();
+            try {
+                await this._jsonRequest(`/api/recordings/${this.state.sessionId}/chat/messages`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        content,
+                        transcript_version_id: this.state.selectedTranscriptVersionId,
+                        summary_id: this._currentSummary()?.id || null,
+                    }),
+                }, {
+                    timeoutMs: 45000,
+                    retries: 0,
+                    retryOnNetworkError: false,
+                    networkErrorMessage: 'Workspace network request failed',
+                    httpErrorMessage: 'Failed to send chat message',
+                    logLabel: 'workspace_chat:send',
+                });
+                this.state.chatInput = '';
+                await this._loadWorkspace();
+                this.state.activeTab = 'chat';
+                this._render();
+                this._scrollChatToBottom();
+            } catch (error) {
+                this._showBanner(error?.message || 'Failed to send chat message.', 'error');
+            } finally {
+                this.state.chatSending = false;
+                this._renderChat();
+                this._renderFooter();
+            }
+        }
+
+        async _applyChatMessage(messageId) {
+            if (!messageId || this.state.chatApplyingMessageId || !this._currentSummary()) {
+                return;
+            }
+            const currentSummary = this._currentSummary();
+            if (currentSummary?.content) {
+                this.state.summaryHistory.push(currentSummary.content);
+            }
+            this.state.chatApplyingMessageId = messageId;
+            this._renderChat();
+            this._renderSummary();
+            try {
+                const payload = await this._jsonRequest(`/api/recordings/${this.state.sessionId}/chat/messages/${messageId}/apply`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        transcript_version_id: this.state.selectedTranscriptVersionId,
+                        summary_id: this._currentSummary()?.id || null,
+                    }),
+                }, {
+                    timeoutMs: 45000,
+                    retries: 0,
+                    retryOnNetworkError: false,
+                    networkErrorMessage: 'Workspace network request failed',
+                    httpErrorMessage: 'Failed to apply assistant change',
+                    logLabel: 'workspace_chat:apply',
+                });
+                await this._loadWorkspace();
+                if (payload?.draft_summary?.id) {
+                    this.state.selectedSavedSummaryId = payload.draft_summary.id;
+                } else if (this.state.workspace?.draft_summary?.id) {
+                    this.state.selectedSavedSummaryId = this.state.workspace.draft_summary.id;
+                }
+                if (!payload?.changed && this.state.summaryHistory.length > 0) {
+                    this.state.summaryHistory.pop();
+                }
+                this.state.activeTab = 'chat';
+                this._render();
+                this._showBanner(payload?.changed ? 'Applied to current draft.' : (payload?.reason || 'No draft change applied.'), payload?.changed ? 'success' : 'error');
+                this._scrollChatToBottom();
+            } catch (error) {
+                if (this.state.summaryHistory.length > 0) {
+                    this.state.summaryHistory.pop();
+                }
+                this._showBanner(error?.message || 'Failed to apply assistant change.', 'error');
+            } finally {
+                this.state.chatApplyingMessageId = null;
+                this._renderChat();
+                this._renderSummary();
+            }
+        }
+
+        _openChatCitation(messageId, citationIndex) {
+            const message = this._chatMessages().find((item) => item.id === messageId);
+            if (!message) {
+                return;
+            }
+            const retrievalWindows = Array.isArray(message.retrieval_windows) ? message.retrieval_windows : [];
+            const windowData = retrievalWindows[citationIndex];
+            if (!windowData) {
+                return;
+            }
+            this._focusTranscriptSegments(windowData.transcript_segment_ids || []);
+        }
+
+        _focusTranscriptSegments(segmentIds) {
+            if (!Array.isArray(segmentIds) || segmentIds.length === 0) {
+                return;
+            }
+            this.options.highlightSegmentIds = segmentIds;
+            this.state.activeTab = 'transcript';
+            this._renderTabs();
+            this._renderFooter();
+            this._applySearchFocus();
         }
 
         async _completeSpeakerReview() {
@@ -2002,6 +2336,76 @@
             return workspace.draft_summary || workspace.saved_summaries?.[0] || null;
         }
 
+        _chatMessages() {
+            return Array.isArray(this.state.workspace?.chat?.messages)
+                ? this.state.workspace.chat.messages
+                : [];
+        }
+
+        _workspaceChatEnabled() {
+            return Boolean(this.state.workspace?.chat?.enabled);
+        }
+
+        _selectedSummaryVersionLabel() {
+            const workspace = this.state.workspace;
+            const currentSummary = this._currentSummary();
+            if (!workspace || !currentSummary) {
+                return 'Unavailable';
+            }
+            if (currentSummary.status === 'draft') {
+                return `v${(workspace.saved_summaries || []).length + 1} (Draft)`;
+            }
+            const savedSummaries = Array.isArray(workspace.saved_summaries) ? workspace.saved_summaries : [];
+            const index = savedSummaries.findIndex((summary) => summary.id === currentSummary.id);
+            if (index === -1) {
+                return 'Saved summary';
+            }
+            const total = savedSummaries.length;
+            return index === 0 ? `v${total} (Latest)` : `v${total - index}`;
+        }
+
+        _canApplyChatMessage(message) {
+            return Boolean(
+                message
+                && message.role === 'assistant'
+                && message.apply_ready
+                && this._currentSummary()
+            );
+        }
+
+        _formatChatTimestamp(value) {
+            if (!value) {
+                return '';
+            }
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) {
+                return '';
+            }
+            return date.toLocaleTimeString([], {
+                hour: 'numeric',
+                minute: '2-digit',
+            });
+        }
+
+        _scrollChatToBottom() {
+            window.requestAnimationFrame(() => {
+                const body = this.elements.body;
+                if (!body) {
+                    return;
+                }
+                body.scrollTop = body.scrollHeight;
+            });
+        }
+
+        _syncChatComposer() {
+            if (!this.elements.chatInput || !this.elements.chatSend) {
+                return;
+            }
+            this.elements.chatInput.disabled = this.state.chatSending;
+            this.elements.chatSend.disabled = this.state.chatSending || !this.state.chatInput.trim();
+            this.elements.chatSend.textContent = this.state.chatSending ? 'Sending...' : 'Send';
+        }
+
         _currentSummaryIsOutOfDate() {
             return Boolean(this._currentSummaryOutOfDateReason());
         }
@@ -2274,6 +2678,9 @@
             this.state.workspace = null;
             this.state.banner = null;
             this.state.selectedSavedSummaryId = null;
+            this.state.chatInput = '';
+            this.state.chatSending = false;
+            this.state.chatApplyingMessageId = null;
             this._resetTabScrollStage();
             this._stopSpeakerPlayback();
         }

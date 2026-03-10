@@ -7,9 +7,11 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
 
+from config.settings import get_settings
 from src.summarization.prompts import DEFAULT_TEMPLATE_KEY, normalize_template_key
 
 from .models import (
+    AppSettings,
     Base,
     ImportantMarker,
     Meeting,
@@ -18,6 +20,8 @@ from .models import (
     Summary,
     TranscriptSegment,
     TranscriptVersion,
+    WorkspaceChatMessage,
+    WorkspaceChatThread,
 )
 from src.core.datetime_utils import to_utc_iso
 
@@ -49,6 +53,8 @@ class Repository:
             await self._ensure_summary_template_column(conn)
             await self._ensure_summary_workflow_columns(conn)
             await self._ensure_summary_transcript_version_column(conn)
+            await self._ensure_app_settings_table(conn)
+            await self._ensure_workspace_chat_tables(conn)
             await self._ensure_transcript_search_table(conn)
             if await self._transcript_search_index_is_empty(conn):
                 await self._backfill_transcript_search_index(conn)
@@ -139,6 +145,12 @@ class Repository:
             )
             await db.execute(
                 delete(TranscriptVersion).where(TranscriptVersion.session_id == session_id)
+            )
+            await db.execute(
+                delete(WorkspaceChatMessage).where(WorkspaceChatMessage.session_id == session_id)
+            )
+            await db.execute(
+                delete(WorkspaceChatThread).where(WorkspaceChatThread.session_id == session_id)
             )
             await db.execute(
                 delete(Meeting).where(Meeting.session_id == session_id)
@@ -280,6 +292,47 @@ class Repository:
                     await self._refresh_transcript_search_index_for_session(db, meeting.session_id)
             await db.commit()
         return await self.get_meeting(meeting_id)
+
+    async def get_app_settings(self, create_if_missing: bool = True) -> AppSettings | None:
+        """Return the singleton global app settings row."""
+        async with self._session_factory() as db:
+            result = await db.execute(select(AppSettings).where(AppSettings.id == 1))
+            settings = result.scalar_one_or_none()
+            if settings is not None or not create_if_missing:
+                return settings
+
+            settings = AppSettings(
+                id=1,
+                workspace_chat_enabled=bool(get_settings().workspace_chat_enabled),
+            )
+            db.add(settings)
+            await db.commit()
+            await db.refresh(settings)
+            return settings
+
+    async def update_app_settings(
+        self,
+        *,
+        workspace_chat_enabled: bool | object = UNSET,
+    ) -> AppSettings:
+        """Update global app settings."""
+        async with self._session_factory() as db:
+            result = await db.execute(select(AppSettings).where(AppSettings.id == 1))
+            settings = result.scalar_one_or_none()
+            if settings is None:
+                settings = AppSettings(
+                    id=1,
+                    workspace_chat_enabled=bool(get_settings().workspace_chat_enabled),
+                )
+                db.add(settings)
+                await db.flush()
+
+            if workspace_chat_enabled is not UNSET:
+                settings.workspace_chat_enabled = bool(workspace_chat_enabled)
+
+            await db.commit()
+            await db.refresh(settings)
+            return settings
 
     async def list_transcript_versions(self, session_id: str) -> list[TranscriptVersion]:
         """List transcript versions for a session, newest first."""
@@ -970,6 +1023,239 @@ class Repository:
         )
         return saved
 
+    async def get_workspace_chat_thread(self, session_id: str) -> WorkspaceChatThread | None:
+        """Return the active workspace chat thread for a recording."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(WorkspaceChatThread)
+                .where(
+                    WorkspaceChatThread.session_id == session_id,
+                    WorkspaceChatThread.archived_at.is_(None),
+                )
+                .order_by(WorkspaceChatThread.updated_at.desc(), WorkspaceChatThread.created_at.desc())
+            )
+            return result.scalars().first()
+
+    async def get_or_create_workspace_chat_thread(
+        self,
+        session_id: str,
+        meeting_id: str,
+    ) -> WorkspaceChatThread:
+        """Create a persistent chat thread for a recording if one does not exist."""
+        existing = await self.get_workspace_chat_thread(session_id)
+        if existing:
+            return existing
+
+        async with self._session_factory() as db:
+            thread = WorkspaceChatThread(session_id=session_id, meeting_id=meeting_id)
+            db.add(thread)
+            await db.commit()
+            await db.refresh(thread)
+            return thread
+
+    async def list_workspace_chat_messages(
+        self,
+        thread_id: str,
+        *,
+        limit: int = 200,
+    ) -> list[WorkspaceChatMessage]:
+        """List chat messages for one workspace thread, oldest first."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(WorkspaceChatMessage)
+                .where(WorkspaceChatMessage.thread_id == thread_id)
+                .order_by(WorkspaceChatMessage.created_at.asc())
+                .limit(max(1, min(int(limit), 500)))
+            )
+            return list(result.scalars().all())
+
+    async def get_workspace_chat_message(self, message_id: str) -> WorkspaceChatMessage | None:
+        """Fetch a workspace chat message by ID."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(WorkspaceChatMessage).where(WorkspaceChatMessage.id == message_id)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_latest_workspace_chat_message(
+        self,
+        thread_id: str,
+    ) -> WorkspaceChatMessage | None:
+        """Return the newest message in a thread."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(WorkspaceChatMessage)
+                .where(WorkspaceChatMessage.thread_id == thread_id)
+                .order_by(WorkspaceChatMessage.created_at.desc())
+                .limit(1)
+            )
+            return result.scalars().first()
+
+    async def add_workspace_chat_message(
+        self,
+        *,
+        thread_id: str,
+        session_id: str,
+        meeting_id: str,
+        role: str,
+        message_type: str,
+        content: str,
+        transcript_version_id: str | None = None,
+        summary_id: str | None = None,
+        citations_json: str | None = None,
+        retrieval_windows_json: str | None = None,
+        intent_label: str | None = None,
+        intent_confidence: float | None = None,
+        suggests_summary_change: bool = False,
+        suggested_change_kind: str | None = None,
+        apply_ready: bool = False,
+        applied_summary_id: str | None = None,
+        applied_draft_summary_id: str | None = None,
+        applied_at: datetime | None = None,
+        template_key: str | None = None,
+        metadata_json: str | None = None,
+    ) -> WorkspaceChatMessage:
+        """Append one chat or system event to the workspace thread."""
+        async with self._session_factory() as db:
+            message = WorkspaceChatMessage(
+                thread_id=thread_id,
+                session_id=session_id,
+                meeting_id=meeting_id,
+                transcript_version_id=transcript_version_id,
+                summary_id=summary_id,
+                role=role,
+                message_type=message_type,
+                content=content,
+                citations_json=citations_json,
+                retrieval_windows_json=retrieval_windows_json,
+                intent_label=intent_label,
+                intent_confidence=intent_confidence,
+                suggests_summary_change=bool(suggests_summary_change),
+                suggested_change_kind=suggested_change_kind,
+                apply_ready=bool(apply_ready),
+                applied_summary_id=applied_summary_id,
+                applied_draft_summary_id=applied_draft_summary_id,
+                applied_at=applied_at,
+                template_key=template_key,
+                metadata_json=metadata_json,
+            )
+            db.add(message)
+            await db.execute(
+                update(WorkspaceChatThread)
+                .where(WorkspaceChatThread.id == thread_id)
+                .values(updated_at=datetime.utcnow())
+            )
+            await db.commit()
+            await db.refresh(message)
+            return message
+
+    async def update_workspace_chat_message(
+        self,
+        message_id: str,
+        *,
+        citations_json: str | object = UNSET,
+        retrieval_windows_json: str | object = UNSET,
+        intent_label: str | None | object = UNSET,
+        intent_confidence: float | None | object = UNSET,
+        suggests_summary_change: bool | object = UNSET,
+        suggested_change_kind: str | None | object = UNSET,
+        apply_ready: bool | object = UNSET,
+        applied_summary_id: str | None | object = UNSET,
+        applied_draft_summary_id: str | None | object = UNSET,
+        applied_at: datetime | None | object = UNSET,
+        metadata_json: str | None | object = UNSET,
+    ) -> WorkspaceChatMessage | None:
+        """Update mutable workspace chat message fields."""
+        values: dict[str, Any] = {}
+        if citations_json is not UNSET:
+            values["citations_json"] = citations_json
+        if retrieval_windows_json is not UNSET:
+            values["retrieval_windows_json"] = retrieval_windows_json
+        if intent_label is not UNSET:
+            values["intent_label"] = intent_label
+        if intent_confidence is not UNSET:
+            values["intent_confidence"] = intent_confidence
+        if suggests_summary_change is not UNSET:
+            values["suggests_summary_change"] = bool(suggests_summary_change)
+        if suggested_change_kind is not UNSET:
+            values["suggested_change_kind"] = suggested_change_kind
+        if apply_ready is not UNSET:
+            values["apply_ready"] = bool(apply_ready)
+        if applied_summary_id is not UNSET:
+            values["applied_summary_id"] = applied_summary_id
+        if applied_draft_summary_id is not UNSET:
+            values["applied_draft_summary_id"] = applied_draft_summary_id
+        if applied_at is not UNSET:
+            values["applied_at"] = applied_at
+        if metadata_json is not UNSET:
+            values["metadata_json"] = metadata_json
+        if not values:
+            return await self.get_workspace_chat_message(message_id)
+
+        async with self._session_factory() as db:
+            await db.execute(
+                update(WorkspaceChatMessage)
+                .where(WorkspaceChatMessage.id == message_id)
+                .values(**values)
+            )
+            await db.commit()
+        return await self.get_workspace_chat_message(message_id)
+
+    async def aggregate_workspace_chat_feedback(
+        self,
+        *,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        template_key: str | None = None,
+        applied_only: bool = False,
+        intent_label: str | None = None,
+    ) -> dict[str, Any]:
+        """Return basic aggregate feedback counts for prompt analysis."""
+        async with self._session_factory() as db:
+            query = select(WorkspaceChatMessage).where(
+                WorkspaceChatMessage.role == "assistant",
+                WorkspaceChatMessage.message_type == "assistant_answer",
+            )
+            if date_from is not None:
+                query = query.where(
+                    WorkspaceChatMessage.created_at >= datetime.combine(date_from, time.min)
+                )
+            if date_to is not None:
+                query = query.where(
+                    WorkspaceChatMessage.created_at < datetime.combine(date_to + timedelta(days=1), time.min)
+                )
+            if template_key:
+                query = query.where(WorkspaceChatMessage.template_key == template_key)
+            if applied_only:
+                query = query.where(WorkspaceChatMessage.applied_at.is_not(None))
+            if intent_label:
+                query = query.where(WorkspaceChatMessage.intent_label == intent_label)
+            result = await db.execute(query.order_by(WorkspaceChatMessage.created_at.desc()))
+            messages = list(result.scalars().all())
+
+        by_intent: dict[str, int] = {}
+        by_change_kind: dict[str, int] = {}
+        by_template: dict[str, int] = {}
+        applied_count = 0
+        for message in messages:
+            intent = (message.intent_label or "general_qa").strip() or "general_qa"
+            by_intent[intent] = by_intent.get(intent, 0) + 1
+            change_kind = (message.suggested_change_kind or "none").strip() or "none"
+            by_change_kind[change_kind] = by_change_kind.get(change_kind, 0) + 1
+            template = (message.template_key or "meeting").strip() or "meeting"
+            by_template[template] = by_template.get(template, 0) + 1
+            if message.applied_at is not None:
+                applied_count += 1
+
+        return {
+            "total_messages": len(messages),
+            "applied_count": applied_count,
+            "apply_rate": round((applied_count / len(messages)), 4) if messages else 0.0,
+            "by_intent": by_intent,
+            "by_change_kind": by_change_kind,
+            "by_template": by_template,
+        }
+
     async def get_sessions_list(
         self, limit: int = 50, offset: int = 0
     ) -> list[dict]:
@@ -1325,6 +1611,90 @@ class Repository:
                 WHERE source_type IS NULL OR source_type = ''
                 """
             )
+        )
+
+    async def _ensure_workspace_chat_tables(self, conn) -> None:
+        """Create persistent workspace chat tables for recording-level assistant history."""
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS workspace_chat_threads (
+                    id VARCHAR(36) PRIMARY KEY,
+                    session_id VARCHAR(36) NOT NULL,
+                    meeting_id VARCHAR(36) NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    archived_at DATETIME
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS workspace_chat_messages (
+                    id VARCHAR(36) PRIMARY KEY,
+                    thread_id VARCHAR(36) NOT NULL,
+                    session_id VARCHAR(36) NOT NULL,
+                    meeting_id VARCHAR(36) NOT NULL,
+                    transcript_version_id VARCHAR(36),
+                    summary_id VARCHAR(36),
+                    role VARCHAR(20) NOT NULL,
+                    message_type VARCHAR(32) NOT NULL DEFAULT 'info',
+                    content TEXT NOT NULL,
+                    citations_json TEXT,
+                    retrieval_windows_json TEXT,
+                    intent_label VARCHAR(64),
+                    intent_confidence FLOAT,
+                    suggests_summary_change BOOLEAN DEFAULT 0,
+                    suggested_change_kind VARCHAR(32),
+                    apply_ready BOOLEAN DEFAULT 0,
+                    applied_summary_id VARCHAR(36),
+                    applied_draft_summary_id VARCHAR(36),
+                    applied_at DATETIME,
+                    template_key VARCHAR(100),
+                    metadata_json TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_workspace_chat_threads_session "
+                "ON workspace_chat_threads(session_id, archived_at)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_workspace_chat_messages_thread_created "
+                "ON workspace_chat_messages(thread_id, created_at)"
+            )
+        )
+
+    async def _ensure_app_settings_table(self, conn) -> None:
+        """Create the singleton global app settings table."""
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    id INTEGER PRIMARY KEY,
+                    workspace_chat_enabled BOOLEAN NOT NULL DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                INSERT INTO app_settings (id, workspace_chat_enabled, created_at, updated_at)
+                SELECT 1, :workspace_chat_enabled, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE NOT EXISTS (SELECT 1 FROM app_settings WHERE id = 1)
+                """
+            ),
+            {"workspace_chat_enabled": 1 if get_settings().workspace_chat_enabled else 0},
         )
 
     async def _ensure_transcript_search_table(self, conn) -> None:

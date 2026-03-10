@@ -392,6 +392,220 @@ class SummarizationManager:
         logger.info("[step] refine | done | elapsed=%.1fs", time.monotonic() - _t0)
         return result.content
 
+    async def chat_about_recording(
+        self,
+        *,
+        question: str,
+        current_summary: str | None,
+        evidence_windows: list[dict[str, str | None]],
+        recent_turns: list[dict[str, str]],
+    ) -> dict[str, object]:
+        """Answer a workspace chat turn with transcript-grounded context when available."""
+        if not self._initialized or self._active_backend is None:
+            await self.initialize()
+
+        evidence_lines = []
+        for index, window in enumerate(evidence_windows):
+            evidence_lines.append(
+                "\n".join(
+                    [
+                        f"[{index}] Recording: {window.get('recording_title') or 'Untitled Recording'}",
+                        f"Recorded At: {window.get('recorded_at') or '-'}",
+                        f"Speaker: {window.get('speaker') or '-'}",
+                        f"Timestamp: {window.get('timestamp') or '-'}",
+                        f"Snippet: {window.get('snippet') or ''}",
+                    ]
+                )
+            )
+
+        recent_turn_lines = []
+        for turn in recent_turns[-6:]:
+            role = "User" if str(turn.get("role") or "").lower() == "user" else "Assistant"
+            content = str(turn.get("content") or "").strip()
+            if content:
+                recent_turn_lines.append(f"{role}: {content}")
+
+        system_prompt = (
+            "You are a meeting assistant helping the user interrogate and improve a meeting summary. "
+            "Use transcript evidence windows for factual claims about the meeting. "
+            "Do not invent facts, decisions, owners, dates, or risks that are not grounded in the evidence. "
+            "You may comment on summary wording, structure, omissions, or clarity using the current summary. "
+            "Return JSON only with keys: answer, citations, confidence, intent_label, intent_confidence, "
+            "suggests_summary_change, suggested_change_kind, apply_ready. "
+            "confidence must be high, medium, or low. "
+            "intent_label must be one of add_missing_fact, remove_noise, tighten_wording, clarify_decision, "
+            "clarify_action_item, clarify_owner, surface_risk, correct_inaccuracy, restructure, speaker_identity, "
+            "general_qa, insufficient_evidence. "
+            "suggested_change_kind must be one of add, remove, clarify, restructure, tighten, none. "
+            "citations must be an array of integer evidence window indexes."
+        )
+        user_prompt = (
+            f"User question: {question.strip()}\n\n"
+            f"Current summary:\n{(current_summary or '').strip() or '(none)'}\n\n"
+            f"Recent turns:\n{chr(10).join(recent_turn_lines) or '(none)'}\n\n"
+            f"Evidence windows:\n{chr(10).join(evidence_lines) or '(none)'}\n\n"
+            "Rules:\n"
+            "- If the user is asking about factual meeting content, cite evidence indexes.\n"
+            "- If the user is asking for a style or structure change to the summary, citations may be empty.\n"
+            "- If evidence is insufficient for a factual claim, say so clearly.\n"
+            "- Set apply_ready=true only when your response can be cleanly applied as a summary update.\n"
+            "Return JSON only."
+        )
+
+        result = await self._summarize_with_timeout(
+            transcript="",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            num_ctx=min(int(self._settings.ollama_context_length), 12288),
+        )
+        parsed = self._parse_json_response(result.content)
+        if parsed is None:
+            repair = await self._repair_json_response(
+                result.content,
+                schema_hint=(
+                    "answer, citations, confidence, intent_label, intent_confidence, "
+                    "suggests_summary_change, suggested_change_kind, apply_ready"
+                ),
+            )
+            parsed = self._parse_json_response(repair)
+
+        if parsed is None:
+            return {
+                "answer": "I couldn’t produce a grounded chat answer for that.",
+                "citations": [],
+                "confidence": "low",
+                "intent_label": self._infer_chat_intent(question),
+                "intent_confidence": 0.2,
+                "suggests_summary_change": self._question_suggests_summary_change(question),
+                "suggested_change_kind": self._infer_change_kind(question),
+                "apply_ready": bool(current_summary and self._question_suggests_summary_change(question)),
+            }
+
+        citations: list[int] = []
+        for raw in parsed.get("citations", []):
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= value < len(evidence_windows):
+                citations.append(value)
+
+        intent_label = self._normalize_chat_intent(parsed.get("intent_label"), question)
+        suggested_change_kind = self._normalize_change_kind(
+            parsed.get("suggested_change_kind"),
+            question,
+        )
+        suggests_summary_change = bool(parsed.get("suggests_summary_change"))
+        if not suggests_summary_change:
+            suggests_summary_change = self._question_suggests_summary_change(question)
+        apply_ready = bool(parsed.get("apply_ready")) and suggests_summary_change and bool(current_summary)
+
+        confidence = str(parsed.get("confidence") or "low").strip().lower()
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "low"
+
+        try:
+            intent_confidence = float(parsed.get("intent_confidence") or 0.0)
+        except (TypeError, ValueError):
+            intent_confidence = 0.0
+
+        return {
+            "answer": str(parsed.get("answer") or "").strip() or "I couldn’t answer that clearly.",
+            "citations": citations,
+            "confidence": confidence,
+            "intent_label": intent_label,
+            "intent_confidence": max(0.0, min(intent_confidence, 1.0)),
+            "suggests_summary_change": suggests_summary_change,
+            "suggested_change_kind": suggested_change_kind,
+            "apply_ready": apply_ready,
+        }
+
+    async def apply_chat_turn_to_summary(
+        self,
+        *,
+        instruction: str,
+        current_summary: str,
+        evidence_windows: list[dict[str, str | None]],
+        assistant_answer: str,
+        recent_turns: list[dict[str, str]],
+    ) -> dict[str, object]:
+        """Apply a transcript-grounded chat turn to an existing summary draft."""
+        if not self._initialized or self._active_backend is None:
+            await self.initialize()
+
+        evidence_lines = []
+        for index, window in enumerate(evidence_windows):
+            evidence_lines.append(
+                "\n".join(
+                    [
+                        f"[{index}] Recording: {window.get('recording_title') or 'Untitled Recording'}",
+                        f"Recorded At: {window.get('recorded_at') or '-'}",
+                        f"Speaker: {window.get('speaker') or '-'}",
+                        f"Timestamp: {window.get('timestamp') or '-'}",
+                        f"Snippet: {window.get('snippet') or ''}",
+                    ]
+                )
+            )
+
+        recent_turn_lines = []
+        for turn in recent_turns[-6:]:
+            role = "User" if str(turn.get("role") or "").lower() == "user" else "Assistant"
+            content = str(turn.get("content") or "").strip()
+            if content:
+                recent_turn_lines.append(f"{role}: {content}")
+
+        system_prompt = (
+            "You edit a meeting summary in response to a chat instruction. "
+            "Preserve section headers and unrelated facts unless the requested change requires otherwise. "
+            "Use transcript evidence windows for factual additions or corrections. "
+            "If the request is purely stylistic, you may edit using the current summary. "
+            "If the evidence is insufficient for a factual change, do not invent details. "
+            "Return JSON only with keys: revised_summary, changed, reason. "
+            "changed must be true or false."
+        )
+        user_prompt = (
+            f"Instruction: {instruction.strip()}\n\n"
+            f"Assistant answer to apply:\n{assistant_answer.strip()}\n\n"
+            f"Current summary:\n{current_summary.strip()}\n\n"
+            f"Recent turns:\n{chr(10).join(recent_turn_lines) or '(none)'}\n\n"
+            f"Evidence windows:\n{chr(10).join(evidence_lines) or '(none)'}\n\n"
+            "Return JSON only."
+        )
+
+        result = await self._summarize_with_timeout(
+            transcript="",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            num_ctx=min(int(self._settings.ollama_context_length), 12288),
+        )
+        parsed = self._parse_json_response(result.content)
+        if parsed is None:
+            repair = await self._repair_json_response(
+                result.content,
+                schema_hint="revised_summary, changed, reason",
+            )
+            parsed = self._parse_json_response(repair)
+
+        if parsed is None:
+            fallback_content = str(result.content or "").strip()
+            changed = bool(fallback_content and fallback_content != current_summary.strip())
+            return {
+                "revised_summary": fallback_content or current_summary.strip(),
+                "changed": changed,
+                "reason": None if changed else "The assistant did not return a grounded summary change.",
+            }
+
+        revised_summary = str(parsed.get("revised_summary") or current_summary).strip() or current_summary.strip()
+        changed = bool(parsed.get("changed"))
+        if revised_summary == current_summary.strip():
+            changed = False
+        reason = str(parsed.get("reason") or "").strip() or None
+        return {
+            "revised_summary": revised_summary,
+            "changed": changed,
+            "reason": reason,
+        }
+
     async def answer_question_with_citations(
         self,
         *,
@@ -524,12 +738,16 @@ class SummarizationManager:
 
         return parsed if isinstance(parsed, dict) else None
 
-    async def _repair_json_response(self, invalid_response: str) -> str:
+    async def _repair_json_response(
+        self,
+        invalid_response: str,
+        *,
+        schema_hint: str = "answer, citations, confidence",
+    ) -> str:
         """Ask the backend to rewrite invalid output into the required JSON schema."""
         repair_prompt = (
             "Rewrite the following response as valid JSON only with keys "
-            "answer, citations, confidence. citations must be integer indexes. "
-            "confidence must be high, medium, or low.\n\n"
+            f"{schema_hint}.\n\n"
             f"{invalid_response.strip()}"
         )
         repaired = await self._summarize_with_timeout(
@@ -539,3 +757,90 @@ class SummarizationManager:
             num_ctx=2048,
         )
         return repaired.content
+
+    def _normalize_chat_intent(self, value: object, question: str) -> str:
+        allowed = {
+            "add_missing_fact",
+            "remove_noise",
+            "tighten_wording",
+            "clarify_decision",
+            "clarify_action_item",
+            "clarify_owner",
+            "surface_risk",
+            "correct_inaccuracy",
+            "restructure",
+            "speaker_identity",
+            "general_qa",
+            "insufficient_evidence",
+        }
+        normalized = str(value or "").strip().lower()
+        if normalized in allowed:
+            return normalized
+        return self._infer_chat_intent(question)
+
+    def _normalize_change_kind(self, value: object, question: str) -> str:
+        allowed = {"add", "remove", "clarify", "restructure", "tighten", "none"}
+        normalized = str(value or "").strip().lower()
+        if normalized in allowed:
+            return normalized
+        return self._infer_change_kind(question)
+
+    def _infer_chat_intent(self, question: str) -> str:
+        text = str(question or "").strip().lower()
+        if not text:
+            return "general_qa"
+        if any(term in text for term in ("speaker", "who said", "who owns")):
+            return "speaker_identity"
+        if any(term in text for term in ("missing", "left out", "didn't include", "add ")):
+            return "add_missing_fact"
+        if any(term in text for term in ("remove", "too much", "too verbose", "noise", "filler")):
+            return "remove_noise"
+        if any(term in text for term in ("tighten", "concise", "shorter", "trim")):
+            return "tighten_wording"
+        if "decision" in text:
+            return "clarify_decision"
+        if any(term in text for term in ("action item", "next step", "follow up")):
+            return "clarify_action_item"
+        if any(term in text for term in ("owner", "assigned", "responsible")):
+            return "clarify_owner"
+        if any(term in text for term in ("risk", "concern", "blocker")):
+            return "surface_risk"
+        if any(term in text for term in ("wrong", "incorrect", "inaccurate", "fix")):
+            return "correct_inaccuracy"
+        if any(term in text for term in ("restructure", "format", "section", "organize")):
+            return "restructure"
+        return "general_qa"
+
+    def _infer_change_kind(self, question: str) -> str:
+        text = str(question or "").strip().lower()
+        if any(term in text for term in ("add", "missing", "include", "left out")):
+            return "add"
+        if any(term in text for term in ("remove", "cut", "delete")):
+            return "remove"
+        if any(term in text for term in ("clarify", "explain", "make explicit", "owner", "decision")):
+            return "clarify"
+        if any(term in text for term in ("restructure", "reorganize", "format", "section")):
+            return "restructure"
+        if any(term in text for term in ("tighten", "shorter", "concise", "trim")):
+            return "tighten"
+        return "none"
+
+    def _question_suggests_summary_change(self, question: str) -> bool:
+        text = str(question or "").strip().lower()
+        return any(
+            term in text
+            for term in (
+                "summary",
+                "revise",
+                "rewrite",
+                "tighten",
+                "shorter",
+                "longer",
+                "add",
+                "remove",
+                "include",
+                "clarify",
+                "restructure",
+                "make it",
+            )
+        )

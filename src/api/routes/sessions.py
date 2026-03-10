@@ -1,10 +1,11 @@
 """Session and meeting REST endpoints."""
 
+import json
 import logging
 import os
 import re
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -47,10 +48,27 @@ from src.sessions.manager import SessionManager
 from src.sessions.repository import Repository, UNSET
 from src.summarization.manager import SummarizationManager
 from src.summarization.prompts import DEFAULT_TEMPLATE_KEY, normalize_template_key
+from src.workspace_chat.service import WorkspaceChatService
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+async def _workspace_chat_enabled(repository: Repository) -> bool:
+    settings = await repository.get_app_settings(create_if_missing=True)
+    return bool(settings.workspace_chat_enabled) if settings else False
+
+
+async def _require_workspace_chat_enabled(repository: Repository) -> None:
+    if not await _workspace_chat_enabled(repository):
+        raise HTTPException(status_code=404, detail="Meeting Assistant is disabled")
+
+
+def _serialize_app_settings(settings) -> dict:
+    return {
+        "workspace_chat_enabled": bool(getattr(settings, "workspace_chat_enabled", False)),
+    }
 
 
 def _sanitize_title_for_filename(title: str) -> str:
@@ -206,6 +224,72 @@ def _serialize_summary(summary, meeting=None) -> dict:
     }
 
 
+def _safe_json_loads(value: str | None, default):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+def _summary_version_label(summary, saved_summaries: list) -> str:
+    if not summary:
+        return "No summary"
+    if getattr(summary, "status", None) == "draft":
+        return f"v{len(saved_summaries) + 1} (Draft)"
+    ordered = list(saved_summaries or [])
+    for index, item in enumerate(ordered):
+        if str(getattr(item, "id", "")) != str(getattr(summary, "id", "")):
+            continue
+        total_saved = len(ordered)
+        if index == 0:
+            return f"v{total_saved} (Latest)"
+        return f"v{total_saved - index}"
+    return "Saved summary"
+
+
+def _workspace_chat_context_text(transcript_version, summary, saved_summaries: list) -> str:
+    transcript_label = "Transcript"
+    if transcript_version:
+        transcript_label = f"Transcript v{getattr(transcript_version, 'version_number', 1)}"
+    summary_label = _summary_version_label(summary, saved_summaries)
+    return f"Context updated to {transcript_label} and {summary_label}."
+
+
+def _serialize_chat_message(message, saved_summaries: list) -> dict:
+    metadata = _safe_json_loads(getattr(message, "metadata_json", None), {})
+    citations = _safe_json_loads(getattr(message, "citations_json", None), [])
+    retrieval_windows = _safe_json_loads(getattr(message, "retrieval_windows_json", None), [])
+    return {
+        "id": str(message.id),
+        "thread_id": str(message.thread_id),
+        "role": message.role,
+        "message_type": message.message_type,
+        "content": message.content,
+        "transcript_version_id": (
+            str(message.transcript_version_id) if getattr(message, "transcript_version_id", None) else None
+        ),
+        "summary_id": str(message.summary_id) if getattr(message, "summary_id", None) else None,
+        "citations": citations if isinstance(citations, list) else [],
+        "retrieval_windows": retrieval_windows if isinstance(retrieval_windows, list) else [],
+        "intent_label": message.intent_label,
+        "intent_confidence": message.intent_confidence,
+        "suggests_summary_change": bool(getattr(message, "suggests_summary_change", False)),
+        "suggested_change_kind": message.suggested_change_kind,
+        "apply_ready": bool(getattr(message, "apply_ready", False)),
+        "applied": getattr(message, "applied_at", None) is not None,
+        "applied_summary_id": (
+            str(message.applied_summary_id) if getattr(message, "applied_summary_id", None) else None
+        ),
+        "applied_draft_summary_id": (
+            str(message.applied_draft_summary_id) if getattr(message, "applied_draft_summary_id", None) else None
+        ),
+        "metadata": metadata if isinstance(metadata, dict) else {},
+        "created_at": to_utc_iso(message.created_at),
+    }
+
+
 def _serialize_transcript_segments(segments: list) -> list[dict]:
     inferred_speakers = infer_strict_segment_speakers(segments)
     fallback_map = build_user_facing_speaker_map(
@@ -293,15 +377,17 @@ def _build_speaker_cards(
 def _summary_out_of_date_reason(meeting, summary) -> str | None:
     if not summary:
         return None
+    meeting_speaker_review_required = bool(getattr(meeting, "speaker_review_required", False))
+    meeting_speaker_review_completed_at = getattr(meeting, "speaker_review_completed_at", None)
     if (
         meeting
-        and meeting.speaker_review_required
-        and meeting.speaker_review_completed_at
-        and summary.created_at < meeting.speaker_review_completed_at
+        and meeting_speaker_review_required
+        and meeting_speaker_review_completed_at
+        and summary.created_at < meeting_speaker_review_completed_at
     ):
         return "Speaker assignments changed after this summary was generated."
     meeting_template_key = normalize_template_key(
-        (meeting.template_key or DEFAULT_TEMPLATE_KEY) if meeting else DEFAULT_TEMPLATE_KEY
+        (getattr(meeting, "template_key", None) or DEFAULT_TEMPLATE_KEY) if meeting else DEFAULT_TEMPLATE_KEY
     )
     if summary.template_key:
         if normalize_template_key(summary.template_key) != meeting_template_key:
@@ -309,7 +395,7 @@ def _summary_out_of_date_reason(meeting, summary) -> str | None:
     elif meeting_template_key != DEFAULT_TEMPLATE_KEY:
         return "Summary settings changed to a different template."
     summary_prompt = _normalize_optional_text(summary.custom_prompt)
-    meeting_prompt = _normalize_optional_text(meeting.custom_prompt if meeting else None)
+    meeting_prompt = _normalize_optional_text(getattr(meeting, "custom_prompt", None) if meeting else None)
     if (summary_prompt or meeting_prompt) and summary_prompt != meeting_prompt:
         return "Summary prompt settings changed after this summary was generated."
     return None
@@ -710,6 +796,73 @@ class UpdateSpeakerAssignmentsRequest(BaseModel):
     transcript_version_id: Optional[str] = None
 
 
+class WorkspaceChatMessageRequest(BaseModel):
+    content: str
+    transcript_version_id: Optional[str] = None
+    summary_id: Optional[str] = None
+
+
+class WorkspaceChatApplyRequest(BaseModel):
+    transcript_version_id: Optional[str] = None
+    summary_id: Optional[str] = None
+
+
+class UpdateAppSettingsRequest(BaseModel):
+    workspace_chat_enabled: Optional[bool] = None
+
+
+async def _resolve_workspace_chat_context(
+    session_id: str,
+    *,
+    transcript_version_id: str | None,
+    summary_id: str | None,
+    repository: Repository,
+):
+    """Resolve the workspace entities needed for one chat/apply request."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    meeting = await repository.get_primary_meeting(session_id, create_if_missing=True)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    await repository.ensure_transcript_versions(session_id)
+    if transcript_version_id:
+        transcript_version = await repository.get_transcript_version_for_session(
+            session_id,
+            transcript_version_id,
+        )
+        if transcript_version is None:
+            raise HTTPException(status_code=404, detail="Transcript version not found")
+    else:
+        transcript_version = await repository.get_latest_transcript_version(session_id)
+
+    if transcript_version is None or not session.has_transcription:
+        raise HTTPException(status_code=400, detail="Chat requires a completed transcript")
+
+    saved_summaries = await repository.get_summaries(
+        meeting.id,
+        status="saved",
+        transcript_version_id=transcript_version.id,
+    )
+    draft_summary = await repository.get_draft_summary(
+        meeting.id,
+        transcript_version_id=transcript_version.id,
+    )
+    available_summaries = [draft_summary, *saved_summaries]
+    selected_summary = draft_summary or (saved_summaries[0] if saved_summaries else None)
+    if summary_id:
+        selected_summary = next(
+            (summary for summary in available_summaries if summary and str(summary.id) == str(summary_id)),
+            None,
+        )
+        if selected_summary is None:
+            raise HTTPException(status_code=404, detail="Summary not found for this transcript version")
+
+    return session, meeting, transcript_version, selected_summary, saved_summaries, draft_summary
+
+
 @router.get("/recordings", response_model=List[RecordingResponse])
 async def list_recordings(
     limit: int = 50,
@@ -858,6 +1011,17 @@ async def get_recording_workspace(
         session_id,
         active_version.id if active_version else None,
     ) if session.has_transcription else []
+    chat_service = WorkspaceChatService(repository)
+    chat_thread = None
+    chat_messages = []
+    app_settings = await repository.get_app_settings(create_if_missing=True)
+    chat_enabled = bool(app_settings.workspace_chat_enabled) if app_settings else False
+    if chat_enabled and active_version and session.has_transcription:
+        chat_thread, raw_chat_messages = await chat_service.list_messages(session.id, meeting.id)
+        chat_messages = [
+            _serialize_chat_message(message, saved_summaries)
+            for message in raw_chat_messages
+        ]
 
     return {
         "recording": {
@@ -938,6 +1102,20 @@ async def get_recording_workspace(
             if latest_saved_summary
             else None,
         },
+        "chat": {
+            "enabled": chat_enabled,
+            "thread_id": str(chat_thread.id) if chat_thread else None,
+            "messages": chat_messages,
+            "active_context": {
+                "transcript_version_id": str(active_version.id) if active_version else None,
+                "summary_id": (
+                    str((draft_summary or latest_saved_summary).id)
+                    if (draft_summary or latest_saved_summary)
+                    else None
+                ),
+                "draft_summary_id": str(draft_summary.id) if draft_summary else None,
+            },
+        },
         "state": _build_recording_workspace_state(
             session,
             active_version,
@@ -947,6 +1125,167 @@ async def get_recording_workspace(
             latest_saved_summary,
         ),
     }
+
+
+@router.get("/settings")
+async def get_app_settings(
+    repository: Repository = Depends(get_repository),
+):
+    """Return global app settings."""
+    settings = await repository.get_app_settings(create_if_missing=True)
+    return {"settings": _serialize_app_settings(settings)}
+
+
+@router.patch("/settings")
+async def update_app_settings(
+    request: UpdateAppSettingsRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Persist global app settings."""
+    provided_fields = getattr(request, "model_fields_set", set())
+    if not provided_fields:
+        raise HTTPException(status_code=422, detail="No settings were provided")
+
+    settings = await repository.update_app_settings(
+        workspace_chat_enabled=(
+            request.workspace_chat_enabled
+            if "workspace_chat_enabled" in provided_fields
+            else UNSET
+        ),
+    )
+    return {"settings": _serialize_app_settings(settings)}
+
+
+@router.post("/recordings/{session_id}/chat/messages")
+async def post_workspace_chat_message(
+    session_id: str,
+    request: WorkspaceChatMessageRequest,
+    repository: Repository = Depends(get_repository),
+    summarization_manager: SummarizationManager = Depends(get_summarization_manager),
+):
+    """Append a grounded chat turn for the current recording workspace."""
+    await _require_workspace_chat_enabled(repository)
+    content = (request.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="Message cannot be empty")
+
+    (
+        session,
+        meeting,
+        transcript_version,
+        selected_summary,
+        saved_summaries,
+        _draft_summary,
+    ) = await _resolve_workspace_chat_context(
+        session_id,
+        transcript_version_id=request.transcript_version_id,
+        summary_id=request.summary_id,
+        repository=repository,
+    )
+    chat_service = WorkspaceChatService(repository, summarization_manager)
+    user_message, assistant_message = await chat_service.send_message(
+        session=session,
+        meeting=meeting,
+        transcript_version=transcript_version,
+        current_summary=selected_summary,
+        content=content,
+        context_event_text=_workspace_chat_context_text(
+            transcript_version,
+            selected_summary,
+            saved_summaries,
+        ),
+    )
+    return {
+        "user_message": _serialize_chat_message(user_message, saved_summaries),
+        "assistant_message": _serialize_chat_message(assistant_message, saved_summaries),
+    }
+
+
+@router.post("/recordings/{session_id}/chat/messages/{message_id}/apply")
+async def apply_workspace_chat_message(
+    session_id: str,
+    message_id: str,
+    request: WorkspaceChatApplyRequest,
+    repository: Repository = Depends(get_repository),
+    summarization_manager: SummarizationManager = Depends(get_summarization_manager),
+):
+    """Apply an assistant chat turn to the current summary draft context."""
+    await _require_workspace_chat_enabled(repository)
+    (
+        session,
+        meeting,
+        transcript_version,
+        selected_summary,
+        saved_summaries,
+        _draft_summary,
+    ) = await _resolve_workspace_chat_context(
+        session_id,
+        transcript_version_id=request.transcript_version_id,
+        summary_id=request.summary_id,
+        repository=repository,
+    )
+    if selected_summary is None:
+        raise HTTPException(status_code=404, detail="No summary available to apply chat changes")
+
+    assistant_message = await repository.get_workspace_chat_message(message_id)
+    if assistant_message is None or assistant_message.role != "assistant":
+        raise HTTPException(status_code=404, detail="Assistant chat message not found")
+    if str(assistant_message.session_id) != str(session_id):
+        raise HTTPException(status_code=404, detail="Assistant chat message not found for this recording")
+    if assistant_message.message_type != "assistant_answer":
+        raise HTTPException(status_code=400, detail="Only assistant answer turns can be applied")
+    if not assistant_message.apply_ready:
+        raise HTTPException(status_code=400, detail="This assistant turn is not ready to apply")
+
+    chat_service = WorkspaceChatService(repository, summarization_manager)
+    result = await chat_service.apply_message_to_summary(
+        session=session,
+        meeting=meeting,
+        transcript_version=transcript_version,
+        assistant_message=assistant_message,
+        base_summary=selected_summary,
+        context_event_text=_workspace_chat_context_text(
+            transcript_version,
+            selected_summary,
+            saved_summaries,
+        ),
+    )
+    return {
+        "changed": result["changed"],
+        "reason": result["reason"],
+        "draft_summary": (
+            _serialize_summary(result["draft_summary"], transcript_version)
+            if result["draft_summary"] is not None
+            else None
+        ),
+        "system_message": (
+            _serialize_chat_message(result["system_message"], saved_summaries)
+            if result.get("system_message") is not None
+            else None
+        ),
+    }
+
+
+@router.get("/ai-feedback/summary-patterns")
+async def get_workspace_chat_feedback_patterns(
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    template_key: Optional[str] = None,
+    applied_only: bool = False,
+    intent_label: Optional[str] = None,
+    repository: Repository = Depends(get_repository),
+):
+    """Return aggregate prompt-improvement counts from workspace assistant history."""
+    await _require_workspace_chat_enabled(repository)
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=422, detail="date_from must be on or before date_to")
+    return await repository.aggregate_workspace_chat_feedback(
+        date_from=date_from,
+        date_to=date_to,
+        template_key=normalize_template_key(template_key) if template_key else None,
+        applied_only=applied_only,
+        intent_label=intent_label,
+    )
 
 
 @router.patch("/recordings/{session_id}/settings")

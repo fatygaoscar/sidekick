@@ -168,4 +168,11 @@ def create_app() -> FastAPI:
             return _serve_html(recordings_path, request)
         return {"message": "Page not found"}, 404
 
+    @app.get("/settings")
+    async def settings_page(request: Request):
+        settings_path = web_dir / "settings.html"
+        if settings_path.exists():
+            return _serve_html(settings_path, request)
+        return {"message": "Page not found"}, 404
+
     return app

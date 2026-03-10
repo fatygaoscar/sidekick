@@ -44,6 +44,7 @@ from src.summarization.prompts import (
     normalize_template_key,
 )
 from src.transcription.manager import TranscriptionManager
+from src.workspace_chat.service import WorkspaceChatService
 
 
 router = APIRouter()
@@ -1696,6 +1697,16 @@ async def save_summary_draft(
         summary_id,
         saved_to_obsidian_at=datetime.utcnow(),
         obsidian_relative_path=params["relative_path"] if settings.obsidian_vault_path else None,
+    )
+    chat_service = WorkspaceChatService(repository)
+    await chat_service.append_system_event(
+        session_id=session.id,
+        meeting_id=meeting.id,
+        transcript_version_id=draft.transcript_version_id,
+        summary_id=saved_summary.id,
+        template_key=draft.template_key,
+        message_type="save_event",
+        content="Saved the current draft to Obsidian.",
     )
 
     return {

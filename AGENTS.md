@@ -76,7 +76,8 @@ sidekick/
 │
 ├── data/                             # Runtime data (gitignored)
 │   ├── sidekick.db                   # SQLite database
-│   ├── sidekick.log                  # App logs (cleared on each start)
+│   ├── sidekick.log                  # App logs (appended across starts; each launch gets a banner)
+│   ├── startup.log                   # Launcher lifecycle log for start/restart/tunnel events
 │   ├── sidekick.pid                  # Managed process PID
 │   └── audio/
 │       ├── {session_id}.webm         # Finalized recordings
@@ -258,6 +259,9 @@ Default template: `meeting`
 
 - `get_settings()` is LRU-cached — restart required to pick up `.env` changes.
 - Remote use through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The app injects fallback `wss://` and `https://*.trycloudflare.com` transport targets into rendered HTML, and `web/js/network.js` rewrites browser `/api/...` plus recording-media URLs onto that fallback when present.
+- `start.sh` now appends to `data/sidekick.log` and writes launcher events to `data/startup.log`; check both before assuming a restart failed inside FastAPI.
+- `start.sh` uses a 10-second stability window before reporting success. If a restart looks flaky, inspect `data/startup.log` for whether it failed health, bind, or stability checks.
+- Starts triggered from the agent tool context can behave differently from a normal interactive shell because background child processes may be reaped by the execution environment. If a restart only fails when launched by the agent, verify it from the user's own shell before debugging the app itself.
 - **PWA planning doc:** The current PWA/app-store transition plan lives in `docs/pwa-plan.md` and is mirrored in the Obsidian vault under `Sidekick/pwa-plan.md`.
 - **Frontend cache busting:** If `web/index.html` or `web/recordings.html` changes do not appear after a refresh, bump the `?v=` query string on the referenced `/static/css/*.css` or `/static/js/*.js` asset in the HTML entrypoint you touched. This is the first thing to check when the browser appears stuck on old UI code.
 - **qwen3 vs qwen3.5 thinking**: `qwen3:8b` properly respects `OLLAMA_THINK=false`. `qwen3.5` models always generate 3000-5000 think tokens per call regardless of this setting — not suppressable at the application level.

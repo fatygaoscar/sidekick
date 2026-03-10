@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import AsyncMock
+from unittest.mock import patch
 import wave
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -129,6 +130,47 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             )
 
         self.assertIsNone(normalized_custom_prompt)
+
+    def test_get_app_settings_returns_serialized_flags(self):
+        repository = SimpleNamespace(
+            get_app_settings=AsyncMock(
+                return_value=SimpleNamespace(workspace_chat_enabled=True)
+            )
+        )
+
+        payload = asyncio.run(
+            self.sessions.get_app_settings(repository=repository)
+        )
+
+        self.assertEqual(payload, {"settings": {"workspace_chat_enabled": True}})
+
+    def test_update_app_settings_requires_at_least_one_field(self):
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(
+                self.sessions.update_app_settings(
+                    self.sessions.UpdateAppSettingsRequest(),
+                    repository=SimpleNamespace(update_app_settings=AsyncMock()),
+                )
+            )
+
+        self.assertEqual(ctx.exception.status_code, 422)
+
+    def test_update_app_settings_persists_feature_flags(self):
+        repository = SimpleNamespace(
+            update_app_settings=AsyncMock(
+                return_value=SimpleNamespace(workspace_chat_enabled=True)
+            )
+        )
+
+        payload = asyncio.run(
+            self.sessions.update_app_settings(
+                self.sessions.UpdateAppSettingsRequest(workspace_chat_enabled=True),
+                repository=repository,
+            )
+        )
+
+        self.assertEqual(payload, {"settings": {"workspace_chat_enabled": True}})
+        repository.update_app_settings.assert_awaited_once()
 
     def test_workspace_state_allows_summary_when_speaker_review_is_pending(self):
         session = SimpleNamespace(has_transcription=True)
@@ -276,6 +318,198 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             ctx.exception.detail,
             "Draft changed while AI revision was running. Reload the workspace and try again.",
         )
+
+    def test_post_workspace_chat_message_returns_serialized_turns(self):
+        session = SimpleNamespace(id="session-1", has_transcription=True)
+        meeting = SimpleNamespace(id="meeting-1", template_key="meeting")
+        transcript_version = SimpleNamespace(id="tv-1", version_number=1, template_key="meeting")
+        selected_summary = SimpleNamespace(
+            id="sum-1",
+            content="Current summary",
+            status="saved",
+            source_type="generated",
+            meeting_id="meeting-1",
+            transcript_version_id="tv-1",
+            backend="ollama",
+            model="qwen3:8b",
+            created_at=datetime.now(UTC),
+            processing_duration_seconds=12.0,
+            template="General Meeting",
+            template_key="meeting",
+            custom_prompt=None,
+            saved_to_obsidian_at=None,
+            obsidian_relative_path=None,
+        )
+        user_message = SimpleNamespace(
+            id="chat-user-1",
+            thread_id="thread-1",
+            role="user",
+            message_type="user_question",
+            content="What did Greg decide?",
+            transcript_version_id="tv-1",
+            summary_id="sum-1",
+            citations_json=None,
+            retrieval_windows_json=None,
+            intent_label=None,
+            intent_confidence=None,
+            suggests_summary_change=False,
+            suggested_change_kind=None,
+            apply_ready=False,
+            applied_summary_id=None,
+            applied_draft_summary_id=None,
+            metadata_json=None,
+            created_at=datetime.now(UTC),
+        )
+        assistant_message = SimpleNamespace(
+            id="chat-assistant-1",
+            thread_id="thread-1",
+            role="assistant",
+            message_type="assistant_answer",
+            content="Greg decided to keep the rollout phased.",
+            transcript_version_id="tv-1",
+            summary_id="sum-1",
+            citations_json="[0]",
+            retrieval_windows_json='[{"timestamp":"[01:02]","speaker":"Greg","transcript_segment_ids":["seg-1"]}]',
+            intent_label="clarify_decision",
+            intent_confidence=0.91,
+            suggests_summary_change=True,
+            suggested_change_kind="clarify",
+            apply_ready=True,
+            applied_summary_id=None,
+            applied_draft_summary_id=None,
+            metadata_json='{"confidence":"high"}',
+            created_at=datetime.now(UTC),
+        )
+        repository = SimpleNamespace(
+            get_app_settings=AsyncMock(return_value=SimpleNamespace(workspace_chat_enabled=True)),
+            get_session=AsyncMock(return_value=session),
+            get_primary_meeting=AsyncMock(return_value=meeting),
+            ensure_transcript_versions=AsyncMock(return_value=[transcript_version]),
+            get_latest_transcript_version=AsyncMock(return_value=transcript_version),
+            get_summaries=AsyncMock(return_value=[selected_summary]),
+            get_draft_summary=AsyncMock(return_value=None),
+        )
+        fake_service = SimpleNamespace(
+            send_message=AsyncMock(return_value=(user_message, assistant_message))
+        )
+
+        with patch.object(self.sessions, "WorkspaceChatService", return_value=fake_service):
+            payload = asyncio.run(
+                self.sessions.post_workspace_chat_message(
+                    "session-1",
+                    self.sessions.WorkspaceChatMessageRequest(content="What did Greg decide?"),
+                    repository=repository,
+                    summarization_manager=SimpleNamespace(),
+                )
+            )
+
+        self.assertEqual(payload["user_message"]["id"], "chat-user-1")
+        self.assertEqual(payload["assistant_message"]["citations"], [0])
+        self.assertTrue(payload["assistant_message"]["apply_ready"])
+        fake_service.send_message.assert_awaited_once()
+
+    def test_apply_workspace_chat_message_returns_serialized_draft(self):
+        session = SimpleNamespace(id="session-1", has_transcription=True)
+        meeting = SimpleNamespace(id="meeting-1", template_key="meeting")
+        transcript_version = SimpleNamespace(id="tv-1", version_number=1, template_key="meeting")
+        selected_summary = SimpleNamespace(
+            id="sum-1",
+            content="Current summary",
+            status="saved",
+            source_type="generated",
+            meeting_id="meeting-1",
+            transcript_version_id="tv-1",
+            backend="ollama",
+            model="qwen3:8b",
+            created_at=datetime.now(UTC),
+            processing_duration_seconds=12.0,
+            template="General Meeting",
+            template_key="meeting",
+            custom_prompt=None,
+            saved_to_obsidian_at=None,
+            obsidian_relative_path=None,
+        )
+        draft_summary = SimpleNamespace(
+            id="draft-1",
+            content="Updated summary",
+            status="draft",
+            source_type="chat_applied",
+            meeting_id="meeting-1",
+            transcript_version_id="tv-1",
+            backend="ollama",
+            model="qwen3:8b",
+            created_at=datetime.now(UTC),
+            processing_duration_seconds=12.0,
+            template="General Meeting",
+            template_key="meeting",
+            custom_prompt=None,
+            saved_to_obsidian_at=None,
+            obsidian_relative_path=None,
+        )
+        system_message = SimpleNamespace(
+            id="system-1",
+            thread_id="thread-1",
+            role="system",
+            message_type="apply_event",
+            content="Applied the assistant suggestion to the current draft.",
+            transcript_version_id="tv-1",
+            summary_id="draft-1",
+            citations_json=None,
+            retrieval_windows_json=None,
+            intent_label=None,
+            intent_confidence=None,
+            suggests_summary_change=False,
+            suggested_change_kind=None,
+            apply_ready=False,
+            applied_summary_id="sum-1",
+            applied_draft_summary_id="draft-1",
+            metadata_json=None,
+            created_at=datetime.now(UTC),
+        )
+        assistant_message = SimpleNamespace(
+            id="chat-assistant-1",
+            session_id="session-1",
+            role="assistant",
+            message_type="assistant_answer",
+            apply_ready=True,
+            content="Add Greg's decision.",
+        )
+        repository = SimpleNamespace(
+            get_app_settings=AsyncMock(return_value=SimpleNamespace(workspace_chat_enabled=True)),
+            get_session=AsyncMock(return_value=session),
+            get_primary_meeting=AsyncMock(return_value=meeting),
+            ensure_transcript_versions=AsyncMock(return_value=[transcript_version]),
+            get_latest_transcript_version=AsyncMock(return_value=transcript_version),
+            get_summaries=AsyncMock(return_value=[selected_summary]),
+            get_draft_summary=AsyncMock(return_value=None),
+            get_workspace_chat_message=AsyncMock(return_value=assistant_message),
+        )
+        fake_service = SimpleNamespace(
+            apply_message_to_summary=AsyncMock(
+                return_value={
+                    "draft_summary": draft_summary,
+                    "changed": True,
+                    "reason": None,
+                    "system_message": system_message,
+                }
+            )
+        )
+
+        with patch.object(self.sessions, "WorkspaceChatService", return_value=fake_service):
+            payload = asyncio.run(
+                self.sessions.apply_workspace_chat_message(
+                    "session-1",
+                    "chat-assistant-1",
+                    self.sessions.WorkspaceChatApplyRequest(summary_id="sum-1"),
+                    repository=repository,
+                    summarization_manager=SimpleNamespace(),
+                )
+            )
+
+        self.assertTrue(payload["changed"])
+        self.assertEqual(payload["draft_summary"]["id"], "draft-1")
+        self.assertEqual(payload["system_message"]["message_type"], "apply_event")
+        fake_service.apply_message_to_summary.assert_awaited_once()
 
     def test_workspace_transcript_humanizes_unresolved_speakers(self):
         segments = [

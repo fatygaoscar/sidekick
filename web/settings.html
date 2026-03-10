@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Settings - Sidekick</title>
+    <link rel="icon" type="image/x-icon" href="/static/sidekick-logo-simple.ico">
+    <link rel="stylesheet" href="/static/css/styles.css?v=20260310e">
+</head>
+<body>
+    <div class="app">
+        <header class="page-header">
+            <a href="/" class="back-link">&larr; Back</a>
+            <h1 class="page-title">Settings</h1>
+        </header>
+
+        <main class="settings-page">
+            <section class="settings-shell" aria-labelledby="settings-section-title">
+                <div class="workspace-panel-copy">
+                    <h3 id="settings-section-title">Global App Preferences</h3>
+                    <p class="workspace-copy">Experimental features may change or be removed.</p>
+                </div>
+
+                <div id="settings-banner" class="workspace-banner hidden" aria-live="polite"></div>
+
+                <section class="settings-section" aria-labelledby="settings-experimental-title">
+                    <div class="settings-section-head">
+                        <h4 id="settings-experimental-title">Experimental Features</h4>
+                    </div>
+                    <div id="settings-loading" class="recordings-search-status">
+                        <div class="processing-spinner"></div>
+                        <div>
+                            <div class="recordings-search-status-title">Loading settings</div>
+                            <div class="recordings-search-status-copy">Fetching current global preferences.</div>
+                        </div>
+                    </div>
+                    <div id="settings-list" class="settings-list hidden"></div>
+                </section>
+            </section>
+        </main>
+    </div>
+
+    <script>window.__SIDEKICK_API_BASE = "__SIDEKICK_API_BASE__";</script>
+    <script src="/static/js/network.js?v=20260309i"></script>
+    <script src="/static/js/settings.js?v=20260310a"></script>
+</body>
+</html>

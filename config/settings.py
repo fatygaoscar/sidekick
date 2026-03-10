@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     summarization_backend: SummarizationBackend = SummarizationBackend.OLLAMA
     summarization_timeout_seconds: int = 600
     summarization_meeting_structured_enabled: bool = False
+    workspace_chat_enabled: bool = False
 
     # Ollama settings
     ollama_host: str = "http://localhost:11434"

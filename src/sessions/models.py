@@ -197,6 +197,73 @@ class Summary(Base):
     )
 
 
+class WorkspaceChatThread(Base):
+    """Persistent per-recording chat thread for the workspace assistant."""
+
+    __tablename__ = "workspace_chat_threads"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), nullable=False)
+    meeting_id: Mapped[str] = mapped_column(String(36), ForeignKey("meetings.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class WorkspaceChatMessage(Base):
+    """Audit trail for workspace assistant turns and system events."""
+
+    __tablename__ = "workspace_chat_messages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    thread_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspace_chat_threads.id"), nullable=False
+    )
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), nullable=False)
+    meeting_id: Mapped[str] = mapped_column(String(36), ForeignKey("meetings.id"), nullable=False)
+    transcript_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("transcript_versions.id"), nullable=True
+    )
+    summary_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("summaries.id"), nullable=True
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    message_type: Mapped[str] = mapped_column(String(32), nullable=False, default="info")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    citations_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    retrieval_windows_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    intent_label: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    intent_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    suggests_summary_change: Mapped[bool] = mapped_column(Boolean, default=False)
+    suggested_change_kind: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    apply_ready: Mapped[bool] = mapped_column(Boolean, default=False)
+    applied_summary_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("summaries.id"), nullable=True
+    )
+    applied_draft_summary_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("summaries.id"), nullable=True
+    )
+    applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    template_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class AppSettings(Base):
+    """Singleton global app settings persisted in the database."""
+
+    __tablename__ = "app_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    workspace_chat_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class StructuredItem(Base):
     """Structured items extracted from meetings (actions, decisions, risks, etc.)."""
 
