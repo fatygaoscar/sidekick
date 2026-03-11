@@ -40,6 +40,8 @@ Browser-based meeting recorder that captures audio, builds transcript versions, 
 ./status.sh               # Check status + public URL
 ./stop.sh                 # Stop server
 ./debug.sh                # Unified debug helper
+./use-main.sh             # Switch to main and restart
+./use-dev.sh              # Switch to dev and restart
 ```
 
 Then open `http://localhost:8000`.
@@ -115,16 +117,19 @@ Browser
 
 ```
 sidekick/
-├── start.sh / restart.sh / stop.sh / status.sh / debug.sh
+├── start.sh / restart.sh / stop.sh / status.sh / debug.sh / use-main.sh / use-dev.sh
 ├── .env                              # All runtime config
 ├── config/
 │   └── settings.py                   # Pydantic settings, LRU-cached via get_settings()
 │
 ├── src/
 │   ├── main.py                       # FastAPI app entry point
+│   ├── api/app.py                    # FastAPI app factory + HTML/static serving
 │   ├── api/
 │   │   └── routes/
 │   │       ├── export.py             # Async export jobs, diarization, transcription pipeline
+│   │       ├── modes.py              # Session mode/submode APIs
+│   │       ├── search.py             # Cross-recording transcript-grounded search APIs
 │   │       ├── sessions.py           # Recording CRUD, workspace/settings APIs, completion/recovery
 │   │       └── websocket.py          # Live audio stream; preview only
 │   ├── audio/
@@ -165,9 +170,10 @@ sidekick/
 │   ├── css/styles.css
 │   └── js/
 │       ├── app.js                    # Recording + upload + completion/recovery flow
-│       ├── recordings.js             # History list, search, optimistic delete, workspace launch
 │       ├── audio.js                  # AudioCapture, visualizer
 │       ├── network.js                # Shared API/media URL resolver + fetch wrapper
+│       ├── recording-workspace.js    # Shared workspace controller used from record + history
+│       ├── recordings.js             # History list, search, optimistic delete, workspace launch
 │       ├── settings.js               # Global settings page controller
 │       └── websocket.js              # WebSocket client, 25s keepalive ping
 │
@@ -180,11 +186,16 @@ sidekick/
 │       └── chunks/{session_id}/{client_id}/  # Retained chunk backups
 │
 └── scripts/
-    ├── monitor_sidekick.sh           # Bash: inline WSL live monitor (GPU, Whisper, Ollama, job, pipeline)
-    ├── monitor_ollama.ps1            # PowerShell: Ollama + GPU live watcher
-    ├── monitor_export_job.sh         # Bash: poll export job progress
+    ├── backup_to_dropbox.sh          # Backup helper for runtime data
+    ├── benchmark_chunking_ab.py      # Compare chunking strategies on real transcripts
     ├── benchmark_ollama_models.py    # Benchmark raw model latency on transcript chunks
-    └── benchmark_summary.py         # Benchmark full two-pass cohesive summary pipeline
+    ├── benchmark_summary.py          # Benchmark full two-pass cohesive summary pipeline
+    ├── benchmark_utils.py            # Shared benchmark helpers
+    ├── monitor_export_job.sh         # Bash: poll export job progress
+    ├── monitor_ollama.ps1            # PowerShell: Ollama + GPU live watcher
+    ├── monitor_sidekick.sh           # Bash: inline WSL live monitor (GPU, Whisper, Ollama, job, pipeline)
+    ├── re_export.py                  # Re-export an existing recording summary
+    └── switch_sidekick_branch.sh     # Stop/stash/switch/restart helper for main/dev workflows
 ```
 
 ## Configuration
@@ -351,10 +362,20 @@ Recommended approach:
 | `GET /recordings` | History UI |
 | `GET /settings` | Global settings page |
 | `GET /api/templates` | List templates with prompts |
+| `GET /api/modes` | List available modes/submodes |
+| `GET /api/modes/current` | Read current mode/submode |
+| `POST /api/modes/change` | Change mode/submode |
 | `GET /api/recordings` | List recordings |
 | `GET /api/recordings/{id}` | Recording detail |
 | `GET /api/recordings/{id}/workspace` | Unified workspace payload |
+| `POST /api/search/recordings` | Cross-recording transcript-grounded search |
 | `PATCH /api/recordings/{id}/settings` | Rename/update active transcript-version settings |
+| `POST /api/recordings/{id}/summary-job` | Generate a draft summary for the active transcript version |
+| `GET /api/summary-jobs/{job_id}` | Poll summary job |
+| `POST /api/recordings/{id}/summary-draft` | Create or reuse editable draft summary |
+| `PATCH /api/summary-drafts/{summary_id}` | Save manual draft edits |
+| `POST /api/summary-drafts/{summary_id}/revise` | AI-revise a draft summary |
+| `POST /api/summary-drafts/{summary_id}/save` | Save draft as a versioned summary and export note |
 | `POST /api/recordings/{id}/export-obsidian-job` | Start async export |
 | `GET /api/export-jobs/{job_id}` | Poll export job |
 | `POST /api/recordings/{id}/transcription-job` | Transcription only (no summary) |
@@ -366,6 +387,11 @@ Recommended approach:
 | `POST /api/recordings/{id}/audio/finalize` | Finalize chunks (needs `X-Client-ID`) |
 | `GET /api/recordings/{id}/speakers` | Get speaker cards and clip metadata for workspace review |
 | `PUT /api/recordings/{id}/speakers` | Save manual speaker name mapping |
+| `GET /api/recordings/{id}/speaker-clips` | Get cached speaker clip metadata |
+| `GET /api/recordings/{id}/speaker-clips/{speaker_key}/audio` | Stream cached speaker clip audio |
+| `POST /api/recordings/{id}/speaker-mapping` | Legacy/manual speaker mapping helper |
+| `POST /api/recordings/{id}/chat/messages` | Experimental grounded workspace chat |
+| `POST /api/recordings/{id}/chat/messages/{message_id}/apply` | Apply assistant suggestion into the workspace |
 | `GET /api/settings` | Read global feature flags |
 | `PATCH /api/settings` | Update global feature flags |
 | `WS /ws/audio` | Live audio stream |
@@ -412,6 +438,7 @@ Recommended approach:
 - **`OLLAMA_NUM_GPU=99`**: required to prevent Ollama's conservative auto-estimate from offloading layers to CPU.
 - `SUMMARIZATION_TIMEOUT_SECONDS` is only a per-call timeout. It does not control model unloading.
 - Summarization calls now send Ollama `keep_alive=0`, so the summarization model unloads immediately after each call finishes.
+- Transcription jobs now free CUDA memory after completion or error so repeated WhisperX runs do not pin VRAM.
 - `SUMMARIZATION_MEETING_STRUCTURED_ENABLED` is deprecated. Normal meeting summaries use the cohesive two-pass summarizer.
 - When that flag is `false`, or if the structured path fails/returns no evidence, Sidekick falls back to the existing cohesive two-pass summarizer.
 - Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist; it does not require attendees.

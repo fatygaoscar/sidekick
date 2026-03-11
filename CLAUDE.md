@@ -11,6 +11,8 @@
 ./stop.sh
 ./status.sh
 ./debug.sh
+./use-main.sh
+./use-dev.sh
 ```
 
 Manual run:
@@ -24,8 +26,9 @@ python -m src.main
 
 1. Record audio in browser
 2. Stop recording
-3. Open the workspace, name recording, review speakers if needed, choose template, edit prompt
-4. Generate or revise summary, then save/export to Obsidian markdown with real-time progress
+3. Open the shared workspace, name recording, review speakers if needed, choose template, edit prompt
+4. Generate a draft summary, revise manually or with AI, then save/export versioned Obsidian markdown with real-time progress
+5. Optionally search across past recordings from History with transcript-grounded answer-first results
 
 ## Architecture: Two Transcription Pipelines
 
@@ -46,6 +49,13 @@ python -m src.main
 - Uses saved session audio from `data/audio/`
 - Async job-based with real-time progress
 - Rebuilds transcript segments at export time from authoritative audio
+
+### 2.5) Workspace + Search Surface
+
+- Shared workspace controller: `web/js/recording-workspace.js`
+- History/search UI: `web/js/recordings.js`
+- Search API: `src/api/routes/search.py`
+- Workspace supports transcript-version-specific settings, summary drafts, AI revise, manual edit, undo, save/export, and experimental chat when enabled
 
 ### 3) Summarization
 
@@ -149,23 +159,42 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 
 - DB: `data/sidekick.db` (Schema: `summaries` table has `processing_duration_seconds`)
 - Audio: `data/audio/{session_id}.webm`
-- Chunk storage: `data/audio/chunks/{session_id}/{client_id}/` (temporary)
+- Chunk storage: `data/audio/chunks/{session_id}/{client_id}/` (retained until recording deletion; used for recovery)
 - Sidekick logs/PID: `data/sidekick.log`, `data/sidekick.pid`
 
 ## Important Endpoints
 
 - `GET /` main UI
 - `GET /recordings` history UI
+- `GET /settings` global settings UI
 - `GET /api/templates` list templates with prompts
+- `GET /api/modes` available modes/submodes
+- `GET /api/modes/current` current mode/submode
+- `POST /api/modes/change` change mode/submode
 - `GET /api/recordings` list recordings
 - `GET /api/recordings/{id}` recording details (includes latest `summary` + metadata)
+- `GET /api/recordings/{id}/workspace` unified workspace payload
+- `POST /api/search/recordings` transcript-grounded cross-recording search
 - `PATCH /api/recordings/{id}/title` rename a recording
+- `PATCH /api/recordings/{id}/settings` update transcript-version-scoped workspace settings
 - `POST /api/recordings/{id}/summaries` save refined/manual summary to DB and vault
+- `POST /api/recordings/{id}/summary-job` start async draft summary generation
+- `GET /api/summary-jobs/{job_id}` poll summary job status
+- `POST /api/recordings/{id}/summary-draft` create/reuse editable draft
+- `PATCH /api/summary-drafts/{summary_id}` save manual draft edits
+- `POST /api/summary-drafts/{summary_id}/revise` AI revise a draft
+- `POST /api/summary-drafts/{summary_id}/save` save draft as a versioned summary
 - `POST /api/summaries/refine` general purpose AI refinement endpoint
 - `PUT /api/recordings/{id}/audio` upload full audio blob
 - `PUT /api/recordings/{id}/audio/chunks/{index}` chunked upload (requires `X-Client-ID`)
 - `POST /api/recordings/{id}/audio/finalize` finalize chunks (requires `X-Client-ID`)
+- `POST /api/recordings/{id}/complete` authoritative stop/completion
+- `POST /api/recordings/{id}/recover-audio` recover finalized audio from retained chunks
 - `GET /api/recordings/{id}/audio` stream/download audio
+- `GET /api/recordings/{id}/speaker-clips` get cached speaker clips
+- `GET /api/recordings/{id}/speaker-clips/{speaker_key}/audio` stream a cached speaker clip
+- `POST /api/recordings/{id}/chat/messages` experimental grounded workspace chat
+- `POST /api/recordings/{id}/chat/messages/{message_id}/apply` apply assistant suggestion into the workspace
 - `POST /api/recordings/{id}/export-obsidian-job` async export with progress
 - `POST /api/recordings/{id}/transcription-job` transcription only (no summary)
 - `GET /api/export-jobs/{job_id}` poll export job status
@@ -182,3 +211,4 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - `get_settings()` is LRU-cached — always `./restart.sh` after `.env` changes.
 - Remote use through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The rendered HTML injects fallback `wss://` and `https://*.trycloudflare.com` transport targets, and `web/js/network.js` rewrites browser `/api/...` plus recording-media URLs onto that fallback when present.
 - Frontend cache busting: if a change to `web/index.html`, `web/recordings.html`, `web/css/styles.css`, or `web/js/*.js` does not show up after refresh, bump the `?v=` asset query string in the relevant HTML entrypoint first. Treat stale browser assets as a common cause before assuming the CSS/JS change failed.
+- Completed and failed WhisperX transcription jobs now free CUDA memory after cleanup so repeated runs do not pin VRAM.

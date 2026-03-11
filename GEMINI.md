@@ -7,6 +7,7 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **Obsidian First:** All summarization logic must prioritize scannability in Obsidian. Use bullet points (`-`), nested indentation (2 spaces), and blank lines between sections. **No long paragraphs.**
 - **Local AI Integrity:** Ensure all AI operations remain compatible with the current local stack (WhisperX for transcription/alignment/diarization, Ollama for summarization).
 - **Meeting Summaries:** `General Meeting` uses the legacy cohesive two-pass summarizer with a relevance-first prompt contract. Prefer selective, useful notes over exhaustive coverage.
+- **Workspace Controller:** Keep `web/js/recording-workspace.js` as the shared workspace implementation for both post-recording review and History `Open`.
 - **Mobile optimization:** Maintain the iPhone-friendly UI. Do not re-introduce internal scrollbars or oversized text. Modals must expand and scroll as a single unit.
 - **Workspace Motion Split:** Keep the current device-specific tab-row behavior: polished hide/reveal on desktop, simpler direct tracking on mobile for touch-scroll stability.
 - **Main Recording Guardrails:** Keep the main page non-scrollable, resistant to pull-to-refresh, and guarded against navigation while recording.
@@ -26,6 +27,7 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **Frontend Cache Busting:** If browser UI changes appear not to apply, bump the `?v=` query string for the referenced `/static/css` or `/static/js` asset in `web/index.html` or `web/recordings.html` before assuming the edit failed.
 - **Port Checking:** Use the `connect()` method for checking port availability to avoid WSL false positives.
 - **Ollama Optimization:** Maintain `OLLAMA_CONTEXT_LENGTH=32768` for `qwen3:8b`. Use dynamic `num_ctx` calculation based on input size to speed up Ollama initialization for short meetings. `OLLAMA_NUM_GPU=99` forces all layers to GPU — never remove this.
+- **WhisperX Cleanup:** Preserve the post-job CUDA cleanup path so completed or failed transcription jobs release VRAM promptly.
 - **Ollama Think:** Always pass `think: false` to Ollama for summarization. Note: this only works for `qwen3` models. `qwen3.5` models always think regardless.
 - **temperature=0.3:** Always pass `temperature: 0.3` to Ollama for consistent, factual summarization output.
 - **Speaker Labels:** Manual speaker mapping in the workspace is the source of truth. User-facing transcript and summary output must never expose raw `SPEAKER_XX`; use fallback labels like `Attendee`, `Attendee A`, `Attendee B` when unresolved.
@@ -34,6 +36,9 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **Card Actions:** Recording cards use `Open` and `Delete`, with `Open` as the primary action.
 - **History Delete Flow:** Keep delete optimistic on the History page. Remove the card locally first, then refresh in the background; do not require a blocking full-list reload just to keep delete usable.
 - **Custom Domain Transport:** When running through `go.sidekickgo.app`, keep browser `/api/...` requests and recording-media URLs on the shared fallback-aware transport layer in `web/js/network.js`; do not bypass it with raw same-origin URLs.
+- **Search Contract:** Preserve transcript-grounded answer-first search via `POST /api/search/recordings`; grouped recording results and follow-up suggestions are part of the product behavior.
+- **Draft Summary Flow:** Preserve the async draft summary path (`/summary-job`, `/summary-draft`, `/summary-drafts/*`) used by the shared workspace.
+- **Experimental Chat Gate:** Workspace chat remains hidden by default and must stay behind the DB-backed `workspace_chat_enabled` flag.
 - **Database Migrations:** Use the `init_db` pattern in `src/sessions/repository.py` to automatically backfill schema changes for existing users.
 
 ## Project Context
@@ -42,3 +47,4 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **Audio Loading:** Uses PyAV (bundled FFmpeg) for diarization. No system `ffmpeg` install is required.
 - **Markdown Core:** All Obsidian note assembly must go through `src/core/markdown_utils.py`.
 - **Prompt Audit Export:** Obsidian exports include the exact Pass 1 / Pass 2 prompt blocks and a collapsed `Transcript` section.
+- **API Surface:** FastAPI routers currently live in `src/api/routes/{sessions,modes,search,export,websocket}.py`.

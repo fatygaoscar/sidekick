@@ -30,9 +30,12 @@ sidekick/
 │
 ├── src/
 │   ├── main.py                       # FastAPI app entry point
+│   ├── api/app.py                    # FastAPI app factory + HTML/static serving
 │   ├── api/
 │   │   └── routes/
 │   │       ├── export.py             # Async export jobs, diarization, transcription pipeline
+│   │       ├── modes.py              # Session mode/submode APIs
+│   │       ├── search.py             # Cross-recording transcript-grounded search
 │   │       ├── sessions.py           # Recording CRUD, workspace/settings APIs, completion/recovery
 │   │       └── websocket.py          # Live audio stream; preview-only transport
 │   ├── audio/
@@ -72,6 +75,7 @@ sidekick/
 │   ├── css/styles.css                # Mobile-optimized (13px text, no double scroll)
 │   └── js/
 │       ├── app.js                    # Recording + upload flow + completion/recovery handoff
+│       ├── recording-workspace.js    # Shared workspace controller used from review + history
 │       ├── recordings.js             # History cards, search, optimistic delete, workspace launch
 │       ├── audio.js                  # AudioCapture + DAW-style spectrum analyzer
 │       ├── network.js                # Shared API/media URL resolver + fetch wrapper for go.sidekickgo.app
@@ -87,10 +91,15 @@ sidekick/
 │       └── chunks/{session_id}/{client_id}/  # Retained chunk backups for recovery
 │
 └── scripts/
+    ├── backup_to_dropbox.sh          # Bash: copy runtime data into private backup storage
+    ├── benchmark_chunking_ab.py      # Python: compare chunking strategies on transcripts
     ├── monitor_ollama.ps1            # PowerShell: Ollama + GPU live watcher
     ├── monitor_export_job.sh         # Bash: poll export job progress
+    ├── monitor_sidekick.sh           # Bash: inline WSL live monitor (GPU, Whisper, Ollama, jobs)
     ├── benchmark_ollama_models.py    # Benchmark raw model latency on transcript chunks
     ├── benchmark_summary.py          # Benchmark full two-pass cohesive summary pipeline
+    ├── benchmark_utils.py            # Shared benchmark helpers
+    ├── re_export.py                  # Re-export or rewrite Obsidian output for an existing recording
     └── switch_sidekick_branch.sh     # Stop/stash/switch/restart helper for main/dev workflows
 ```
 
@@ -204,6 +213,10 @@ Default template: `meeting`
 |----------|-------------|
 | `GET /` | Main recording UI |
 | `GET /recordings` | History UI |
+| `GET /settings` | Global settings UI |
+| `GET /api/modes` | List available modes/submodes from `config/modes.yaml` |
+| `GET /api/modes/current` | Read current mode/submode |
+| `POST /api/modes/change` | Change mode/submode |
 | `GET /api/templates` | List templates with prompts |
 | `GET /api/recordings` | List recordings |
 | `GET /api/recordings/{id}` | Recording detail (includes latest `summary` + metadata) |
@@ -211,6 +224,12 @@ Default template: `meeting`
 | `POST /api/search/recordings` | Cross-recording transcript search with grouped grounded results |
 | `POST /api/recordings/{id}/summaries` | Save refined/manual summary to DB and vault |
 | `PATCH /api/recordings/{id}/settings` | Update recording title and transcript-version-specific prompt settings |
+| `POST /api/recordings/{id}/summary-job` | Start async draft-summary generation for the active transcript version |
+| `GET /api/summary-jobs/{job_id}` | Poll summary job |
+| `POST /api/recordings/{id}/summary-draft` | Create or reuse a draft summary |
+| `PATCH /api/summary-drafts/{summary_id}` | Persist manual draft edits |
+| `POST /api/summary-drafts/{summary_id}/revise` | AI-revise a draft summary |
+| `POST /api/summary-drafts/{summary_id}/save` | Save draft as a versioned summary and write Obsidian note |
 | `POST /api/summaries/refine` | General AI refinement endpoint |
 | `POST /api/recordings/{id}/export-obsidian-job` | Start async export |
 | `GET /api/export-jobs/{job_id}` | Poll export job |
@@ -222,8 +241,13 @@ Default template: `meeting`
 | `POST /api/recordings/{id}/recover-audio` | Recover finalized audio from retained chunks |
 | `GET /api/recordings/{id}/speakers` | Get speaker cards and clip metadata for workspace review |
 | `PUT /api/recordings/{id}/speakers` | Save manual speaker name mapping |
+| `GET /api/recordings/{id}/speaker-clips` | Get cached speaker clip metadata |
+| `GET /api/recordings/{id}/speaker-clips/{speaker_key}/audio` | Stream cached speaker clip audio |
+| `POST /api/recordings/{id}/speaker-mapping` | Legacy/manual speaker mapping helper |
 | `GET /api/settings` | Read global app settings / feature flags |
 | `PATCH /api/settings` | Update global app settings / feature flags |
+| `POST /api/recordings/{id}/chat/messages` | Experimental grounded workspace chat |
+| `POST /api/recordings/{id}/chat/messages/{message_id}/apply` | Apply assistant suggestion into the workspace |
 | `WS /ws/audio` | Live audio stream |
 
 ## Speaker Diarization
@@ -258,6 +282,7 @@ Default template: `meeting`
   - Dynamic Context: `num_ctx` calculated from input size.
   - Single-Pass Early Exit: short transcripts (< 3000 chars) skip polish pass.
 - **Meeting Summaries**: `General Meeting` uses the cohesive two-pass summarizer with a relevance-first prompt contract. The structured pipeline in `src/summarization/pipeline/` is deprecated and not part of normal summary routing.
+- **Transcription cleanup**: Completed/failed transcription jobs free CUDA memory so repeated WhisperX runs do not retain VRAM.
 - **Audio Quality**: Captures and saves at 48kHz; downsampled to 16kHz for AI.
 - **Live analyzer**: The recording page uses a higher-resolution log-spaced spectrum analyzer, not the saved file waveform.
 - **Unified View & Refinement:** functionally identical review/view modals.
