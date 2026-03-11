@@ -344,6 +344,42 @@ OpenAI uses the same cohesive summarizer and prompt flow, but differs at the tra
 
 The architecture does not split into a second OpenAI-specific summary pipeline.
 
+## Structured Outputs and Schema Gating
+
+Schema gating is not the default strategy for the final markdown summary path.
+
+Current state:
+
+- pass 1 draft generation is prose/markdown-oriented
+- pass 2 editorial polish is prose/markdown-oriented
+- chunked extraction uses schema-shaped prompts plus validation/repair
+- chat/search/apply assistant paths are the best fit for provider-enforced JSON output
+
+Why schema gating helps:
+
+- it improves output-shape reliability for structured tasks
+- it reduces malformed JSON and repair retries
+- it makes failures easier to diagnose as schema/transport/refusal problems instead of free-form output drift
+
+Where it is most useful:
+
+- chunk extraction records in `chunked_extraction`
+- workspace chat JSON payloads
+- apply-to-summary JSON payloads
+- transcript-grounded search answer JSON payloads
+
+Why it is not the default for final summaries:
+
+- the primary product output is human-readable markdown, not a fixed record schema
+- the pass 1 / pass 2 architecture depends on editorial compression, selective emphasis, and formatting judgment
+- schema gating can enforce shape, but not factual correctness or good prose
+- forcing the final summary into a rigid schema would require a different architecture, likely a structured intermediate representation rendered to markdown afterward
+
+Operational guidance:
+
+- use schema gating for structured subflows when the backend supports it
+- keep the final cohesive markdown summary path shared across providers unless the product intentionally moves to a JSON-first rendering architecture
+
 ### Live provider switching
 
 The selected summarization provider is persisted in global app settings and can be changed from the settings page.
