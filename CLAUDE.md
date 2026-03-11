@@ -204,6 +204,7 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 ## Notes
 
 - Obsidian Sync is near-real-time, not truly instant.
+- `docs/summarization-architecture.md` is the source of truth for the active summarization architecture. If summarization flow, prompt assembly, transcript shaping, draft/save lifecycle, or backend/runtime assumptions change, update that doc in the same change.
 - PWA planning doc: `docs/pwa-plan.md` in-repo, mirrored to the Obsidian vault under `Sidekick/pwa-plan.md`.
 - `./stop.sh` can stop managed or detected unmanaged Sidekick processes.
 - First startup with large-v3 Whisper model may be slow (downloads ~3GB).

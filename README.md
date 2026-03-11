@@ -282,6 +282,7 @@ Detailed runtime guidance:
 
 - [Ollama Runtime Modes](/home/ozzfa/sidekick/docs/OLLAMA_RUNTIME_MODES.md)
 - [Host Ollama Setup](/home/ozzfa/sidekick/docs/host_ollama_setup.md)
+- [Summarization Architecture](/home/ozzfa/sidekick/docs/summarization-architecture.md)
 
 ### Speaker Diarization Setup
 

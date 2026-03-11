@@ -24,6 +24,7 @@ This document contains foundational mandates for the Gemini CLI agent working on
 ## Technical Guardrails
 
 - **Git Safety:** Always check `.gitignore` before `git add .`. Never commit `data/` or `.env`.
+- **Summarization Architecture Doc:** `docs/summarization-architecture.md` is the source of truth for the active summarization design. Any change to summarization flow, prompt assembly, transcript shaping, draft/save lifecycle, or backend/runtime assumptions must update that document in the same change.
 - **Frontend Cache Busting:** If browser UI changes appear not to apply, bump the `?v=` query string for the referenced `/static/css` or `/static/js` asset in `web/index.html` or `web/recordings.html` before assuming the edit failed.
 - **Port Checking:** Use the `connect()` method for checking port availability to avoid WSL false positives.
 - **Ollama Optimization:** Maintain `OLLAMA_CONTEXT_LENGTH=32768` for `qwen3:8b`. Use dynamic `num_ctx` calculation based on input size to speed up Ollama initialization for short meetings. `OLLAMA_NUM_GPU=99` forces all layers to GPU — never remove this.

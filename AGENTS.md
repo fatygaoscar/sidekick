@@ -301,6 +301,7 @@ Default template: `meeting`
 ## Gotchas
 
 - `get_settings()` is LRU-cached — restart required to pick up `.env` changes.
+- **Summarization architecture doc:** `docs/summarization-architecture.md` is the engineer-facing source of truth for the active summarization flow. Any change to summarization architecture, prompt assembly, transcript shaping, summary persistence, or default runtime path must update that doc in the same change.
 - Remote use through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The app injects fallback `wss://` and `https://*.trycloudflare.com` transport targets into rendered HTML, and `web/js/network.js` rewrites browser `/api/...` plus recording-media URLs onto that fallback when present.
 - `data/sidekick.log` is cleared on each start. If something dies between restarts, capture the log before starting again.
 - Starts triggered from the agent tool context can behave differently from a normal interactive shell because background child processes may be reaped by the execution environment. If a restart only fails when launched by the agent, verify it from the user's own shell before debugging the app itself.
