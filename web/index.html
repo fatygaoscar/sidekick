@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Sidekick</title>
     <link rel="icon" type="image/x-icon" href="/static/sidekick-logo-simple.ico">
-    <link rel="stylesheet" href="/static/css/styles.css?v=20260310e">
+    <link rel="stylesheet" href="/static/css/styles.css?v=20260311e">
 </head>
 <body class="main-page">
     <div class="app">
@@ -13,6 +13,7 @@
         <header class="header">
             <h1 class="logo">Sidekick</h1>
             <div class="header-right">
+                <a href="/recordings" class="header-link">History</a>
                 <a href="/settings" class="header-link header-icon-link" aria-label="Settings" title="Settings">
                     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                         <path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.48 7.48 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.49-.42h-3.84a.5.5 0 0 0-.49.42l-.36 2.54c-.58.22-1.13.53-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.7 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.82 14.52a.5.5 0 0 0-.12.64l1.92 3.32a.5.5 0 0 0 .6.22l2.39-.96c.5.41 1.05.72 1.63.94l.36 2.54a.5.5 0 0 0 .49.42h3.84a.5.5 0 0 0 .49-.42l.36-2.54c.58-.22 1.13-.53 1.63-.94l2.39.96a.5.5 0 0 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7Z" fill="currentColor"/>
@@ -30,15 +31,14 @@
             </div>
 
             <div class="record-support">
-                <button id="upload-btn" class="btn main-upload-btn" type="button">
-                    Upload File
-                </button>
-                <input
-                    id="upload-input"
-                    class="sr-only"
-                    type="file"
-                    accept=".mp3,.wav,.m4a,.mp4,audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/mp4,audio/x-m4a,video/mp4"
-                >
+                <section class="capture-mode-panel" aria-labelledby="capture-mode-heading">
+                    <div class="capture-mode-header">
+                        <h2 id="capture-mode-heading" class="capture-mode-title">Mic Mode</h2>
+                    </div>
+                    <div id="capture-mode-list" class="capture-mode-list"></div>
+                    <p id="capture-mode-note" class="capture-mode-note"></p>
+                    <div id="capture-mode-diagnostics" class="capture-mode-diagnostics" aria-live="polite"></div>
+                </section>
                 <div class="visualizer-section">
                     <canvas id="audio-canvas" width="400" height="60"></canvas>
                 </div>
@@ -51,12 +51,6 @@
                 </div>
             </div>
         </main>
-
-        <div class="mobile-history-bar">
-            <div class="mobile-page-links">
-                <a href="/recordings" class="btn mobile-history-link">History</a>
-            </div>
-        </div>
 
         <!-- Status Bar -->
         <footer class="status-bar">
@@ -72,9 +66,9 @@
     <script>window.__SIDEKICK_WS_URL = "__SIDEKICK_WS_URL__";</script>
     <script>window.__SIDEKICK_API_BASE = "__SIDEKICK_API_BASE__";</script>
     <script src="/static/js/network.js?v=20260309i"></script>
-    <script src="/static/js/audio.js?v=20260310k"></script>
+    <script src="/static/js/audio.js?v=20260311a"></script>
     <script src="/static/js/websocket.js?v=20260310h"></script>
     <script src="/static/js/recording-workspace.js?v=20260310i"></script>
-    <script src="/static/js/app.js?v=20260310k"></script>
+    <script src="/static/js/app.js?v=20260311d"></script>
 </body>
 </html>

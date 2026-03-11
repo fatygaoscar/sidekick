@@ -17,7 +17,7 @@ from .anthropic_backend import AnthropicBackend
 from .base import BackendProbeResult, SummarizationBackend, SummarizationResult
 from .ollama_backend import OllamaBackend
 from .openai_backend import OpenAIBackend
-from .prompts import get_template_content, normalize_template_key
+from .prompts import DEFAULT_TEMPLATE_KEY, get_template_content, normalize_template_key
 from .cohesive import generate_cohesive_summary
 from .pipeline.pipeline import run_pipeline
 from .pipeline.types import PipelineResult
@@ -27,6 +27,369 @@ from .pipeline.types import PipelineResult
 PipelineProgressCallback = Callable[[str, str, float], Awaitable[None] | None]
 _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
 _JSON_OBJECT_RE = re.compile(r"(\{.*\})", re.DOTALL)
+_TRANSCRIPT_LINE_RE = re.compile(r"^\[(?P<timestamp>\d{2}:\d{2})\]\s+(?P<body>.+)$")
+_TRANSCRIPT_BODY_RE = re.compile(r"^(?:(?P<speaker>[^:]+):\s+)?(?P<text>.+)$")
+_REVISION_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "but",
+    "by",
+    "for",
+    "from",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "make",
+    "more",
+    "not",
+    "of",
+    "on",
+    "or",
+    "our",
+    "please",
+    "revise",
+    "rewrite",
+    "should",
+    "so",
+    "summary",
+    "that",
+    "the",
+    "this",
+    "to",
+    "up",
+    "use",
+    "we",
+    "with",
+}
+_STYLE_ONLY_HINTS = (
+    "brief",
+    "bullets",
+    "clearer",
+    "concise",
+    "executive",
+    "format",
+    "grammar",
+    "polish",
+    "professional",
+    "reorganize",
+    "rephrase",
+    "rewrite",
+    "shorter",
+    "simpler",
+    "structure",
+    "tighten",
+    "tone",
+)
+_EVIDENCE_NEEDED_HINTS = (
+    "add",
+    "blocker",
+    "decision",
+    "detail",
+    "example",
+    "expand",
+    "include",
+    "missed",
+    "missing",
+    "owner",
+    "risk",
+    "technical",
+    "timeline",
+    "what did",
+    "what happened",
+    "what they said",
+    "why",
+)
+
+
+def classify_revision_route(instruction: str) -> str:
+    """Classify whether a revise request needs transcript evidence."""
+    normalized = " ".join((instruction or "").strip().lower().split())
+    if not normalized:
+        return "style_only"
+    if any(hint in normalized for hint in _EVIDENCE_NEEDED_HINTS):
+        return "evidence_needed"
+    if any(hint in normalized for hint in _STYLE_ONLY_HINTS):
+        return "style_only"
+    return "uncertain"
+
+
+def _extract_significant_terms(text: str, *, min_length: int = 4, limit: int = 24) -> list[str]:
+    counts: dict[str, int] = {}
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]{1,}", text or ""):
+        normalized = token.lower()
+        if len(normalized) < min_length or normalized in _REVISION_STOPWORDS:
+            continue
+        counts[normalized] = counts.get(normalized, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))
+    return [token for token, _count in ranked[:limit]]
+
+
+def _extract_summary_headings(summary: str) -> list[str]:
+    headings: list[str] = []
+    for line in (summary or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("##"):
+            headings.append(stripped.lstrip("#").strip())
+    return headings
+
+
+def select_revision_evidence_windows(
+    *,
+    transcript: str,
+    instruction: str,
+    current_summary: str,
+    route: str,
+    max_windows: int = 8,
+) -> list[dict[str, object]]:
+    """Select compact transcript windows for revise requests."""
+    transcript_text = (transcript or "").strip()
+    if not transcript_text:
+        return []
+    if route == "style_only":
+        return []
+
+    if len(transcript_text) <= 12000:
+        return [
+            {
+                "timestamp": None,
+                "speaker": None,
+                "snippet": transcript_text,
+                "line_count": len([line for line in transcript_text.splitlines() if line.strip()]),
+            }
+        ]
+
+    lines = [line.strip() for line in transcript_text.splitlines() if line.strip()]
+    if not lines:
+        return []
+
+    query_terms = _extract_significant_terms(instruction, min_length=3, limit=18)
+    heading_terms = _extract_significant_terms(" ".join(_extract_summary_headings(current_summary)), limit=10)
+    if not query_terms and not heading_terms:
+        return []
+
+    window_size = 10 if len(lines) > 60 else 8
+    overlap = 4 if len(lines) > 30 else 3
+    step = max(1, window_size - overlap)
+    candidates: list[dict[str, object]] = []
+    seen_texts: set[str] = set()
+
+    for start in range(0, len(lines), step):
+        chunk = lines[start:start + window_size]
+        if not chunk:
+            continue
+        chunk_text = "\n".join(chunk)
+        normalized_chunk = chunk_text.lower()
+        query_hits = sum(normalized_chunk.count(term) for term in query_terms)
+        heading_hits = sum(normalized_chunk.count(term) for term in heading_terms)
+        if query_hits == 0 and heading_hits == 0:
+            continue
+
+        first_match = _TRANSCRIPT_LINE_RE.match(chunk[0])
+        body_match = _TRANSCRIPT_BODY_RE.match(first_match.group("body")) if first_match else None
+        snippet = chunk_text
+        if snippet in seen_texts:
+            continue
+        seen_texts.add(snippet)
+        candidates.append(
+            {
+                "score": (query_hits * 5) + heading_hits + min(len(chunk_text) / 500.0, 2.0),
+                "timestamp": first_match.group("timestamp") if first_match else None,
+                "speaker": (
+                    body_match.group("speaker").strip()
+                    if body_match and body_match.group("speaker")
+                    else None
+                ),
+                "snippet": snippet,
+                "line_count": len(chunk),
+                "start_index": start,
+            }
+        )
+
+    ranked = sorted(
+        candidates,
+        key=lambda item: (-float(item["score"]), int(item["start_index"])),
+    )
+    selected: list[dict[str, object]] = []
+    used_ranges: list[tuple[int, int]] = []
+    for candidate in ranked:
+        start = int(candidate["start_index"])
+        end = start + int(candidate["line_count"])
+        if any(not (end <= other_start or start >= other_end) for other_start, other_end in used_ranges):
+            continue
+        selected.append(
+            {
+                "timestamp": candidate["timestamp"],
+                "speaker": candidate["speaker"],
+                "snippet": candidate["snippet"],
+                "line_count": candidate["line_count"],
+            }
+        )
+        used_ranges.append((start, end))
+        if len(selected) >= max_windows:
+            break
+    return selected
+
+
+def _extract_summary_headers(text: str) -> list[str]:
+    headers: list[str] = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("##"):
+            headers.append(stripped.lstrip("#").strip())
+    return headers
+
+
+def _contains_markdown_table(text: str) -> bool:
+    lines = [line.rstrip() for line in (text or "").splitlines()]
+    for index in range(len(lines) - 1):
+        if "|" not in lines[index] or "|" not in lines[index + 1]:
+            continue
+        separator = lines[index + 1].replace("|", "").replace("-", "").replace(":", "").replace(" ", "")
+        if separator == "":
+            return True
+    return False
+
+
+def evaluate_revision_structure(
+    *,
+    original_summary: str,
+    revised_summary: str,
+    template_key: str,
+) -> tuple[bool, str | None]:
+    """Reject only clearly degraded structure; allow useful drift."""
+    original_headers = _extract_summary_headers(original_summary)
+    revised_headers = _extract_summary_headers(revised_summary)
+    original_has_table = _contains_markdown_table(original_summary)
+    revised_has_table = _contains_markdown_table(revised_summary)
+    normalized_template = normalize_template_key(template_key or DEFAULT_TEMPLATE_KEY)
+
+    if len(original_headers) >= 2 and len(revised_headers) == 0:
+        return False, "The revision removed all section headers from a previously structured summary."
+    if len(original_headers) >= 3 and len(revised_headers) == 1:
+        return False, "The revision collapsed most of the summary structure into a single section."
+    if "## Action Items" in revised_summary and not revised_has_table:
+        return False, "The revision kept Action Items but degraded the markdown table structure."
+    if (
+        original_has_table
+        and not revised_has_table
+        and "## Action Items" in original_summary
+        and "## Action Items" in revised_summary
+        and normalized_template == "meeting"
+    ):
+        return False, "The revision kept Action Items but removed the markdown table."
+
+    nonempty_lines = [line.strip() for line in revised_summary.splitlines() if line.strip()]
+    if len(revised_headers) == 0 and len(nonempty_lines) <= 3:
+        return False, "The revision became too flat to be a useful meeting summary."
+
+    if len(revised_headers) == 0:
+        bullet_lines = [line for line in nonempty_lines if line.startswith("-") or line.startswith("|")]
+        if len(bullet_lines) < max(2, len(nonempty_lines) // 3):
+            return False, "The revision lost too much markdown structure and scannability."
+
+    return True, None
+
+
+def _build_template_guidance(
+    *,
+    template_key: str,
+    custom_prompt: str | None,
+    current_summary: str,
+) -> str:
+    normalized_template = normalize_template_key(template_key or DEFAULT_TEMPLATE_KEY)
+    if normalized_template == "custom":
+        base_guidance = (custom_prompt or "").strip() or "Preserve the summary's existing custom structure."
+    else:
+        base_guidance = get_template_content(normalized_template).strip()
+        extra = (custom_prompt or "").strip()
+        if extra:
+            base_guidance = f"{base_guidance}\n\nAdditional recording-specific guidance:\n{extra}"
+
+    current_headers = _extract_summary_headers(current_summary)
+    current_header_block = "\n".join(f"- {header}" for header in current_headers) or "- No stable headers detected"
+    return (
+        f"Active template key: {normalized_template}\n\n"
+        f"Template guidance:\n{base_guidance}\n\n"
+        "Current summary structure:\n"
+        f"{current_header_block}"
+    )
+
+
+def _build_revise_prompt(
+    *,
+    instruction: str,
+    current_summary: str,
+    template_guidance: str,
+    evidence_lines: list[str],
+    route: str,
+) -> tuple[str, str]:
+    uses_evidence = bool(evidence_lines)
+    system_prompt = (
+        "You are editing a meeting summary for clarity, accuracy, and scannability. "
+        "Use the active template as a structural guide, not as a rigid checklist. "
+        "Preserve useful markdown structure such as headings, bullets, and tables when they improve readability. "
+        "You may merge, omit, or tighten sections if they are duplicative, empty, or low-signal for this meeting. "
+        "Do not flatten the summary into generic prose. "
+        "Do not invent facts, decisions, owners, dates, blockers, or examples. "
+        "If Action Items remain useful, keep them as a markdown table. "
+        "Return JSON only with keys: revised_summary, changed, reason. changed must be true or false."
+    )
+    user_prompt = (
+        f"Instruction: {instruction}\n\n"
+        f"{template_guidance}\n\n"
+        f"Current summary:\n{current_summary.strip()}\n\n"
+        f"Revise route: {route}\n\n"
+    )
+    if uses_evidence:
+        user_prompt += f"Evidence windows:\n{chr(10).join(evidence_lines)}\n\n"
+    else:
+        user_prompt += "Evidence windows:\n(none)\n\n"
+    user_prompt += (
+        "Requirements:\n"
+        "- Keep the summary grounded in the current summary and any supplied evidence.\n"
+        "- Preserve or improve structure and readability.\n"
+        "- You may intelligently merge or drop sections that do not help the reader.\n"
+        "- Do not rigidly force every original template section back in if it does not fit this meeting.\n"
+        "- Return the full revised summary.\n"
+        "Return JSON only."
+    )
+    return system_prompt, user_prompt
+
+
+def _build_structure_repair_prompt(
+    *,
+    template_guidance: str,
+    original_summary: str,
+    revised_summary: str,
+) -> tuple[str, str]:
+    system_prompt = (
+        "You are repairing the structure of a meeting summary without changing its meaning. "
+        "Restore scannability using headings, bullets, spacing, and tables where appropriate. "
+        "Use the template as guidance, not as a rigid schema. "
+        "Do not force every original section back in if a merged or simplified structure is clearer. "
+        "Do not add new facts. Return JSON only with keys: revised_summary, changed, reason."
+    )
+    user_prompt = (
+        f"{template_guidance}\n\n"
+        f"Original summary before revise:\n{original_summary.strip()}\n\n"
+        f"Current revised summary that needs structure repair:\n{revised_summary.strip()}\n\n"
+        "Repair goals:\n"
+        "- Restore markdown structure and readability.\n"
+        "- Keep meaningful sections and tables when they help the reader.\n"
+        "- Allow merged or omitted sections if they are clearer than the original template shape.\n"
+        "- Do not collapse everything into prose.\n"
+        "Return JSON only."
+    )
+    return system_prompt, user_prompt
 
 
 class SummarizationManager:
@@ -413,33 +776,178 @@ class SummarizationManager:
                 )
             raise
 
-    async def refine_summary(self, instruction: str, current_summary: str) -> str:
-        """Apply a single AI revision pass to an existing summary.
-
-        Context is just the summary + instruction — fast, ~10-20s vs 60-120s full pipeline.
-        """
+    async def refine_summary(
+        self,
+        *,
+        instruction: str,
+        current_summary: str,
+        template_key: str = DEFAULT_TEMPLATE_KEY,
+        custom_prompt: str | None = None,
+        transcript: str | None = None,
+        transcript_windows: list[dict[str, object]] | None = None,
+        route: str | None = None,
+    ) -> dict[str, object]:
+        """Apply a single AI revision pass to an existing summary."""
         backend = await self._backend_for_operation()
 
         instr = instruction.strip()
         instr_preview = instr[:80] + ("..." if len(instr) > 80 else "")
-        logger.info("[step] refine | start | instruction=%r", instr_preview)
-        _t0 = time.monotonic()
-
-        system_prompt = (
-            "You are editing a meeting summary. Make only the requested change. "
-            "Preserve all section headers (##), factual content, names, dates, and details "
-            "you were not asked to change. Return only the revised summary in full."
+        resolved_route = route or classify_revision_route(instr)
+        evidence_windows = list(transcript_windows or [])
+        used_transcript_context = bool(evidence_windows)
+        logger.info(
+            "[step] refine | start | route=%s | windows=%d | instruction=%r",
+            resolved_route,
+            len(evidence_windows),
+            instr_preview,
         )
-        user_prompt = f"Instruction: {instr}\n\nCurrent summary:\n{current_summary.strip()}"
+        _t0 = time.monotonic()
+        if resolved_route != "style_only" and not evidence_windows and transcript:
+            evidence_windows = select_revision_evidence_windows(
+                transcript=transcript,
+                instruction=instr,
+                current_summary=current_summary,
+                route=resolved_route,
+            )
+            used_transcript_context = bool(evidence_windows)
+
+        evidence_lines: list[str] = []
+        for index, window in enumerate(evidence_windows):
+            evidence_lines.append(
+                "\n".join(
+                    [
+                        f"[{index}] Timestamp: {window.get('timestamp') or '-'}",
+                        f"Speaker: {window.get('speaker') or '-'}",
+                        f"Snippet: {window.get('snippet') or ''}",
+                    ]
+                )
+            )
+        template_guidance = _build_template_guidance(
+            template_key=template_key,
+            custom_prompt=custom_prompt,
+            current_summary=current_summary,
+        )
+        system_prompt, user_prompt = _build_revise_prompt(
+            instruction=instr,
+            current_summary=current_summary,
+            template_guidance=template_guidance,
+            evidence_lines=evidence_lines,
+            route=resolved_route,
+        )
 
         result = await self._summarize_with_timeout(
             backend=backend,
             transcript="",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            num_ctx=min(self._context_length(), 12288),
+            json_mode=backend.supports_structured_outputs,
         )
-        logger.info("[step] refine | done | elapsed=%.1fs", time.monotonic() - _t0)
-        return result.content
+        parsed = self._parse_json_response(result.content)
+        if parsed is None:
+            repair = await self._repair_json_response(
+                backend=backend,
+                invalid_response=result.content,
+                schema_hint="revised_summary, changed, reason",
+            )
+            parsed = self._parse_json_response(repair)
+
+        if parsed is None:
+            fallback_content = str(result.content or "").strip() or current_summary.strip()
+            changed = fallback_content != current_summary.strip()
+            structure_valid, structure_reason = evaluate_revision_structure(
+                original_summary=current_summary,
+                revised_summary=fallback_content,
+                template_key=template_key,
+            )
+            logger.info("[step] refine | done | elapsed=%.1fs | parsed=false", time.monotonic() - _t0)
+            return {
+                "revised_summary": fallback_content,
+                "changed": changed,
+                "reason": structure_reason or (None if changed else "The assistant did not return a structured revision result."),
+                "route": resolved_route,
+                "used_transcript_context": used_transcript_context,
+                "evidence_window_count": len(evidence_windows),
+                "backend": backend.name,
+                "model": result.model,
+                "structure_valid": structure_valid,
+                "template_guidance_used": True,
+                "structure_repair_applied": False,
+            }
+
+        revised_summary = str(parsed.get("revised_summary") or current_summary).strip() or current_summary.strip()
+        changed = bool(parsed.get("changed"))
+        if revised_summary == current_summary.strip():
+            changed = False
+        reason = str(parsed.get("reason") or "").strip() or None
+        structure_valid, structure_reason = evaluate_revision_structure(
+            original_summary=current_summary,
+            revised_summary=revised_summary,
+            template_key=template_key,
+        )
+        structure_repair_applied = False
+        if not structure_valid:
+            repair_system_prompt, repair_user_prompt = _build_structure_repair_prompt(
+                template_guidance=template_guidance,
+                original_summary=current_summary,
+                revised_summary=revised_summary,
+            )
+            repair_result = await self._summarize_with_timeout(
+                backend=backend,
+                transcript="",
+                system_prompt=repair_system_prompt,
+                user_prompt=repair_user_prompt,
+                num_ctx=min(self._context_length(), 12288),
+                json_mode=backend.supports_structured_outputs,
+            )
+            repair_parsed = self._parse_json_response(repair_result.content)
+            if repair_parsed is None:
+                repair_json = await self._repair_json_response(
+                    backend=backend,
+                    invalid_response=repair_result.content,
+                    schema_hint="revised_summary, changed, reason",
+                )
+                repair_parsed = self._parse_json_response(repair_json)
+            if repair_parsed is not None:
+                repaired_summary = (
+                    str(repair_parsed.get("revised_summary") or revised_summary).strip() or revised_summary
+                )
+                repaired_valid, repaired_reason = evaluate_revision_structure(
+                    original_summary=current_summary,
+                    revised_summary=repaired_summary,
+                    template_key=template_key,
+                )
+                if repaired_valid:
+                    revised_summary = repaired_summary
+                    changed = repaired_summary != current_summary.strip()
+                    reason = str(repair_parsed.get("reason") or reason or "").strip() or None
+                    structure_valid = True
+                    structure_reason = None
+                    structure_repair_applied = True
+                    result = repair_result
+        if not structure_valid and structure_reason:
+            reason = structure_reason
+        logger.info(
+            "[step] refine | done | elapsed=%.1fs | route=%s | windows=%d | changed=%s | structure_valid=%s",
+            time.monotonic() - _t0,
+            resolved_route,
+            len(evidence_windows),
+            changed,
+            structure_valid,
+        )
+        return {
+            "revised_summary": revised_summary,
+            "changed": changed,
+            "reason": reason,
+            "route": resolved_route,
+            "used_transcript_context": used_transcript_context,
+            "evidence_window_count": len(evidence_windows),
+            "backend": backend.name,
+            "model": result.model,
+            "structure_valid": structure_valid,
+            "template_guidance_used": True,
+            "structure_repair_applied": structure_repair_applied,
+        }
 
     async def chat_about_recording(
         self,

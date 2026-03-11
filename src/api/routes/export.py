@@ -35,7 +35,11 @@ from src.core.speaker_labels import (
     resolve_user_facing_speaker_name,
 )
 from src.sessions.repository import Repository
-from src.summarization.manager import SummarizationManager
+from src.summarization.manager import (
+    SummarizationManager,
+    classify_revision_route,
+    select_revision_evidence_windows,
+)
 from src.summarization.prompts import (
     DEFAULT_TEMPLATE_KEY,
     PUBLIC_TEMPLATE_KEYS,
@@ -48,6 +52,93 @@ from src.workspace_chat.service import WorkspaceChatService
 
 
 router = APIRouter()
+
+
+def _safe_json_loads(value: str | None, default):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+def _summary_revision_history(summary) -> list[dict]:
+    workflow_data = _safe_json_loads(getattr(summary, "workflow_data_json", None), {})
+    history = workflow_data.get("revision_history", []) if isinstance(workflow_data, dict) else []
+    return history if isinstance(history, list) else []
+
+
+def _build_revision_history_entry(
+    *,
+    instruction: str,
+    route: str,
+    used_transcript_context: bool,
+    transcript_version_id: str | None,
+    transcript_version_number: int | None,
+    evidence_window_count: int,
+    evidence_segment_count: int,
+    changed: bool,
+    backend: str | None,
+    model: str | None,
+    template_key: str | None = None,
+    template_guidance_used: bool = True,
+    structure_valid: bool = True,
+    structure_repair_applied: bool = False,
+    structure_notes: str | None = None,
+    source: str = "workspace_summary",
+) -> dict[str, object]:
+    return {
+        "id": str(uuid.uuid4()),
+        "created_at": to_utc_iso(datetime.now(timezone.utc).replace(tzinfo=None)),
+        "kind": "ai_revise",
+        "source": source,
+        "instruction": instruction.strip(),
+        "route": route,
+        "used_transcript_context": bool(used_transcript_context),
+        "transcript_version_id": transcript_version_id,
+        "transcript_version_number": transcript_version_number,
+        "evidence_window_count": max(0, int(evidence_window_count or 0)),
+        "evidence_segment_count": max(0, int(evidence_segment_count or 0)),
+        "changed": bool(changed),
+        "backend": backend,
+        "model": model,
+        "template_key": template_key,
+        "template_guidance_used": bool(template_guidance_used),
+        "structure_valid": bool(structure_valid),
+        "structure_repair_applied": bool(structure_repair_applied),
+        "structure_notes": structure_notes,
+    }
+
+
+def _normalize_refine_result(
+    result: object,
+    *,
+    current_summary: str,
+    route: str,
+) -> dict[str, object]:
+    if isinstance(result, dict):
+        normalized = dict(result)
+        normalized.setdefault("revised_summary", current_summary)
+        normalized.setdefault("changed", normalized.get("revised_summary") != current_summary)
+        normalized.setdefault("route", route)
+        normalized.setdefault("used_transcript_context", False)
+        normalized.setdefault("evidence_window_count", 0)
+        normalized.setdefault("structure_valid", True)
+        normalized.setdefault("template_guidance_used", False)
+        normalized.setdefault("structure_repair_applied", False)
+        return normalized
+    revised_summary = str(result or "").strip() or current_summary
+    return {
+        "revised_summary": revised_summary,
+        "changed": revised_summary != current_summary,
+        "route": route,
+        "used_transcript_context": False,
+        "evidence_window_count": 0,
+        "structure_valid": True,
+        "template_guidance_used": False,
+        "structure_repair_applied": False,
+    }
 
 
 def get_summarization_manager(request: Request) -> SummarizationManager:
@@ -125,6 +216,7 @@ class CreateDraftRequest(BaseModel):
     source_summary_id: Optional[str] = None
     source_type: str = "manual_edit"
     transcript_version_id: Optional[str] = None
+    preserve_existing_draft: bool = False
 
 
 class StartTranscriptionJobRequest(BaseModel):
@@ -789,6 +881,7 @@ async def _run_export_pipeline(
         "pass1_user_prompt": summary_result.prompt_audit.get("pass1_user_prompt"),
         "pass2_system_prompt": summary_result.prompt_audit.get("pass2_system_prompt"),
         "pass2_user_prompt": summary_result.prompt_audit.get("pass2_user_prompt"),
+        "revision_history": [],
     }
 
     preview = summary_content[:200] + "..." if len(summary_content) > 200 else summary_content
@@ -1060,6 +1153,7 @@ async def _build_summary_save_params(
     pass1_user_prompt: str | None = None,
     pass2_system_prompt: str | None = None,
     pass2_user_prompt: str | None = None,
+    workflow_data_json: str | None = None,
 ) -> dict:
     """Assemble markdown and path metadata for saving a summary draft."""
     segments = await repository.get_segments(
@@ -1093,6 +1187,10 @@ async def _build_summary_save_params(
         else ""
     )
     duration_str = format_duration_human(int(audio_duration_seconds))
+    workflow_data = _safe_json_loads(workflow_data_json, {})
+    revision_history = workflow_data.get("revision_history", []) if isinstance(workflow_data, dict) else []
+    if not isinstance(revision_history, list):
+        revision_history = []
 
     return {
         "summary_content": summary_content,
@@ -1110,6 +1208,7 @@ async def _build_summary_save_params(
         "pass1_user_prompt": pass1_user_prompt,
         "pass2_system_prompt": pass2_system_prompt,
         "pass2_user_prompt": pass2_user_prompt,
+        "revision_history": revision_history,
     }
 
 
@@ -1483,6 +1582,7 @@ async def save_export_job(
         pass1_user_prompt=bp.get("pass1_user_prompt"),
         pass2_system_prompt=bp.get("pass2_system_prompt"),
         pass2_user_prompt=bp.get("pass2_user_prompt"),
+        revision_history=bp.get("revision_history"),
         revision_instruction=request.revision_instruction,
     )
 
@@ -1531,16 +1631,31 @@ async def refine_export_job(
         raise HTTPException(status_code=404, detail="Export job not found")
     if job.get("status") not in ("ready", "completed"):
         raise HTTPException(status_code=400, detail="Job is not ready to refine")
+    bp = job.get("build_params") or {}
 
     try:
-        revised = await summarization_manager.refine_summary(
+        revised_result = await summarization_manager.refine_summary(
             instruction=request.instruction,
             current_summary=request.current_summary,
+            template_key=bp.get("template_key") or DEFAULT_TEMPLATE_KEY,
+            custom_prompt=bp.get("custom_prompt"),
+            transcript=job.get("build_params", {}).get("transcript"),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Refinement failed: {str(e)}")
+    revised = _normalize_refine_result(
+        revised_result,
+        current_summary=request.current_summary,
+        route=classify_revision_route(request.instruction),
+    )
 
-    return {"revised_summary": revised}
+    return {
+        "revised_summary": revised.get("revised_summary", request.current_summary),
+        "changed": bool(revised.get("changed")),
+        "route": revised.get("route"),
+        "used_transcript_context": bool(revised.get("used_transcript_context")),
+        "evidence_window_count": int(revised.get("evidence_window_count") or 0),
+    }
 
 
 @router.post("/summaries/refine")
@@ -1550,11 +1665,24 @@ async def refine_summary(
 ):
     """Apply a single AI revision pass to any provided summary text."""
     try:
-        revised = await summarization_manager.refine_summary(
+        revised_result = await summarization_manager.refine_summary(
             instruction=request.instruction,
             current_summary=request.current_summary,
+            template_key=DEFAULT_TEMPLATE_KEY,
+            custom_prompt=None,
         )
-        return {"revised_summary": revised}
+        revised = _normalize_refine_result(
+            revised_result,
+            current_summary=request.current_summary,
+            route=classify_revision_route(request.instruction),
+        )
+        return {
+            "revised_summary": revised.get("revised_summary", request.current_summary),
+            "changed": bool(revised.get("changed")),
+            "route": revised.get("route"),
+            "used_transcript_context": bool(revised.get("used_transcript_context")),
+            "evidence_window_count": int(revised.get("evidence_window_count") or 0),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Refinement failed: {str(e)}")
 
@@ -1565,7 +1693,7 @@ async def create_summary_draft(
     request: CreateDraftRequest,
     repository: Repository = Depends(get_repository),
 ):
-    """Create an editable draft from the latest saved summary when needed."""
+    """Create an editable draft from the selected summary when needed."""
     meeting = await repository.get_primary_meeting(session_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Recording not found")
@@ -1582,7 +1710,9 @@ async def create_summary_draft(
         meeting.id,
         transcript_version_id=str(version.id) if version else None,
     )
-    if existing_draft:
+    if existing_draft and (
+        not request.source_summary_id or str(existing_draft.id) == str(request.source_summary_id)
+    ):
         return {"draft_summary_id": existing_draft.id}
 
     source_summary_id = request.source_summary_id
@@ -1596,10 +1726,17 @@ async def create_summary_draft(
             raise HTTPException(status_code=404, detail="No saved summary available to revise")
         source_summary_id = latest_saved.id
 
+    source_summary = await repository.get_summary(source_summary_id)
+    if not source_summary or str(source_summary.meeting_id) != str(meeting.id):
+        raise HTTPException(status_code=404, detail="Selected summary version not found")
+    if version and str(getattr(source_summary, "transcript_version_id", None) or "") != str(version.id):
+        raise HTTPException(status_code=404, detail="Selected summary version does not match this transcript version")
+
     try:
-        draft = await repository.create_draft_from_summary(
+        draft = await repository.branch_draft_from_summary(
             source_summary_id,
             source_type=request.source_type,
+            preserve_existing_draft=bool(request.preserve_existing_draft),
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -1638,25 +1775,106 @@ async def revise_summary_draft(
     if not draft or draft.status != "draft":
         raise HTTPException(status_code=404, detail="Draft summary not found")
 
+    transcript = ""
+    transcript_version_number: int | None = None
+    evidence_segment_count = 0
+    draft_transcript_version_id = getattr(draft, "transcript_version_id", None)
+    if draft_transcript_version_id:
+        version = await repository.get_transcript_version(draft_transcript_version_id)
+        if version:
+            transcript_version_number = int(getattr(version, "version_number", 0) or 0) or None
+        segments = await repository.get_segments(
+            session_id=None,
+            transcript_version_id=draft_transcript_version_id,
+        )
+        transcript, _audio_duration_seconds = _segments_to_transcript(segments)
+        evidence_segment_count = len(segments)
+
+    route = classify_revision_route(request.instruction)
+    draft_template_key = normalize_template_key(getattr(draft, "template_key", None) or DEFAULT_TEMPLATE_KEY)
+    draft_custom_prompt = getattr(draft, "custom_prompt", None)
+    transcript_windows = select_revision_evidence_windows(
+        transcript=transcript,
+        instruction=request.instruction,
+        current_summary=draft.content,
+        route=route,
+    )
+    if route == "evidence_needed" and not transcript_windows:
+        raise HTTPException(
+            status_code=400,
+            detail="Revision needs transcript evidence, but I could not find enough relevant transcript context.",
+        )
+
     try:
-        revised = await summarization_manager.refine_summary(
+        revised_result = await summarization_manager.refine_summary(
             instruction=request.instruction,
             current_summary=draft.content,
+            template_key=draft_template_key,
+            custom_prompt=draft_custom_prompt,
+            transcript=transcript,
+            transcript_windows=transcript_windows,
+            route=route,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Refinement failed: {str(exc)}")
+    revised = _normalize_refine_result(
+        revised_result,
+        current_summary=draft.content,
+        route=route,
+    )
+    if not bool(revised.get("structure_valid", True)):
+        raise HTTPException(
+            status_code=400,
+            detail=str(
+                revised.get("reason")
+                or "Revision was not applied because it degraded the summary structure."
+            ),
+        )
+
+    revision_entry = _build_revision_history_entry(
+        instruction=request.instruction,
+        route=str(revised.get("route") or route),
+        used_transcript_context=bool(revised.get("used_transcript_context")),
+        transcript_version_id=str(draft_transcript_version_id) if draft_transcript_version_id else None,
+        transcript_version_number=transcript_version_number,
+        evidence_window_count=int(revised.get("evidence_window_count") or len(transcript_windows)),
+        evidence_segment_count=evidence_segment_count,
+        changed=bool(revised.get("changed")),
+        backend=str(revised.get("backend") or getattr(draft, "backend", "unknown")),
+        model=str(revised.get("model") or getattr(draft, "model", "unknown")),
+        template_key=draft_template_key,
+        template_guidance_used=bool(revised.get("template_guidance_used", True)),
+        structure_valid=bool(revised.get("structure_valid", True)),
+        structure_repair_applied=bool(revised.get("structure_repair_applied", False)),
+        structure_notes=str(revised.get("reason") or "") or None,
+    )
+    workflow_data = Repository.parse_summary_workflow_data(draft)
+    revision_history = workflow_data.get("revision_history")
+    if not isinstance(revision_history, list):
+        revision_history = []
+    revision_history.append(revision_entry)
+    workflow_data["revision_history"] = revision_history
 
     updated = await repository.update_summary(
         summary_id,
-        content=revised,
+        content=str(revised.get("revised_summary") or draft.content),
         source_type="ai_revised",
+        workflow_data_json=json.dumps(workflow_data),
     )
     if updated is None:
         raise HTTPException(
             status_code=409,
             detail="Draft changed while AI revision was running. Reload the workspace and try again.",
         )
-    return {"draft_summary_id": updated.id, "content": updated.content}
+    return {
+        "draft_summary_id": updated.id,
+        "content": updated.content,
+        "changed": bool(revised.get("changed")),
+        "route": revised.get("route"),
+        "used_transcript_context": bool(revised.get("used_transcript_context")),
+        "evidence_window_count": int(revised.get("evidence_window_count") or 0),
+        "structure_repair_applied": bool(revised.get("structure_repair_applied", False)),
+    }
 
 
 @router.post("/summary-drafts/{summary_id}/save")
@@ -1692,6 +1910,7 @@ async def save_summary_draft(
         pass1_user_prompt=draft.pass1_user_prompt,
         pass2_system_prompt=draft.pass2_system_prompt,
         pass2_user_prompt=draft.pass2_user_prompt,
+        workflow_data_json=draft.workflow_data_json,
     )
 
     obsidian_uri = None
@@ -1715,6 +1934,7 @@ async def save_summary_draft(
             pass1_user_prompt=params.get("pass1_user_prompt"),
             pass2_system_prompt=params.get("pass2_system_prompt"),
             pass2_user_prompt=params.get("pass2_user_prompt"),
+            revision_history=params.get("revision_history"),
         )
         _, obsidian_uri = await _write_obsidian_file(
             markdown_content,

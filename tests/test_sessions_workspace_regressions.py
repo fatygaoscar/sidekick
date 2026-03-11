@@ -117,6 +117,124 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             "Summary settings changed to a different template.",
         )
 
+    def test_summary_serialization_includes_revision_history(self):
+        meeting = SimpleNamespace(
+            speaker_review_required=False,
+            speaker_review_completed_at=None,
+            template_key="meeting",
+            custom_prompt=None,
+            attendees=None,
+        )
+        summary = SimpleNamespace(
+            id="sum-1",
+            meeting_id="meeting-1",
+            content="Latest summary",
+            backend="ollama",
+            model="qwen3:8b",
+            created_at=datetime.now(UTC) - timedelta(hours=1),
+            processing_duration_seconds=12.0,
+            template="General Meeting",
+            template_key="meeting",
+            custom_prompt=None,
+            status="saved",
+            source_type="ai_revised",
+            saved_to_obsidian_at=datetime.now(UTC) - timedelta(minutes=50),
+            obsidian_relative_path="Sidekick/Latest.md",
+            workflow_data_json='{"revision_history":[{"instruction":"Add more detail","used_transcript_context":true}]}',
+        )
+
+        payload = self.sessions._serialize_summary(summary, meeting)
+
+        self.assertEqual(len(payload["revision_history"]), 1)
+        self.assertEqual(payload["revision_history"][0]["instruction"], "Add more detail")
+        self.assertTrue(payload["latest_revision"]["used_transcript_context"])
+
+    def test_summary_serialization_marks_saved_copy_and_version_labels(self):
+        meeting = SimpleNamespace(
+            speaker_review_required=False,
+            speaker_review_completed_at=None,
+            template_key="meeting",
+            custom_prompt=None,
+            attendees=None,
+        )
+        snapshot = SimpleNamespace(
+            id="sum-2",
+            meeting_id="meeting-1",
+            content="Saved copy",
+            backend="ollama",
+            model="qwen3:8b",
+            created_at=datetime.now(UTC) - timedelta(minutes=5),
+            processing_duration_seconds=12.0,
+            template="General Meeting",
+            template_key="meeting",
+            custom_prompt=None,
+            status="saved",
+            source_type="manual_edit",
+            saved_to_obsidian_at=None,
+            obsidian_relative_path=None,
+            workflow_data_json=None,
+        )
+        exported = SimpleNamespace(
+            id="sum-1",
+            meeting_id="meeting-1",
+            content="Exported summary",
+            backend="ollama",
+            model="qwen3:8b",
+            created_at=datetime.now(UTC) - timedelta(hours=1),
+            processing_duration_seconds=12.0,
+            template="General Meeting",
+            template_key="meeting",
+            custom_prompt=None,
+            status="saved",
+            source_type="generated",
+            saved_to_obsidian_at=datetime.now(UTC) - timedelta(hours=1),
+            obsidian_relative_path="Sidekick/v1.md",
+            workflow_data_json=None,
+        )
+
+        snapshot_payload = self.sessions._serialize_summary(snapshot, meeting)
+
+        self.assertEqual(snapshot_payload["save_kind"], "saved_copy")
+        self.assertEqual(
+            self.sessions._summary_version_label(snapshot, [snapshot, exported]),
+            "v2 (Saved Copy)",
+        )
+        self.assertEqual(
+            self.sessions._summary_version_label(exported, [snapshot, exported]),
+            "v1 (Latest Exported)",
+        )
+
+    def test_summary_serialization_tolerates_malformed_workflow_data(self):
+        meeting = SimpleNamespace(
+            speaker_review_required=False,
+            speaker_review_completed_at=None,
+            template_key="meeting",
+            custom_prompt=None,
+            attendees=None,
+        )
+        summary = SimpleNamespace(
+            id="sum-1",
+            meeting_id="meeting-1",
+            content="Latest summary",
+            backend="ollama",
+            model="qwen3:8b",
+            created_at=datetime.now(UTC) - timedelta(hours=1),
+            processing_duration_seconds=12.0,
+            template="General Meeting",
+            template_key="meeting",
+            custom_prompt=None,
+            status="saved",
+            source_type="generated",
+            saved_to_obsidian_at=datetime.now(UTC) - timedelta(minutes=50),
+            obsidian_relative_path="Sidekick/Latest.md",
+            workflow_data_json="{not-json",
+        )
+
+        payload = self.sessions._serialize_summary(summary, meeting)
+
+        self.assertEqual(payload["revision_history"], [])
+        self.assertIsNone(payload["latest_revision"])
+
     def test_update_recording_settings_can_clear_custom_prompt(self):
         request = self.sessions.UpdateRecordingSettingsRequest(custom_prompt=None)
 
@@ -138,6 +256,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
                 return_value=SimpleNamespace(
                     workspace_chat_enabled=True,
                     summarization_backend="openai",
+                    recording_capture_mode="whole_room",
                 )
             )
         )
@@ -163,6 +282,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
                 "settings": {
                     "workspace_chat_enabled": True,
                     "summarization_backend": "openai",
+                    "recording_capture_mode": "whole_room",
                 },
                 "summarization": {
                     "selected_backend": "openai",
@@ -193,6 +313,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
                 return_value=SimpleNamespace(
                     workspace_chat_enabled=True,
                     summarization_backend="ollama",
+                    recording_capture_mode="whole_room",
                 )
             )
         )
@@ -220,6 +341,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
                 "settings": {
                     "workspace_chat_enabled": True,
                     "summarization_backend": "ollama",
+                    "recording_capture_mode": "whole_room",
                 },
                 "summarization": {
                     "selected_backend": "ollama",
@@ -237,6 +359,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
                 return_value=SimpleNamespace(
                     workspace_chat_enabled=False,
                     summarization_backend="openai",
+                    recording_capture_mode="whole_room",
                 )
             )
         )
@@ -264,6 +387,55 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
         self.assertEqual(payload["settings"]["summarization_backend"], "openai")
         summarization_manager.probe_backend.assert_awaited_once_with(self.sessions.SumBackendEnum.OPENAI)
         summarization_manager.switch_backend.assert_awaited_once_with(self.sessions.SumBackendEnum.OPENAI)
+
+    def test_update_app_settings_persists_recording_capture_mode(self):
+        repository = SimpleNamespace(
+            update_app_settings=AsyncMock(
+                return_value=SimpleNamespace(
+                    workspace_chat_enabled=False,
+                    summarization_backend="ollama",
+                    recording_capture_mode="single_speaker",
+                )
+            )
+        )
+        summarization_manager = SimpleNamespace(
+            active_backend_type=self.sessions.SumBackendEnum.OLLAMA,
+            runtime_state=lambda: {
+                "selected_backend": "ollama",
+                "active_backend": "ollama",
+                "applies_to": "new_requests_only",
+                "providers": {},
+            },
+        )
+
+        payload = asyncio.run(
+            self.sessions.update_app_settings(
+                self.sessions.UpdateAppSettingsRequest(recording_capture_mode="single_speaker"),
+                repository=repository,
+                summarization_manager=summarization_manager,
+            )
+        )
+
+        self.assertEqual(payload["settings"]["recording_capture_mode"], "single_speaker")
+        repository.update_app_settings.assert_awaited_once()
+
+    def test_update_app_settings_rejects_invalid_recording_capture_mode(self):
+        repository = SimpleNamespace(update_app_settings=AsyncMock())
+        summarization_manager = SimpleNamespace(
+            active_backend_type=self.sessions.SumBackendEnum.OLLAMA,
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(
+                self.sessions.update_app_settings(
+                    self.sessions.UpdateAppSettingsRequest(recording_capture_mode="unsupported"),
+                    repository=repository,
+                    summarization_manager=summarization_manager,
+                )
+            )
+
+        self.assertEqual(ctx.exception.status_code, 422)
+        repository.update_app_settings.assert_not_called()
 
     def test_update_app_settings_rejects_unready_backend(self):
         repository = SimpleNamespace(update_app_settings=AsyncMock())
@@ -737,7 +909,13 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
         transcription_manager.unload.assert_awaited_once_with()
 
     def test_revise_summary_draft_returns_updated_draft(self):
-        draft = SimpleNamespace(id="draft-1", status="draft", content="Original summary")
+        draft = SimpleNamespace(
+            id="draft-1",
+            status="draft",
+            content="Original summary",
+            template_key="meeting",
+            custom_prompt=None,
+        )
         updated = SimpleNamespace(id="draft-1", content="Revised summary")
         repository = SimpleNamespace(
             get_summary=AsyncMock(return_value=draft),
@@ -756,22 +934,145 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(
-            payload,
-            {"draft_summary_id": "draft-1", "content": "Revised summary"},
-        )
+        self.assertEqual(payload["draft_summary_id"], "draft-1")
+        self.assertEqual(payload["content"], "Revised summary")
+        self.assertEqual(payload["route"], "style_only")
+        self.assertFalse(payload["used_transcript_context"])
         summarization_manager.refine_summary.assert_awaited_once_with(
             instruction="Tighten the takeaways.",
             current_summary="Original summary",
+            template_key="meeting",
+            custom_prompt=None,
+            transcript="",
+            transcript_windows=[],
+            route="style_only",
         )
-        repository.update_summary.assert_awaited_once_with(
-            "draft-1",
-            content="Revised summary",
-            source_type="ai_revised",
+        update_args, update_kwargs = repository.update_summary.await_args
+        self.assertEqual(update_args, ("draft-1",))
+        self.assertEqual(update_kwargs["content"], "Revised summary")
+        self.assertEqual(update_kwargs["source_type"], "ai_revised")
+        self.assertIn("workflow_data_json", update_kwargs)
+
+    def test_create_summary_draft_branches_from_selected_summary_and_preserves_existing_draft(self):
+        transcript_version = SimpleNamespace(id="tv-1")
+        meeting = SimpleNamespace(id="meeting-1")
+        existing_draft = SimpleNamespace(id="draft-3")
+        selected_summary = SimpleNamespace(
+            id="sum-2",
+            meeting_id="meeting-1",
+            transcript_version_id="tv-1",
+        )
+        branched_draft = SimpleNamespace(id="draft-4")
+        repository = SimpleNamespace(
+            get_primary_meeting=AsyncMock(return_value=meeting),
+            get_transcript_version_for_session=AsyncMock(return_value=transcript_version),
+            get_latest_transcript_version=AsyncMock(return_value=transcript_version),
+            get_draft_summary=AsyncMock(return_value=existing_draft),
+            get_latest_summary=AsyncMock(),
+            get_summary=AsyncMock(return_value=selected_summary),
+            branch_draft_from_summary=AsyncMock(return_value=branched_draft),
         )
 
+        payload = asyncio.run(
+            self.export.create_summary_draft(
+                "session-1",
+                self.export.CreateDraftRequest(
+                    source_summary_id="sum-2",
+                    source_type="ai_revised",
+                    transcript_version_id="tv-1",
+                    preserve_existing_draft=True,
+                ),
+                repository=repository,
+            )
+        )
+
+        self.assertEqual(payload["draft_summary_id"], "draft-4")
+        repository.get_latest_summary.assert_not_called()
+        repository.branch_draft_from_summary.assert_awaited_once_with(
+            "sum-2",
+            source_type="ai_revised",
+            preserve_existing_draft=True,
+        )
+
+    def test_repository_branch_draft_reuses_existing_same_source_branch(self):
+        source_summary = SimpleNamespace(
+            id="sum-2",
+            meeting_id="meeting-1",
+            transcript_version_id="tv-1",
+        )
+        existing_draft = SimpleNamespace(
+            id="draft-3",
+            meeting_id="meeting-1",
+            transcript_version_id="tv-1",
+            parent_summary_id="sum-2",
+        )
+        fake_repository = SimpleNamespace(
+            get_summary=AsyncMock(return_value=source_summary),
+            get_draft_summary=AsyncMock(return_value=existing_draft),
+            save_draft_summary=AsyncMock(),
+            delete_draft_summaries=AsyncMock(),
+            create_draft_from_summary=AsyncMock(),
+        )
+
+        result = asyncio.run(
+            importlib.import_module("src.sessions.repository").Repository.branch_draft_from_summary(
+                fake_repository,
+                "sum-2",
+                source_type="ai_revised",
+                preserve_existing_draft=True,
+            )
+        )
+
+        self.assertEqual(result.id, "draft-3")
+        fake_repository.save_draft_summary.assert_not_called()
+        fake_repository.delete_draft_summaries.assert_not_called()
+        fake_repository.create_draft_from_summary.assert_not_called()
+
+    def test_build_summary_save_params_counts_saved_copies_in_export_version_number(self):
+        now = datetime.now(UTC)
+        repository = SimpleNamespace(
+            get_segments=AsyncMock(return_value=[]),
+            get_summaries=AsyncMock(
+                return_value=[
+                    SimpleNamespace(id="sum-3"),
+                    SimpleNamespace(id="sum-2"),
+                    SimpleNamespace(id="sum-1"),
+                ]
+            ),
+        )
+        session = SimpleNamespace(
+            id="session-1",
+            started_at=now,
+            timezone_name="America/Chicago",
+            timezone_offset_minutes=-300,
+        )
+        meeting = SimpleNamespace(
+            id="meeting-1",
+            title="Goals Touchbase",
+        )
+
+        params = asyncio.run(
+            self.export._build_summary_save_params(
+                repository,
+                session,
+                meeting,
+                transcript_version_id="tv-1",
+                summary_content="Summary body",
+                template_label="General Meeting",
+                processing_duration_seconds=12.0,
+            )
+        )
+
+        self.assertIn(" (v4).md", params["relative_path"])
+
     def test_revise_summary_draft_returns_conflict_when_draft_disappears(self):
-        draft = SimpleNamespace(id="draft-1", status="draft", content="Original summary")
+        draft = SimpleNamespace(
+            id="draft-1",
+            status="draft",
+            content="Original summary",
+            template_key="meeting",
+            custom_prompt=None,
+        )
         repository = SimpleNamespace(
             get_summary=AsyncMock(return_value=draft),
             update_summary=AsyncMock(return_value=None),
@@ -987,6 +1288,116 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
         self.assertEqual(payload["draft_summary"]["id"], "draft-1")
         self.assertEqual(payload["system_message"]["message_type"], "apply_event")
         fake_service.apply_message_to_summary.assert_awaited_once()
+
+    def test_workspace_obsidian_link_ignores_newer_saved_copy(self):
+        now = datetime.now(UTC)
+        session = SimpleNamespace(
+            id="session-1",
+            started_at=now - timedelta(hours=2),
+            ended_at=now - timedelta(hours=1),
+            timezone_name="America/Chicago",
+            timezone_offset_minutes=-300,
+            has_transcription=False,
+            recording_status="ready",
+            audio_status="finalized",
+            audio_error=None,
+            finalized_at=now - timedelta(hours=1),
+            is_active=False,
+        )
+        meeting = SimpleNamespace(
+            id="meeting-1",
+            title="Goals Touchbase",
+            template_key="meeting",
+            custom_prompt=None,
+        )
+        transcript_version = SimpleNamespace(
+            id="tv-1",
+            version_number=1,
+            status="completed",
+            source_type="initial",
+            created_at=now - timedelta(hours=2),
+            speaker_review_required=False,
+            speaker_review_completed_at=None,
+            template_key="meeting",
+            custom_prompt=None,
+        )
+        saved_copy = SimpleNamespace(
+            id="sum-2",
+            meeting_id="meeting-1",
+            transcript_version_id="tv-1",
+            content="Internal snapshot",
+            backend="ollama",
+            model="qwen3:8b",
+            created_at=now - timedelta(minutes=10),
+            processing_duration_seconds=12.0,
+            template="General Meeting",
+            template_key="meeting",
+            custom_prompt=None,
+            status="saved",
+            source_type="manual_edit",
+            saved_to_obsidian_at=None,
+            obsidian_relative_path=None,
+            workflow_data_json=None,
+        )
+        exported = SimpleNamespace(
+            id="sum-1",
+            meeting_id="meeting-1",
+            transcript_version_id="tv-1",
+            content="Exported summary",
+            backend="ollama",
+            model="qwen3:8b",
+            created_at=now - timedelta(hours=1),
+            processing_duration_seconds=12.0,
+            template="General Meeting",
+            template_key="meeting",
+            custom_prompt=None,
+            status="saved",
+            source_type="generated",
+            saved_to_obsidian_at=now - timedelta(hours=1),
+            obsidian_relative_path="Sidekick/Goals Touchbase.md",
+            workflow_data_json=None,
+        )
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            get_primary_meeting=AsyncMock(return_value=meeting),
+            ensure_transcript_versions=AsyncMock(return_value=[transcript_version]),
+            get_latest_transcript_version=AsyncMock(side_effect=[transcript_version, transcript_version]),
+            get_segments=AsyncMock(return_value=[]),
+            get_summaries=AsyncMock(return_value=[saved_copy, exported]),
+            get_draft_summary=AsyncMock(return_value=None),
+            get_app_settings=AsyncMock(return_value=SimpleNamespace(workspace_chat_enabled=False)),
+        )
+
+        with patch.object(
+            self.sessions,
+            "get_settings",
+            return_value=SimpleNamespace(
+                obsidian_vault_path="/vault/SidekickVault",
+                enable_debug_retranscribe=False,
+            ),
+        ), patch.object(
+            self.sessions,
+            "get_session_audio_path",
+            return_value=None,
+        ), patch.object(
+            self.sessions,
+            "ensure_session_audio_path",
+            return_value=None,
+        ):
+            payload = asyncio.run(
+                self.sessions.get_recording_workspace(
+                    "session-1",
+                    repository=repository,
+                )
+            )
+
+        self.assertEqual(payload["saved_summaries"][0]["save_kind"], "saved_copy")
+        self.assertEqual(
+            payload["obsidian"]["latest_relative_path"],
+            "Sidekick/Goals Touchbase.md",
+        )
+        self.assertIn("SidekickVault", payload["obsidian"]["open_uri"])
+        self.assertIn("Goals%20Touchbase.md", payload["obsidian"]["open_uri"])
 
     def test_workspace_transcript_humanizes_unresolved_speakers(self):
         segments = [

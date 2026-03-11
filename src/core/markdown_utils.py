@@ -79,6 +79,15 @@ def _sanitize_prompt_for_note(prompt: Optional[str], pass_title: str, role: str)
     return cleaned
 
 
+def _build_folded_callout(title: str, body: str, callout_type: str = "note") -> str:
+    """Return an Obsidian foldable callout collapsed by default."""
+    cleaned = body.strip()
+    if not cleaned:
+        return ""
+    quoted_lines = ["> " + line if line else ">" for line in cleaned.splitlines()]
+    return f"> [!{callout_type}]- {title}\n" + "\n".join(quoted_lines)
+
+
 def build_obsidian_markdown(
     content: str,
     template_label: str,
@@ -91,19 +100,64 @@ def build_obsidian_markdown(
     pass1_user_prompt: Optional[str] = None,
     pass2_system_prompt: Optional[str] = None,
     pass2_user_prompt: Optional[str] = None,
+    revision_history: Optional[list[dict]] = None,
     revision_instruction: Optional[str] = None,
 ) -> str:
     """Assemble the final Obsidian markdown note."""
-    revision_line = ""
-    if revision_instruction and revision_instruction.strip():
-        revision_line = f'**Revised**: "{revision_instruction.strip()}"\n'
+    revision_items: list[str] = []
+    if revision_history:
+        revision_items = []
+        for entry in revision_history:
+            if not isinstance(entry, dict):
+                continue
+            instruction = str(entry.get("instruction") or "").strip()
+            if not instruction:
+                continue
+            created_at = str(entry.get("created_at") or "").strip()
+            route = str(entry.get("route") or "").strip().replace("_", " ")
+            used_transcript_context = bool(entry.get("used_transcript_context"))
+            transcript_version_number = entry.get("transcript_version_number")
+            detail_parts = []
+            if created_at:
+                detail_parts.append(created_at)
+            if route:
+                detail_parts.append(route.title())
+            if used_transcript_context:
+                detail_parts.append("Transcript-backed")
+            if transcript_version_number:
+                detail_parts.append(f"Transcript v{transcript_version_number}")
+            detail_label = " | ".join(detail_parts)
+            revision_items.append(
+                f"- {detail_label}: {instruction}" if detail_label else f"- {instruction}"
+            )
+    elif revision_instruction and revision_instruction.strip():
+        revision_items.append(f'- Revised: "{revision_instruction.strip()}"')
+
+    revision_section = ""
+    if revision_items:
+        revision_section = _build_folded_callout(
+            "Revision History",
+            "\n".join(revision_items),
+            callout_type="abstract",
+        )
     
     # Ensure content has proper spacing for Obsidian
     content = content.strip()
     
-    processing_line = ""
+    info_lines = [
+        f"**Template**: {template_label}",
+        f"**Recorded**: {recorded_at}",
+        f"**Exported**: {exported_at}",
+        f"**Meeting Length**: {duration_str}",
+    ]
     if processing_time_str and processing_time_str != "N/A":
-        processing_line = f"**Processing Time**: {processing_time_str}\n"
+        info_lines.append(f"**Processing Time**: {processing_time_str}")
+
+    info_section = _build_folded_callout(
+        "Meeting Info",
+        "\n".join(info_lines),
+        callout_type="info",
+    )
 
     prompt_sections = ""
     if any(
@@ -116,7 +170,12 @@ def build_obsidian_markdown(
             note_prompt = _sanitize_prompt_for_note(prompt, pass_title, role)
             if not note_prompt:
                 return
-            prompt_parts.append(f"### {pass_title}: {role_title}\n\n```text\n{note_prompt}\n```")
+            prompt_parts.append(
+                _build_folded_callout(
+                    f"{pass_title}: {role_title}",
+                    f"```text\n{note_prompt}\n```",
+                )
+            )
 
         _append_prompt_block("Pass 1", "System Prompt", pass1_system_prompt, "system")
         _append_prompt_block("Pass 1", "User Prompt", pass1_user_prompt, "user")
@@ -126,19 +185,18 @@ def build_obsidian_markdown(
         prompt_sections = "\n\n".join(prompt_parts)
         if prompt_sections:
             prompt_sections = f"{prompt_sections}\n\n"
+
+    transcript_section = _build_folded_callout(
+        "Transcript",
+        f"```text\n{transcript}\n```",
+    )
     
     return (
-        f"**Template**: {template_label}\n"
-        f"{revision_line}"
-        f"**Recorded**: {recorded_at}\n"
-        f"**Exported**: {exported_at}\n"
-        f"**Meeting Length**: {duration_str}\n"
-        f"{processing_line}"
-        f"\n---\n\n"
+        f"{info_section}\n\n"
+        f"---\n\n"
         f"{content}\n"
         f"\n---\n\n"
+        f"{revision_section + '\n\n' if revision_section else ''}"
         f"{prompt_sections}"
-        f"<details>\n<summary>Transcript</summary>\n\n"
-        f"```text\n{transcript}\n```\n\n"
-        f"</details>\n"
+        f"{transcript_section}\n"
     )

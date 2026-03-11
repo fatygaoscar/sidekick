@@ -46,6 +46,9 @@
                 editBuffer: '',
                 showRefineInput: false,
                 isRefiningSummary: false,
+                isEnsuringDraft: false,
+                ensureDraftPromise: null,
+                ensureDraftKey: null,
                 summaryHistory: [],
                 selectedSavedSummaryId: null,
                 banner: null,
@@ -93,6 +96,9 @@
             this.state.editBuffer = '';
             this.state.showRefineInput = false;
             this.state.isRefiningSummary = false;
+            this.state.isEnsuringDraft = false;
+            this.state.ensureDraftPromise = null;
+            this.state.ensureDraftKey = null;
             this.state.summaryHistory = [];
             this.state.selectedSavedSummaryId = null;
             this.state.banner = null;
@@ -370,6 +376,7 @@
                                     <div id="workspace-summary-version-row" class="summary-version-row hidden">
                                         <select id="workspace-summary-version-select" class="version-select"></select>
                                     </div>
+                                    <div id="workspace-summary-revision-history" class="workspace-revision-history hidden"></div>
                                     <div id="workspace-summary-display" class="summary-body"></div>
                                     <div id="workspace-summary-edit-notice" class="workspace-edit-notice hidden">Editing summary. Click Done Editing when you are finished.</div>
                                     <textarea id="workspace-summary-edit" class="summary-edit-textarea hidden" spellcheck="true"></textarea>
@@ -409,6 +416,7 @@
                                         <select id="workspace-transcript-version-select" class="version-select"></select>
                                         <button type="button" class="btn btn-small" id="workspace-retranscribe-btn">Re-transcribe</button>
                                     </div>
+                                    <div id="workspace-transcript-revision-history" class="workspace-revision-history hidden"></div>
                                     <div id="workspace-transcript" class="transcript-view"></div>
                                 </section>
                                 <section class="workspace-panel hidden" id="workspace-panel-settings" data-panel="settings" role="tabpanel" aria-labelledby="workspace-tab-settings" aria-hidden="true">
@@ -477,9 +485,11 @@
                 summaryMeta: modal.querySelector('#workspace-summary-meta'),
                 summaryVersionRow: modal.querySelector('#workspace-summary-version-row'),
                 summaryVersionSelect: modal.querySelector('#workspace-summary-version-select'),
+                summaryRevisionHistory: modal.querySelector('#workspace-summary-revision-history'),
                 transcriptVersionRow: modal.querySelector('#workspace-transcript-version-row'),
                 transcriptVersionSelect: modal.querySelector('#workspace-transcript-version-select'),
                 retranscribeBtn: modal.querySelector('#workspace-retranscribe-btn'),
+                transcriptRevisionHistory: modal.querySelector('#workspace-transcript-revision-history'),
                 summaryDisplay: modal.querySelector('#workspace-summary-display'),
                 summaryEditNotice: modal.querySelector('#workspace-summary-edit-notice'),
                 summaryEdit: modal.querySelector('#workspace-summary-edit'),
@@ -611,9 +621,10 @@
             this.elements.reviseBtn.addEventListener('click', () => this._showRefineInput());
             this.elements.refineCancel.addEventListener('click', () => this._hideRefineInput());
             this.elements.refineSubmit.addEventListener('click', () => this._submitRefine());
-            this.elements.refineInput.addEventListener('keypress', (event) => {
-                if (event.key === 'Enter') {
-                    this._submitRefine();
+            this.elements.refineInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+                    event.preventDefault();
+                    void this._submitRefine();
                 }
             });
             this.elements.undoBtn.addEventListener('click', () => this._undoSummaryChange());
@@ -1195,7 +1206,8 @@
         _renderSummary() {
             const workspace = this.state.workspace;
             const summary = this._currentSummary();
-            const refineLocked = this.state.isRefiningSummary;
+            const refineLocked = this.state.isRefiningSummary || this.state.isEnsuringDraft || Boolean(this.state.chatApplyingMessageId);
+            const revisionHistory = this._currentSummaryRevisionHistory();
 
             this.elements.summaryVersionRow.classList.toggle(
                 'hidden',
@@ -1214,9 +1226,12 @@
                 }
                 options.push(...workspace.saved_summaries.map((saved, index) => {
                         const selected = saved.id === this.state.selectedSavedSummaryId ? 'selected' : '';
-                        const label = saved.saved_to_obsidian_at
-                            ? (index === 0 ? `v${totalSavedVersions} (Latest)` : `v${totalSavedVersions - index}`)
-                            : `Version ${index + 1}`;
+                        const versionNumber = totalSavedVersions - index;
+                        const label = saved.save_kind === 'saved_copy'
+                            ? `v${versionNumber} (Saved Copy)`
+                            : (index === 0
+                                ? `v${versionNumber} (Latest Exported)`
+                                : `v${versionNumber} (Exported)`);
                         return `<option value="${saved.id}" ${selected}>${label}</option>`;
                     }));
                 this.elements.summaryVersionSelect.innerHTML = options.join('');
@@ -1228,7 +1243,7 @@
             if (summary?.status === 'draft') {
                 metaParts.push('Current draft');
             } else if (summary?.status === 'saved') {
-                metaParts.push('Saved version');
+                metaParts.push(summary.save_kind === 'saved_copy' ? 'Saved copy' : 'Exported version');
             }
             if (summary?.template) {
                 metaParts.push(summary.template);
@@ -1236,16 +1251,25 @@
             if (summary?.source_type) {
                 metaParts.push(summary.source_type.replace(/_/g, ' '));
             }
+            if (summary?.latest_revision?.used_transcript_context) {
+                metaParts.push('Transcript-backed revise');
+            }
             if (this._currentSummaryIsOutOfDate()) {
                 metaParts.push('Needs re-summarization');
             }
             this.elements.summaryMeta.textContent = metaParts.join(' · ');
+            this._renderRevisionHistory(
+                this.elements.summaryRevisionHistory,
+                revisionHistory,
+                { activeTranscriptVersionId: this.state.selectedTranscriptVersionId }
+            );
 
             if (!summary) {
                 const emptyMessage = workspace?.state?.requires_speaker_review
                     ? 'Generate a summary when you are ready. Unresolved speakers will be shown as Attendee labels.'
                     : 'Generate a summary once transcription is ready.';
                 this.elements.summaryDisplay.innerHTML = `<div class="workspace-empty">${this._escapeHtml(emptyMessage)}</div>`;
+                this.elements.summaryRevisionHistory.classList.add('hidden');
                 this.elements.summaryEdit.classList.add('hidden');
                 this.elements.summaryDisplay.classList.remove('hidden');
                 this.elements.editBtn.disabled = true;
@@ -1283,7 +1307,7 @@
             this.elements.refineSection.classList.toggle('hidden', !this.state.showRefineInput);
             this.elements.refineCancel.disabled = refineLocked;
             this.elements.refineSubmit.disabled = refineLocked;
-            this.elements.refineSubmit.textContent = refineLocked ? 'Revising...' : 'Revise';
+            this.elements.refineSubmit.textContent = this.state.isEnsuringDraft ? 'Preparing Draft...' : (this.state.isRefiningSummary ? 'Revising...' : 'Revise');
         }
 
         _renderChat() {
@@ -1412,6 +1436,12 @@
             const transcriptVersions = Array.isArray(this.state.transcriptVersions)
                 ? this.state.transcriptVersions
                 : [];
+            const transcriptRevisionHistory = this._currentSummaryRevisionHistory().filter((entry) => {
+                if (!entry.transcript_version_id || !this.state.selectedTranscriptVersionId) {
+                    return true;
+                }
+                return entry.transcript_version_id === this.state.selectedTranscriptVersionId;
+            });
             const showTranscriptControls = Boolean(
                 workspace?.debug_retranscribe_enabled
                 && transcriptVersions.length > 0
@@ -1440,6 +1470,11 @@
                 this.elements.transcriptVersionSelect.innerHTML = '';
                 this.elements.retranscribeBtn.classList.add('hidden');
             }
+            this._renderRevisionHistory(
+                this.elements.transcriptRevisionHistory,
+                transcriptRevisionHistory,
+                { activeTranscriptVersionId: this.state.selectedTranscriptVersionId }
+            );
 
             if (!transcript.length) {
                 this.elements.transcript.innerHTML = '<div class="workspace-empty">Transcript not available yet.</div>';
@@ -1592,18 +1627,19 @@
             const workspace = this.state.workspace;
             const currentSummary = this._currentSummary();
             const primaryAction = this._getPrimaryAction();
-            const refining = this.state.isRefiningSummary;
+            const busy = this.state.isEnsuringDraft || this.state.isRefiningSummary;
 
             this.elements.footerStatus.textContent = this._footerStatusText();
-            this.elements.primaryBtn.textContent = refining && primaryAction.action === 'save_draft'
-                ? 'Revising...'
+            this.elements.primaryBtn.textContent = busy && primaryAction.action === 'save_draft'
+                ? (this.state.isEnsuringDraft ? 'Preparing Draft...' : 'Revising...')
                 : primaryAction.label;
-            this.elements.primaryBtn.disabled = refining || !!primaryAction.disabled;
-            this.elements.secondaryBtn.disabled = refining;
-            this.elements.close.disabled = refining;
+            this.elements.primaryBtn.disabled = busy || !!primaryAction.disabled;
+            this.elements.secondaryBtn.disabled = busy;
+            this.elements.close.disabled = busy;
 
             const showOpenButton = Boolean(workspace?.obsidian?.open_uri)
                 && currentSummary?.status === 'saved'
+                && currentSummary?.save_kind !== 'saved_copy'
                 && !this._currentSummaryIsOutOfDate()
                 && primaryAction.action !== 'open_obsidian';
             this.elements.openObsidianBtn.classList.toggle('hidden', !showOpenButton);
@@ -1617,6 +1653,9 @@
             }
             if (this.state.chatSending) {
                 return 'Sending chat message...';
+            }
+            if (this.state.isEnsuringDraft) {
+                return 'Preparing draft...';
             }
             if (this.state.chatApplyingMessageId) {
                 return 'Applying assistant change to draft...';
@@ -1683,7 +1722,7 @@
             if (!currentSummary && workspace.state?.can_generate_summary) {
                 return { label: 'Generate Summary', action: 'summarize' };
             }
-            if (workspace.obsidian?.open_uri) {
+            if (workspace.obsidian?.open_uri && currentSummary?.status === 'saved' && currentSummary?.save_kind !== 'saved_copy') {
                 return { label: 'Open in Obsidian', action: 'open_obsidian' };
             }
             if (this.state.activeTab !== 'summary') {
@@ -1774,7 +1813,13 @@
         }
 
         async _applyChatMessage(messageId) {
-            if (!messageId || this.state.chatApplyingMessageId || !this._currentSummary()) {
+            if (
+                !messageId
+                || this.state.chatApplyingMessageId
+                || this.state.isEnsuringDraft
+                || this.state.isRefiningSummary
+                || !this._currentSummary()
+            ) {
                 return;
             }
             const currentSummary = this._currentSummary();
@@ -2081,11 +2126,8 @@
         }
 
         _showRefineInput() {
-            if (this.state.isRefiningSummary) {
+            if (this.state.isRefiningSummary || this.state.isEnsuringDraft || this.state.chatApplyingMessageId) {
                 return;
-            }
-            if (this.state.workspace?.draft_summary?.id) {
-                this.state.selectedSavedSummaryId = this.state.workspace.draft_summary.id;
             }
             this.state.showRefineInput = true;
             this._renderSummary();
@@ -2094,7 +2136,7 @@
         }
 
         _hideRefineInput() {
-            if (this.state.isRefiningSummary) {
+            if (this.state.isRefiningSummary || this.state.isEnsuringDraft) {
                 return;
             }
             this.state.showRefineInput = false;
@@ -2102,7 +2144,7 @@
         }
 
         async _submitRefine() {
-            if (this.state.isRefiningSummary) {
+            if (this.state.isRefiningSummary || this.state.isEnsuringDraft || this.state.chatApplyingMessageId) {
                 return;
             }
 
@@ -2112,18 +2154,18 @@
                 return;
             }
 
-            const draftId = await this._ensureDraft('ai_revised');
-            this.state.selectedSavedSummaryId = draftId;
-            const currentSummary = this._currentSummary();
-            if (currentSummary?.content) {
-                this.state.summaryHistory.push(currentSummary.content);
-            }
-
-            this.state.isRefiningSummary = true;
-            this._renderSummary();
-            this._renderFooter();
             try {
-                await this._jsonRequest(`/api/summary-drafts/${draftId}/revise`, {
+                const draftId = await this._ensureDraft('ai_revised');
+                this.state.selectedSavedSummaryId = draftId;
+                const currentSummary = this._currentSummary();
+                if (currentSummary?.content) {
+                    this.state.summaryHistory.push(currentSummary.content);
+                }
+
+                this.state.isRefiningSummary = true;
+                this._renderSummary();
+                this._renderFooter();
+                const payload = await this._jsonRequest(`/api/summary-drafts/${draftId}/revise`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ instruction }),
@@ -2135,6 +2177,9 @@
                     httpErrorMessage: 'Revision failed',
                     logLabel: 'workspace_summary:revise',
                 });
+                if (!payload?.changed && this.state.summaryHistory.length > 0) {
+                    this.state.summaryHistory.pop();
+                }
                 this.state.showRefineInput = false;
                 await this._loadWorkspace();
                 if (this.state.workspace?.draft_summary?.id) {
@@ -2142,7 +2187,13 @@
                 }
                 this.state.activeTab = 'summary';
                 this._render();
+                if (!payload?.changed) {
+                    this._showBanner(payload?.reason || 'No draft change applied.', 'error');
+                }
             } catch (error) {
+                if (this.state.summaryHistory.length > 0) {
+                    this.state.summaryHistory.pop();
+                }
                 let message = error?.message || 'Revision failed';
                 if (message === 'Network request timed out') {
                     message = SUMMARY_REVISE_TIMEOUT_MESSAGE;
@@ -2158,7 +2209,7 @@
         }
 
         async _toggleEditMode() {
-            if (this.state.isRefiningSummary) {
+            if (this.state.isRefiningSummary || this.state.isEnsuringDraft || this.state.chatApplyingMessageId) {
                 return;
             }
             if (!this.state.editMode) {
@@ -2221,7 +2272,7 @@
         }
 
         async _undoSummaryChange() {
-            if (this.state.isRefiningSummary) {
+            if (this.state.isRefiningSummary || this.state.isEnsuringDraft || this.state.chatApplyingMessageId) {
                 return;
             }
             if (this.state.summaryHistory.length === 0) {
@@ -2259,28 +2310,77 @@
         }
 
         async _ensureDraft(sourceType) {
-            if (this.state.workspace?.draft_summary?.id) {
-                return this.state.workspace.draft_summary.id;
+            const selectedSummary = this._currentSummary();
+            const existingDraft = this.state.workspace?.draft_summary || null;
+
+            if (selectedSummary?.status === 'draft' && selectedSummary.id) {
+                return selectedSummary.id;
             }
 
-            const payload = await this._jsonRequest(`/api/recordings/${this.state.sessionId}/summary-draft`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    source_type: sourceType,
-                    source_summary_id: null,
-                    transcript_version_id: this.state.selectedTranscriptVersionId,
-                }),
-            }, {
-                timeoutMs: 10000,
-                retries: 1,
-                networkErrorMessage: 'Workspace network request failed',
-                httpErrorMessage: 'Failed to create summary draft',
-                logLabel: 'workspace_summary:create_draft',
-            });
-            await this._loadWorkspace();
-            this.state.selectedSavedSummaryId = payload.draft_summary_id;
-            return payload.draft_summary_id;
+            if (!selectedSummary && existingDraft?.id) {
+                return existingDraft.id;
+            }
+
+            const sourceSummaryId = selectedSummary?.id || null;
+            const requestKey = [
+                this.state.sessionId || '',
+                sourceSummaryId || '',
+                this.state.selectedTranscriptVersionId || '',
+                sourceType || '',
+            ].join('|');
+
+            if (this.state.ensureDraftPromise) {
+                if (this.state.ensureDraftKey === requestKey) {
+                    return this.state.ensureDraftPromise;
+                }
+                throw new Error('Another draft operation is already in progress.');
+            }
+
+            this.state.isEnsuringDraft = true;
+            this.state.ensureDraftKey = requestKey;
+            this._renderSummary();
+            this._renderChat();
+            this._renderFooter();
+
+            const ensurePromise = (async () => {
+                const payload = await this._jsonRequest(`/api/recordings/${this.state.sessionId}/summary-draft`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source_type: sourceType,
+                        source_summary_id: sourceSummaryId,
+                        transcript_version_id: this.state.selectedTranscriptVersionId,
+                        preserve_existing_draft: Boolean(
+                            existingDraft?.id && sourceSummaryId && existingDraft.id !== sourceSummaryId
+                        ),
+                    }),
+                }, {
+                    timeoutMs: 10000,
+                    retries: 0,
+                    retryOnNetworkError: false,
+                    networkErrorMessage: 'Workspace network request failed',
+                    httpErrorMessage: 'Failed to create summary draft',
+                    logLabel: 'workspace_summary:create_draft',
+                });
+                await this._loadWorkspace();
+                this.state.selectedSavedSummaryId = payload.draft_summary_id;
+                return payload.draft_summary_id;
+            })();
+
+            this.state.ensureDraftPromise = ensurePromise;
+
+            try {
+                return await ensurePromise;
+            } finally {
+                if (this.state.ensureDraftPromise === ensurePromise) {
+                    this.state.ensureDraftPromise = null;
+                    this.state.ensureDraftKey = null;
+                }
+                this.state.isEnsuringDraft = false;
+                this._renderSummary();
+                this._renderChat();
+                this._renderFooter();
+            }
         }
 
         async _saveDraft() {
@@ -2370,7 +2470,67 @@
                 return 'Saved summary';
             }
             const total = savedSummaries.length;
-            return index === 0 ? `v${total} (Latest)` : `v${total - index}`;
+            const versionNumber = total - index;
+            if (currentSummary.save_kind === 'saved_copy') {
+                return `v${versionNumber} (Saved Copy)`;
+            }
+            return index === 0 ? `v${versionNumber} (Latest Exported)` : `v${versionNumber} (Exported)`;
+        }
+
+        _currentSummaryRevisionHistory() {
+            const currentSummary = this._currentSummary();
+            if (!Array.isArray(currentSummary?.revision_history)) {
+                return [];
+            }
+            return currentSummary.revision_history
+                .filter((entry) => entry && typeof entry === 'object' && String(entry.instruction || '').trim())
+                .slice()
+                .reverse();
+        }
+
+        _renderRevisionHistory(container, entries, { activeTranscriptVersionId = null } = {}) {
+            if (!container) {
+                return;
+            }
+            const items = Array.isArray(entries) ? entries : [];
+            container.classList.toggle('hidden', items.length === 0);
+            if (!items.length) {
+                container.innerHTML = '';
+                return;
+            }
+
+            container.innerHTML = `
+                <div class="workspace-revision-history-header">Revision History</div>
+                <div class="workspace-revision-history-list">
+                    ${items.map((entry) => {
+                        const route = String(entry.route || '').replace(/_/g, ' ').trim();
+                        const transcriptVersionNumber = entry.transcript_version_number;
+                        const transcriptBacked = entry.used_transcript_context
+                            ? '<span class="workspace-revision-badge">Transcript-backed</span>'
+                            : '<span class="workspace-revision-badge">Style-only</span>';
+                        const transcriptVersionBadge = transcriptVersionNumber
+                            ? `<span class="workspace-revision-badge${entry.transcript_version_id === activeTranscriptVersionId ? ' workspace-revision-badge-accent' : ''}">Transcript v${this._escapeHtml(String(transcriptVersionNumber))}</span>`
+                            : '';
+                        const routeBadge = route
+                            ? `<span class="workspace-revision-badge">${this._escapeHtml(route)}</span>`
+                            : '';
+                        const createdAt = entry.created_at
+                            ? this._escapeHtml(this._formatChatTimestamp(entry.created_at) || String(entry.created_at))
+                            : '';
+                        return `
+                            <div class="workspace-revision-entry">
+                                <div class="workspace-revision-meta">
+                                    ${createdAt ? `<span>${createdAt}</span>` : ''}
+                                    ${transcriptBacked}
+                                    ${routeBadge}
+                                    ${transcriptVersionBadge}
+                                </div>
+                                <div class="workspace-revision-text">${this._escapeHtml(String(entry.instruction || ''))}</div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            `;
         }
 
         _canApplyChatMessage(message) {
@@ -2378,6 +2538,9 @@
                 message
                 && message.role === 'assistant'
                 && message.apply_ready
+                && !this.state.isEnsuringDraft
+                && !this.state.isRefiningSummary
+                && !this.state.chatApplyingMessageId
                 && this._currentSummary()
             );
         }
@@ -2687,6 +2850,9 @@
             this.state.workspace = null;
             this.state.banner = null;
             this.state.selectedSavedSummaryId = null;
+            this.state.isEnsuringDraft = false;
+            this.state.ensureDraftPromise = null;
+            this.state.ensureDraftKey = null;
             this.state.chatInput = '';
             this.state.chatSending = false;
             this.state.chatApplyingMessageId = null;

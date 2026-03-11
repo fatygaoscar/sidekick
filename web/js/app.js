@@ -1,9 +1,20 @@
 /**
  * Sidekick recording page.
  *
- * Recording and upload logic stays here. Post-recording review moves into the
- * shared RecordingWorkspace controller.
+ * Recording logic stays here. Post-recording review moves into the shared
+ * RecordingWorkspace controller.
  */
+
+const CAPTURE_MODE_OPTIONS = {
+    single_speaker: {
+        label: 'Single Speaker',
+        description: 'Optimized for one nearby voice. May reduce background and distant voices.',
+    },
+    whole_room: {
+        label: 'Whole Room',
+        description: 'Optimized for meetings and distant speakers. Reduces browser audio processing when possible.',
+    },
+};
 
 class SidekickApp {
     constructor() {
@@ -11,13 +22,14 @@ class SidekickApp {
             isRecording: false,
             isStartingRecording: false,
             isStoppingRecording: false,
-            isUploadingFile: false,
             sessionId: null,
             lastSessionId: null,
             elapsedSeconds: 0,
             recordingStartTime: null,
             livePreviewEnabled: false,
             previewConnectionState: 'idle',
+            recordingCaptureMode: 'whole_room',
+            isSavingCaptureMode: false,
         };
 
         this.timerInterval = null;
@@ -38,11 +50,10 @@ class SidekickApp {
         this.captureStopMeta = null;
         this.fallbackBlob = null;
         this.fallbackMimeType = null;
+        this.captureDiagnostics = null;
 
         this.elements = {
             recordBtn: document.getElementById('record-btn'),
-            uploadBtn: document.getElementById('upload-btn'),
-            uploadInput: document.getElementById('upload-input'),
             timer: document.getElementById('timer'),
             audioCanvas: document.getElementById('audio-canvas'),
             statusText: document.getElementById('status-text'),
@@ -50,6 +61,9 @@ class SidekickApp {
             connectionText: document.getElementById('connection-text'),
             livePreview: document.getElementById('live-preview'),
             livePreviewText: document.getElementById('live-preview-text'),
+            captureModeList: document.getElementById('capture-mode-list'),
+            captureModeNote: document.getElementById('capture-mode-note'),
+            captureDiagnostics: document.getElementById('capture-mode-diagnostics'),
         };
 
         this.workspace = new window.RecordingWorkspace({
@@ -67,7 +81,9 @@ class SidekickApp {
         this._initWebSocket();
         this._initAudioCapture();
         this._bindEvents();
+        this._renderCaptureModeUi();
         this._syncPrimaryControls();
+        void this._loadAppSettings();
     }
 
     _initWebSocket() {
@@ -84,6 +100,7 @@ class SidekickApp {
         this.audioCapture = new AudioCapture({
             sampleRate: 16000,
             captureSampleRate: 48000,
+            captureMode: this.state.recordingCaptureMode,
             onAudioData: (buffer) => {
                 if (
                     this.state.isRecording
@@ -104,6 +121,10 @@ class SidekickApp {
                 this.captureStopMeta = meta;
                 this.expectedChunkCount = meta.chunkCount || 0;
             },
+            onCaptureDiagnostics: (diagnostics) => {
+                this.captureDiagnostics = diagnostics;
+                this._renderCaptureModeUi();
+            },
             onLevelUpdate: (level, frequencyData, sampleRate) => {
                 this.visualizer.draw(level, frequencyData, sampleRate);
             },
@@ -112,8 +133,7 @@ class SidekickApp {
 
     _bindEvents() {
         this.elements.recordBtn.addEventListener('click', () => this._toggleRecording());
-        this.elements.uploadBtn?.addEventListener('click', () => this._handleUploadClick());
-        this.elements.uploadInput?.addEventListener('change', (event) => this._handleUploadSelection(event));
+        this.elements.captureModeList?.addEventListener('change', (event) => this._handleCaptureModeChange(event));
 
         const armPageGuard = () => this._armMainPageHistoryGuard();
         window.addEventListener('pointerdown', armPageGuard, { passive: true, once: true });
@@ -125,7 +145,6 @@ class SidekickApp {
                 !this.state.isRecording
                 && !this.state.isStartingRecording
                 && !this.state.isStoppingRecording
-                && !this.state.isUploadingFile
             ) {
                 return;
             }
@@ -151,7 +170,6 @@ class SidekickApp {
                     !this.state.isRecording
                     && !this.state.isStartingRecording
                     && !this.state.isStoppingRecording
-                    && !this.state.isUploadingFile
                 )
             ) {
                 return;
@@ -160,9 +178,7 @@ class SidekickApp {
                 return;
             }
             event.preventDefault();
-            this.elements.statusText.textContent = this.state.isUploadingFile
-                ? 'Wait for the upload to finish before leaving this page'
-                : 'Stop recording before leaving this page';
+            this.elements.statusText.textContent = 'Stop recording before leaving this page';
         });
 
         window.addEventListener('popstate', () => {
@@ -205,6 +221,290 @@ class SidekickApp {
                 void this._connectPreviewSocket(this.state.sessionId || this.state.lastSessionId);
             }
         });
+    }
+
+    async _loadAppSettings() {
+        try {
+            const payload = await window.SidekickNetwork.json('/api/settings', {
+                method: 'GET',
+            }, {
+                timeoutMs: 10000,
+                retries: 0,
+                networkErrorMessage: 'Network request failed while loading settings',
+                httpErrorMessage: 'Failed to load settings',
+                logLabel: 'recording:settings_load',
+            });
+            const requestedMode = String(payload?.settings?.recording_capture_mode || '').trim().toLowerCase();
+            if (!CAPTURE_MODE_OPTIONS[requestedMode]) {
+                this._renderCaptureModeUi();
+                return;
+            }
+            this.state.recordingCaptureMode = requestedMode;
+            this.audioCapture?.setCaptureMode(requestedMode);
+            this._renderCaptureModeUi();
+        } catch (error) {
+            console.warn('Failed to load recording capture mode; using default Whole Room mode:', error?.message || error);
+            this._renderCaptureModeUi();
+        }
+    }
+
+    async _handleCaptureModeChange(event) {
+        const selectedMode = String(event?.target?.value || '').trim().toLowerCase();
+        if (!CAPTURE_MODE_OPTIONS[selectedMode] || selectedMode === this.state.recordingCaptureMode) {
+            this._renderCaptureModeUi();
+            return;
+        }
+
+        const previousMode = this.state.recordingCaptureMode;
+        this.state.recordingCaptureMode = selectedMode;
+        this.state.isSavingCaptureMode = true;
+        this.audioCapture?.setCaptureMode(selectedMode);
+        this._renderCaptureModeUi();
+
+        try {
+            await window.SidekickNetwork.json('/api/settings', {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    recording_capture_mode: selectedMode,
+                }),
+            }, {
+                timeoutMs: 10000,
+                retries: 0,
+                networkErrorMessage: 'Network request failed while saving mic mode',
+                httpErrorMessage: 'Failed to save mic mode',
+                logLabel: 'recording:capture_mode',
+            });
+
+            if (this.state.isRecording || this.state.isStartingRecording || this.state.isStoppingRecording) {
+                this.elements.statusText.textContent = 'Mic mode saved. It will apply to the next recording.';
+            } else {
+                this.elements.statusText.textContent = 'Mic mode updated';
+            }
+        } catch (error) {
+            console.error('Failed to save recording capture mode:', error);
+            this.state.recordingCaptureMode = previousMode;
+            this.audioCapture?.setCaptureMode(previousMode);
+            this.elements.statusText.textContent = error?.message || 'Failed to save mic mode';
+        } finally {
+            this.state.isSavingCaptureMode = false;
+            this._renderCaptureModeUi();
+            this._syncPrimaryControls();
+        }
+    }
+
+    _renderCaptureModeUi() {
+        const modeList = this.elements.captureModeList;
+        const modeNote = this.elements.captureModeNote;
+        const diagnostics = this.elements.captureDiagnostics;
+        if (!modeList || !modeNote || !diagnostics) {
+            return;
+        }
+
+        const selectedMode = CAPTURE_MODE_OPTIONS[this.state.recordingCaptureMode]
+            ? this.state.recordingCaptureMode
+            : 'whole_room';
+        const controlsDisabled = (
+            this.state.isStartingRecording
+            || this.state.isStoppingRecording
+            || this.state.isSavingCaptureMode
+        );
+
+        modeList.innerHTML = `
+            <div class="capture-mode-segmented" role="radiogroup" aria-labelledby="capture-mode-heading">
+                ${Object.entries(CAPTURE_MODE_OPTIONS).map(([value, option]) => `
+                    <label class="capture-mode-segment${value === selectedMode ? ' selected' : ''}">
+                        <input
+                            type="radio"
+                            name="recording-capture-mode"
+                            value="${value}"
+                            ${value === selectedMode ? 'checked' : ''}
+                            ${controlsDisabled ? 'disabled' : ''}
+                        >
+                        <span class="capture-mode-segment-label">${option.label}</span>
+                    </label>
+                `).join('')}
+            </div>
+        `;
+
+        const selectedOption = CAPTURE_MODE_OPTIONS[selectedMode];
+        const nextRecordingNote = this.state.isRecording
+            ? 'Changes apply to the next recording.'
+            : '';
+        const savingNote = this.state.isSavingCaptureMode ? 'Saving mic mode...' : '';
+        modeNote.innerHTML = `
+            <span class="capture-mode-description">${selectedOption.description}</span>
+            <span class="capture-mode-meta">${[
+                'Shared across devices using this Sidekick instance.',
+                nextRecordingNote,
+                savingNote,
+            ].filter(Boolean).join(' ')}</span>
+        `;
+
+        diagnostics.innerHTML = this._buildCaptureDiagnosticsMarkup();
+    }
+
+    _buildCaptureDiagnosticsMarkup() {
+        const diagnostics = this.captureDiagnostics;
+        if (!diagnostics) {
+            return '';
+        }
+
+        const rows = [];
+        const requested = diagnostics.requestedConstraints || {};
+        const applied = diagnostics.appliedSettings || {};
+        const interpretation = this._interpretCaptureDiagnostics(diagnostics);
+        const hasWarning = this._captureDiagnosticsHasWarning(diagnostics);
+        const requestedMode = CAPTURE_MODE_OPTIONS[diagnostics.mode]?.label || diagnostics.mode;
+        rows.push(this._captureDiagnosticsRow('Requested mode', requestedMode));
+        rows.push(this._captureDiagnosticsRow(
+            'Request',
+            this._formatCaptureConstraintSummary(requested),
+        ));
+        rows.push(this._captureDiagnosticsRow(
+            'Applied',
+            this._formatCaptureAppliedSummary(applied),
+        ));
+        rows.push(this._captureDiagnosticsRow(
+            'Constraint support',
+            this._formatSupportedConstraintSummary(diagnostics.supportedConstraints || {}),
+        ));
+
+        if (diagnostics.fallbackUsed) {
+            rows.push(this._captureDiagnosticsRow(
+                'Fallback',
+                'Used browser-default microphone capture after the mode-specific request failed.',
+            ));
+        }
+
+        if (!hasWarning) {
+            return `
+                <details class="capture-diagnostics-details">
+                    <summary class="capture-diagnostics-summary">Applied microphone settings</summary>
+                    <div class="capture-diagnostics-card">
+                        <div class="capture-diagnostics-grid">
+                            ${rows.join('')}
+                        </div>
+                    </div>
+                </details>
+            `;
+        }
+
+        return `
+            <div class="capture-diagnostics-card capture-diagnostics-warning">
+                <div class="capture-diagnostics-title">Applied microphone settings</div>
+                <div class="capture-diagnostics-interpretation">${interpretation}</div>
+                <div class="capture-diagnostics-grid">
+                    ${rows.join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    _captureDiagnosticsHasWarning(diagnostics) {
+        const applied = diagnostics?.appliedSettings || {};
+        if (diagnostics?.fallbackUsed) {
+            return true;
+        }
+        if (!diagnostics?.browserCanReportSettings || Object.keys(applied).length === 0) {
+            return true;
+        }
+        if (diagnostics.mode !== 'whole_room') {
+            return false;
+        }
+        return (
+            applied.echoCancellation === true
+            || applied.noiseSuppression === true
+            || applied.autoGainControl === true
+            || applied.channelCount === 1
+        );
+    }
+
+    _captureDiagnosticsRow(label, value) {
+        return `
+            <div class="capture-diagnostics-row">
+                <span class="capture-diagnostics-label">${label}</span>
+                <span class="capture-diagnostics-value">${value}</span>
+            </div>
+        `;
+    }
+
+    _formatCaptureConstraintSummary(constraints) {
+        const requestedChannels = constraints.channelCount ?? 'default';
+        const requestedRate = constraints.sampleRate ?? 'default';
+        const ec = this._formatBooleanSetting(constraints.echoCancellation);
+        const ns = this._formatBooleanSetting(constraints.noiseSuppression);
+        const agc = this._formatBooleanSetting(constraints.autoGainControl);
+        return `${requestedChannels}ch, ${requestedRate}Hz, EC ${ec}, NS ${ns}, AGC ${agc}`;
+    }
+
+    _formatCaptureAppliedSummary(appliedSettings) {
+        if (!appliedSettings || Object.keys(appliedSettings).length === 0) {
+            return 'Applied microphone settings were not exposed by this browser.';
+        }
+        const channelCount = appliedSettings.channelCount ?? 'unknown';
+        const sampleRate = appliedSettings.sampleRate ?? 'unknown';
+        const ec = this._formatBooleanSetting(appliedSettings.echoCancellation);
+        const ns = this._formatBooleanSetting(appliedSettings.noiseSuppression);
+        const agc = this._formatBooleanSetting(appliedSettings.autoGainControl);
+        return `${channelCount}ch, ${sampleRate}Hz, EC ${ec}, NS ${ns}, AGC ${agc}`;
+    }
+
+    _formatSupportedConstraintSummary(supportedConstraints) {
+        const keys = ['channelCount', 'echoCancellation', 'noiseSuppression', 'autoGainControl'];
+        const supported = keys.filter((key) => supportedConstraints[key]).length;
+        return supported === 0
+            ? 'This browser did not report support for microphone processing constraints.'
+            : `${supported}/${keys.length} microphone processing constraints were reported as supported.`;
+    }
+
+    _formatBooleanSetting(value) {
+        if (value === true) {
+            return 'on';
+        }
+        if (value === false) {
+            return 'off';
+        }
+        return 'unknown';
+    }
+
+    _interpretCaptureDiagnostics(diagnostics) {
+        const applied = diagnostics.appliedSettings || {};
+        if (!diagnostics.browserCanReportSettings || Object.keys(applied).length === 0) {
+            return 'This browser did not expose applied microphone settings, so Sidekick can only show the requested mode.';
+        }
+
+        const warnings = [];
+        if (diagnostics.fallbackUsed) {
+            warnings.push('Whole Room fallback used browser-default capture settings after the original request failed.');
+        }
+        if (diagnostics.mode === 'whole_room' && applied.echoCancellation === true) {
+            warnings.push('Browser kept echo cancellation enabled, so distant voices or speaker playback may still be reduced.');
+        }
+        if (diagnostics.mode === 'whole_room' && applied.noiseSuppression === true) {
+            warnings.push('Browser kept noise suppression enabled, which can reduce quiet room audio.');
+        }
+        if (diagnostics.mode === 'whole_room' && applied.autoGainControl === true) {
+            warnings.push('Browser kept automatic gain control enabled, so room dynamics may still be compressed.');
+        }
+        if (diagnostics.mode === 'whole_room' && applied.channelCount === 1) {
+            warnings.push('Stereo was requested, but this browser/device is recording in mono.');
+        }
+        if (diagnostics.mode === 'single_speaker' && applied.echoCancellation === true && applied.noiseSuppression === true) {
+            warnings.push('Voice-focused microphone processing is active.');
+        }
+
+        if (warnings.length > 0) {
+            return warnings.join(' ');
+        }
+
+        if (diagnostics.mode === 'whole_room') {
+            return 'Whole Room capture settings were applied without obvious browser overrides.';
+        }
+
+        return 'Single Speaker capture settings were applied.';
     }
 
     _onConnected() {
@@ -287,8 +587,8 @@ class SidekickApp {
     }
 
     async _toggleRecording() {
-        if (this.state.isUploadingFile) {
-            this.elements.statusText.textContent = 'Wait for the upload to finish';
+        if (this.state.isSavingCaptureMode) {
+            this.elements.statusText.textContent = 'Wait for the mic mode change to finish saving';
             return;
         }
         if (this.state.isStartingRecording || this.state.isStoppingRecording) {
@@ -304,47 +604,12 @@ class SidekickApp {
     _syncPrimaryControls() {
         if (this.elements.recordBtn) {
             this.elements.recordBtn.disabled = (
-                this.state.isUploadingFile
+                this.state.isSavingCaptureMode
                 || this.state.isStartingRecording
                 || this.state.isStoppingRecording
             );
         }
-        if (this.elements.uploadBtn) {
-            this.elements.uploadBtn.disabled = (
-                this.state.isRecording
-                || this.state.isStartingRecording
-                || this.state.isStoppingRecording
-                || this.state.isUploadingFile
-            );
-            this.elements.uploadBtn.textContent = this.state.isUploadingFile ? 'Uploading...' : 'Upload File';
-        }
-    }
-
-    _handleUploadClick() {
-        if (this.state.isRecording || this.state.isStartingRecording || this.state.isStoppingRecording) {
-            this.elements.statusText.textContent = 'Stop recording before uploading a file';
-            return;
-        }
-        if (this.state.isUploadingFile) {
-            return;
-        }
-        this.elements.uploadInput?.click();
-    }
-
-    async _handleUploadSelection(event) {
-        const input = event.target;
-        const file = input?.files?.[0];
-        if (!file) {
-            return;
-        }
-
-        try {
-            await this._startFileUpload(file);
-        } finally {
-            if (input) {
-                input.value = '';
-            }
-        }
+        this._renderCaptureModeUi();
     }
 
     async _startRecording() {
@@ -486,64 +751,6 @@ class SidekickApp {
         }
     }
 
-    async _startFileUpload(file) {
-        if (this.state.isRecording || this.state.isStartingRecording || this.state.isStoppingRecording) {
-            this.elements.statusText.textContent = 'Stop recording before uploading a file';
-            return;
-        }
-        if (this.state.isUploadingFile) {
-            return;
-        }
-
-        const extension = this._inferUploadExtension(file);
-        if (!this._isSupportedUpload(file, extension)) {
-            this.elements.statusText.textContent = 'Unsupported file type';
-            alert('Unsupported file type. Choose MP3, WAV, M4A, or MP4.');
-            return;
-        }
-
-        let sessionId = null;
-        this.state.isUploadingFile = true;
-        this._syncPrimaryControls();
-        this.elements.statusText.textContent = 'Preparing upload...';
-
-        try {
-            sessionId = await this._createSession({
-                timeoutMs: 15000,
-                retries: 1,
-                networkErrorMessage: 'Network request failed while creating upload session',
-                httpErrorMessage: 'Failed to create upload session',
-                logLabel: 'upload:create_session',
-            });
-            this.state.sessionId = sessionId;
-            this.state.lastSessionId = sessionId;
-
-            this.elements.statusText.textContent = 'Uploading file...';
-            await this._uploadImportedAudio(sessionId, file, extension);
-            await this._seedUploadedRecordingTitle(sessionId, file.name);
-            await this._finalizeUploadSession(sessionId);
-
-            this.elements.statusText.textContent = 'Opening workspace...';
-            await this.workspace.open(sessionId, {
-                autoStartTranscription: false,
-                transcriptionStartMode: 'manual',
-                workspaceLoadTimeoutMs: 15000,
-                workspaceLoadRetries: 3,
-            });
-            this.elements.statusText.textContent = 'Review upload';
-        } catch (error) {
-            console.error('Failed to upload file:', error);
-            if (sessionId) {
-                await this._cleanupFailedUploadSession(sessionId);
-            }
-            this.elements.statusText.textContent = 'Upload failed';
-            alert(error?.message || 'Failed to upload file');
-        } finally {
-            this.state.isUploadingFile = false;
-            this._syncPrimaryControls();
-        }
-    }
-
     async _createSession(config = {}) {
         let timezoneName = null;
         try {
@@ -585,184 +792,6 @@ class SidekickApp {
             httpErrorMessage: 'Failed to end session',
             ...config,
         });
-    }
-
-    async _uploadImportedAudio(sessionId, file, extension) {
-        const mimeType = this._uploadMimeType(file, extension);
-        const response = await window.SidekickNetwork.request(`/api/recordings/${sessionId}/audio`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': mimeType,
-                'X-Upload-Extension': extension,
-            },
-            body: file,
-        }, {
-            timeoutMs: 600000,
-            retries: 0,
-            networkErrorMessage: 'Network request failed while uploading file',
-            logLabel: 'upload:file',
-        });
-
-        if (!response.ok) {
-            const payload = await response.json().catch(() => ({}));
-            throw new Error(payload.detail || 'Failed to upload file');
-        }
-    }
-
-    async _seedUploadedRecordingTitle(sessionId, filename) {
-        const title = this._deriveTitleFromFilename(filename);
-        if (!title) {
-            return;
-        }
-
-        try {
-            await window.SidekickNetwork.json(`/api/recordings/${sessionId}/settings`, {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    title,
-                }),
-            }, {
-                timeoutMs: 10000,
-                retries: 0,
-                networkErrorMessage: 'Network request failed while naming uploaded file',
-                httpErrorMessage: 'Failed to update uploaded recording title',
-                logLabel: 'upload:title',
-            });
-        } catch (error) {
-            console.warn('Failed to seed uploaded recording title:', error?.message || error);
-        }
-    }
-
-    async _finalizeUploadSession(sessionId) {
-        try {
-            const completion = await this._completeRecording(sessionId, {
-                mimeType: 'audio/webm',
-                expectedChunks: 0,
-                allowFallbackBlob: true,
-            });
-            if (!completion?.workspace_ready) {
-                throw new Error('Uploaded audio is not ready yet');
-            }
-            this.state.sessionId = null;
-        } catch (error) {
-            try {
-                await this._endSession(sessionId, {
-                    networkErrorMessage: 'Network request failed while finalizing upload session',
-                    logLabel: 'upload:end_session',
-                });
-            } catch (endError) {
-                console.warn('Failed to end upload session cleanly after complete fallback:', {
-                    sessionId,
-                    message: endError?.message || 'Failed to end upload session',
-                });
-            }
-            console.warn('Failed to finalize upload session cleanly:', {
-                sessionId,
-                message: error?.message || 'Failed to finalize upload session',
-            });
-            throw error;
-        }
-    }
-
-    async _cleanupFailedUploadSession(sessionId) {
-        try {
-            const response = await window.SidekickNetwork.request(`/api/recordings/${sessionId}`, {
-                method: 'DELETE',
-            }, {
-                timeoutMs: 10000,
-                retries: 0,
-                networkErrorMessage: 'Network request failed while cleaning up failed upload',
-                logLabel: 'upload:cleanup',
-            });
-            if (!response.ok && response.status !== 404) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-        } catch (cleanupError) {
-            console.warn('Failed to clean up failed upload session:', {
-                sessionId,
-                message: cleanupError?.message || 'Cleanup failed',
-            });
-        }
-    }
-
-    _inferUploadExtension(file) {
-        const filename = String(file?.name || '').toLowerCase();
-        if (filename.endsWith('.wav')) {
-            return 'wav';
-        }
-        if (filename.endsWith('.mp3')) {
-            return 'mp3';
-        }
-        if (filename.endsWith('.m4a')) {
-            return 'm4a';
-        }
-        if (filename.endsWith('.mp4')) {
-            return 'mp4';
-        }
-
-        const fileType = String(file?.type || '').toLowerCase();
-        if (fileType.includes('audio/wav') || fileType.includes('audio/x-wav')) {
-            return 'wav';
-        }
-        if (fileType.includes('audio/mpeg') || fileType.includes('audio/mp3')) {
-            return 'mp3';
-        }
-        if (fileType.includes('video/mp4')) {
-            return 'mp4';
-        }
-        if (fileType.includes('audio/mp4') || fileType.includes('audio/x-m4a') || fileType.includes('audio/m4a')) {
-            return 'm4a';
-        }
-        return '';
-    }
-
-    _isSupportedUpload(file, extension) {
-        const supportedExtensions = new Set(['wav', 'mp3', 'm4a', 'mp4']);
-        if (supportedExtensions.has(extension)) {
-            return true;
-        }
-
-        const fileType = String(file?.type || '').toLowerCase();
-        return (
-            fileType.includes('audio/wav')
-            || fileType.includes('audio/x-wav')
-            || fileType.includes('audio/mpeg')
-            || fileType.includes('audio/mp3')
-            || fileType.includes('audio/mp4')
-            || fileType.includes('audio/x-m4a')
-            || fileType.includes('video/mp4')
-        );
-    }
-
-    _uploadMimeType(file, extension) {
-        const fileType = String(file?.type || '').trim();
-        if (fileType) {
-            return fileType;
-        }
-        if (extension === 'wav') {
-            return 'audio/wav';
-        }
-        if (extension === 'mp3') {
-            return 'audio/mpeg';
-        }
-        if (extension === 'mp4') {
-            return 'video/mp4';
-        }
-        if (extension === 'm4a') {
-            return 'audio/mp4';
-        }
-        return 'application/octet-stream';
-    }
-
-    _deriveTitleFromFilename(filename) {
-        const normalized = String(filename || '').trim();
-        if (!normalized) {
-            return '';
-        }
-        return normalized.replace(/\.[^.]+$/, '').trim();
     }
 
     _startTimer() {
@@ -953,7 +982,6 @@ class SidekickApp {
             preserveLastSessionId = false,
             statusText = '',
         } = options;
-        this.state.isUploadingFile = false;
         this.state.isStartingRecording = false;
         this.state.isStoppingRecording = false;
         this.state.livePreviewEnabled = false;

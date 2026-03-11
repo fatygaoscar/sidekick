@@ -249,9 +249,10 @@ class WorkspaceChatService:
                     source_type="chat_applied",
                 )
             else:
-                draft = await self._repository.create_draft_from_summary(
+                draft = await self._repository.branch_draft_from_summary(
                     base_summary.id,
                     source_type="chat_applied",
+                    preserve_existing_draft=True,
                 )
                 draft = await self._repository.update_summary(
                     draft.id,

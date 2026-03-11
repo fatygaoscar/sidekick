@@ -76,6 +76,9 @@ def _serialize_app_settings(settings) -> dict:
         "summarization_backend": str(
             getattr(settings, "summarization_backend", get_settings().summarization_backend.value)
         ),
+        "recording_capture_mode": str(
+            getattr(settings, "recording_capture_mode", "whole_room")
+        ),
     }
 
 
@@ -221,6 +224,16 @@ def _serialize_transcript_version(version, latest_version_id: str | None) -> dic
 
 def _serialize_summary(summary, meeting=None) -> dict:
     out_of_date_reason = _summary_out_of_date_reason(meeting, summary) if meeting else None
+    workflow_data = _safe_json_loads(getattr(summary, "workflow_data_json", None), {})
+    revision_history = workflow_data.get("revision_history", []) if isinstance(workflow_data, dict) else []
+    if not isinstance(revision_history, list):
+        revision_history = []
+    latest_revision = revision_history[-1] if revision_history else None
+    save_kind = (
+        "exported"
+        if (getattr(summary, "saved_to_obsidian_at", None) or getattr(summary, "obsidian_relative_path", None))
+        else "saved_copy"
+    )
     return {
         "id": str(summary.id),
         "meeting_id": str(summary.meeting_id),
@@ -241,8 +254,11 @@ def _serialize_summary(summary, meeting=None) -> dict:
         "source_type": summary.source_type,
         "saved_to_obsidian_at": to_utc_iso(summary.saved_to_obsidian_at),
         "obsidian_relative_path": summary.obsidian_relative_path,
+        "save_kind": save_kind if getattr(summary, "status", None) == "saved" else None,
         "summary_out_of_date": out_of_date_reason is not None,
         "summary_out_of_date_reason": out_of_date_reason,
+        "revision_history": revision_history,
+        "latest_revision": latest_revision if isinstance(latest_revision, dict) else None,
     }
 
 
@@ -265,9 +281,25 @@ def _summary_version_label(summary, saved_summaries: list) -> str:
         if str(getattr(item, "id", "")) != str(getattr(summary, "id", "")):
             continue
         total_saved = len(ordered)
-        if index == 0:
-            return f"v{total_saved} (Latest)"
-        return f"v{total_saved - index}"
+        version_number = total_saved - index
+        save_kind = (
+            "exported"
+            if (getattr(item, "saved_to_obsidian_at", None) or getattr(item, "obsidian_relative_path", None))
+            else "saved_copy"
+        )
+        if save_kind == "exported":
+            latest_exported = next(
+                (
+                    candidate
+                    for candidate in ordered
+                    if (getattr(candidate, "saved_to_obsidian_at", None) or getattr(candidate, "obsidian_relative_path", None))
+                ),
+                None,
+            )
+            if latest_exported and str(getattr(latest_exported, "id", "")) == str(getattr(item, "id", "")):
+                return f"v{version_number} (Latest Exported)"
+            return f"v{version_number} (Exported)"
+        return f"v{version_number} (Saved Copy)"
     return "Saved summary"
 
 
@@ -1019,6 +1051,7 @@ class WorkspaceChatApplyRequest(BaseModel):
 class UpdateAppSettingsRequest(BaseModel):
     workspace_chat_enabled: Optional[bool] = None
     summarization_backend: Optional[str] = None
+    recording_capture_mode: Optional[str] = None
 
 
 async def _resolve_workspace_chat_context(
@@ -1155,6 +1188,14 @@ async def get_recording_workspace(
         transcript_version_id=active_version.id if active_version else None,
     )
     latest_saved_summary = saved_summaries[0] if saved_summaries else None
+    latest_exported_summary = next(
+        (
+            summary
+            for summary in saved_summaries
+            if (getattr(summary, "saved_to_obsidian_at", None) or getattr(summary, "obsidian_relative_path", None))
+        ),
+        None,
+    )
 
     duration_seconds = 0
     if segments:
@@ -1184,13 +1225,13 @@ async def get_recording_workspace(
         else ""
     )
     open_in_obsidian_uri = None
-    if latest_saved_summary and latest_saved_summary.obsidian_relative_path and vault_name:
+    if latest_exported_summary and latest_exported_summary.obsidian_relative_path and vault_name:
         open_in_obsidian_uri = (
             f"obsidian://open?"
             f"vault={urllib.parse.quote(vault_name)}&"
-            f"file={urllib.parse.quote(latest_saved_summary.obsidian_relative_path)}"
+            f"file={urllib.parse.quote(latest_exported_summary.obsidian_relative_path)}"
         )
-    elif latest_saved_summary:
+    elif latest_exported_summary:
         search_query = _build_formatted_title(
             session.started_at,
             meeting.title,
@@ -1310,8 +1351,8 @@ async def get_recording_workspace(
         else None,
         "obsidian": {
             "open_uri": open_in_obsidian_uri,
-            "latest_relative_path": latest_saved_summary.obsidian_relative_path
-            if latest_saved_summary
+            "latest_relative_path": latest_exported_summary.obsidian_relative_path
+            if latest_exported_summary
             else None,
         },
         "chat": {
@@ -1383,6 +1424,14 @@ async def update_app_settings(
             await summarization_manager.switch_backend(target_backend)
             switched_backend = True
 
+    normalized_capture_mode = UNSET
+    if "recording_capture_mode" in provided_fields:
+        if request.recording_capture_mode is None:
+            raise HTTPException(status_code=422, detail="recording_capture_mode cannot be null")
+        normalized_capture_mode = str(request.recording_capture_mode).strip().lower()
+        if normalized_capture_mode not in {"single_speaker", "whole_room"}:
+            raise HTTPException(status_code=422, detail="Unsupported recording capture mode")
+
     try:
         settings = await repository.update_app_settings(
             workspace_chat_enabled=(
@@ -1395,6 +1444,7 @@ async def update_app_settings(
                 if "summarization_backend" in provided_fields
                 else UNSET
             ),
+            recording_capture_mode=normalized_capture_mode,
         )
     except Exception:
         if switched_backend:
@@ -1787,6 +1837,11 @@ async def save_recording_summary(
             pass1_user_prompt=original_summary.pass1_user_prompt if original_summary else None,
             pass2_system_prompt=original_summary.pass2_system_prompt if original_summary else None,
             pass2_user_prompt=original_summary.pass2_user_prompt if original_summary else None,
+            revision_history=(
+                _safe_json_loads(getattr(original_summary, "workflow_data_json", None), {}).get("revision_history", [])
+                if original_summary
+                else None
+            ),
             revision_instruction=request.revision_instruction,
         )
 

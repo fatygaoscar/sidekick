@@ -203,6 +203,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(settings)
         self.assertFalse(settings.workspace_chat_enabled)
         self.assertEqual(settings.summarization_backend, "ollama")
+        self.assertEqual(settings.recording_capture_mode, "whole_room")
 
         updated = await self.repo.update_app_settings(workspace_chat_enabled=True)
         reloaded = await self.repo.get_app_settings()
@@ -210,6 +211,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(updated.workspace_chat_enabled)
         self.assertTrue(reloaded.workspace_chat_enabled)
         self.assertEqual(reloaded.summarization_backend, "ollama")
+        self.assertEqual(reloaded.recording_capture_mode, "whole_room")
 
 
 class RecordingSearchServiceTests(unittest.IsolatedAsyncioTestCase):

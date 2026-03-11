@@ -1,5 +1,6 @@
 """Database operations for sessions, meetings, and transcripts."""
 
+import json
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Optional
 
@@ -37,6 +38,18 @@ class Repository:
         self._session_factory = async_sessionmaker(
             self._engine, class_=AsyncSession, expire_on_commit=False
         )
+
+    @staticmethod
+    def parse_summary_workflow_data(summary: Summary | None) -> dict[str, Any]:
+        """Parse summary workflow metadata defensively."""
+        raw = getattr(summary, "workflow_data_json", None) if summary else None
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     async def init_db(self) -> None:
         """Initialize database and create tables."""
@@ -356,6 +369,7 @@ class Repository:
                 id=1,
                 workspace_chat_enabled=bool(get_settings().workspace_chat_enabled),
                 summarization_backend=str(get_settings().summarization_backend.value),
+                recording_capture_mode="whole_room",
             )
             db.add(settings)
             await db.commit()
@@ -367,6 +381,7 @@ class Repository:
         *,
         workspace_chat_enabled: bool | object = UNSET,
         summarization_backend: str | object = UNSET,
+        recording_capture_mode: str | object = UNSET,
     ) -> AppSettings:
         """Update global app settings."""
         async with self._session_factory() as db:
@@ -377,6 +392,7 @@ class Repository:
                     id=1,
                     workspace_chat_enabled=bool(get_settings().workspace_chat_enabled),
                     summarization_backend=str(get_settings().summarization_backend.value),
+                    recording_capture_mode="whole_room",
                 )
                 db.add(settings)
                 await db.flush()
@@ -385,6 +401,8 @@ class Repository:
                 settings.workspace_chat_enabled = bool(workspace_chat_enabled)
             if summarization_backend is not UNSET:
                 settings.summarization_backend = str(summarization_backend)
+            if recording_capture_mode is not UNSET:
+                settings.recording_capture_mode = str(recording_capture_mode)
 
             await db.commit()
             await db.refresh(settings)
@@ -982,6 +1000,7 @@ class Repository:
         parent_summary_id: str | None | object = UNSET,
         saved_to_obsidian_at: datetime | None | object = UNSET,
         obsidian_relative_path: str | None | object = UNSET,
+        workflow_data_json: str | None | object = UNSET,
     ) -> Summary | None:
         """Update mutable summary fields."""
         values: dict[str, Any] = {}
@@ -995,6 +1014,8 @@ class Repository:
             values["saved_to_obsidian_at"] = saved_to_obsidian_at
         if obsidian_relative_path is not UNSET:
             values["obsidian_relative_path"] = obsidian_relative_path
+        if workflow_data_json is not UNSET:
+            values["workflow_data_json"] = workflow_data_json
         if not values:
             return await self.get_summary(summary_id)
 
@@ -1002,6 +1023,26 @@ class Repository:
             await db.execute(update(Summary).where(Summary.id == summary_id).values(**values))
             await db.commit()
         return await self.get_summary(summary_id)
+
+    async def append_summary_revision_history(
+        self,
+        summary_id: str,
+        entry: dict[str, Any],
+    ) -> Summary | None:
+        """Append one revision-history entry to workflow metadata."""
+        summary = await self.get_summary(summary_id)
+        if not summary:
+            return None
+        workflow_data = self.parse_summary_workflow_data(summary)
+        history = workflow_data.get("revision_history")
+        if not isinstance(history, list):
+            history = []
+        history.append(entry)
+        workflow_data["revision_history"] = history
+        return await self.update_summary(
+            summary_id,
+            workflow_data_json=json.dumps(workflow_data),
+        )
 
     async def create_draft_from_summary(
         self,
@@ -1033,6 +1074,46 @@ class Repository:
             pass2_user_prompt=source.pass2_user_prompt,
             attendees_snapshot=source.attendees_snapshot,
             workflow_data_json=source.workflow_data_json,
+        )
+
+    async def branch_draft_from_summary(
+        self,
+        source_summary_id: str,
+        *,
+        source_type: str,
+        preserve_existing_draft: bool = False,
+    ) -> Summary:
+        """Create a draft from the selected summary, optionally snapshotting the current draft first."""
+        source = await self.get_summary(source_summary_id)
+        if not source:
+            raise ValueError("Source summary not found")
+
+        existing_draft = await self.get_draft_summary(
+            source.meeting_id,
+            transcript_version_id=source.transcript_version_id,
+        )
+        if existing_draft and str(existing_draft.id) == str(source.id):
+            return existing_draft
+        if (
+            existing_draft
+            and str(getattr(existing_draft, "meeting_id", "")) == str(source.meeting_id)
+            and str(getattr(existing_draft, "transcript_version_id", "") or "") == str(source.transcript_version_id or "")
+            and str(getattr(existing_draft, "parent_summary_id", "") or "") == str(source.id)
+        ):
+            return existing_draft
+
+        if existing_draft:
+            if preserve_existing_draft:
+                await self.save_draft_summary(existing_draft.id)
+            else:
+                await self.delete_draft_summaries(
+                    source.meeting_id,
+                    transcript_version_id=source.transcript_version_id,
+                )
+
+        return await self.create_draft_from_summary(
+            source_summary_id,
+            source_type=source_type,
         )
 
     async def save_draft_summary(
@@ -1781,6 +1862,7 @@ class Repository:
                     id INTEGER PRIMARY KEY,
                     workspace_chat_enabled BOOLEAN NOT NULL DEFAULT 0,
                     summarization_backend VARCHAR(32) NOT NULL DEFAULT 'ollama',
+                    recording_capture_mode VARCHAR(32) NOT NULL DEFAULT 'whole_room',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
@@ -1792,6 +1874,12 @@ class Repository:
         if "summarization_backend" not in column_names:
             await conn.execute(
                 text("ALTER TABLE app_settings ADD COLUMN summarization_backend VARCHAR(32) DEFAULT 'ollama'")
+            )
+        if "recording_capture_mode" not in column_names:
+            await conn.execute(
+                text(
+                    "ALTER TABLE app_settings ADD COLUMN recording_capture_mode VARCHAR(32) DEFAULT 'whole_room'"
+                )
             )
         await conn.execute(
             text(
@@ -1806,20 +1894,31 @@ class Repository:
         await conn.execute(
             text(
                 """
+                UPDATE app_settings
+                SET recording_capture_mode = 'whole_room'
+                WHERE recording_capture_mode IS NULL OR recording_capture_mode = ''
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
                 INSERT INTO app_settings (
                     id,
                     workspace_chat_enabled,
                     summarization_backend,
+                    recording_capture_mode,
                     created_at,
                     updated_at
                 )
-                SELECT 1, :workspace_chat_enabled, :summarization_backend, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                SELECT 1, :workspace_chat_enabled, :summarization_backend, :recording_capture_mode, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 WHERE NOT EXISTS (SELECT 1 FROM app_settings WHERE id = 1)
                 """
             ),
             {
                 "workspace_chat_enabled": 1 if get_settings().workspace_chat_enabled else 0,
                 "summarization_backend": str(get_settings().summarization_backend.value),
+                "recording_capture_mode": "whole_room",
             },
         )
 

@@ -6,11 +6,13 @@ class AudioCapture {
     constructor(options = {}) {
         this.sampleRate = options.sampleRate || 16000; // Target rate for streaming
         this.captureSampleRate = options.captureSampleRate || 48000; // Rate for recording/playback
+        this.captureMode = options.captureMode || 'whole_room';
         this.onAudioData = options.onAudioData || (() => {});
         this.onLevelUpdate = options.onLevelUpdate || (() => {});
         this.onEncodedAudio = options.onEncodedAudio || (() => {});
         this.onEncodedChunk = options.onEncodedChunk || (() => {});
         this.onCaptureStopped = options.onCaptureStopped || (() => {});
+        this.onCaptureDiagnostics = options.onCaptureDiagnostics || (() => {});
 
         this.audioContext = null;
         this.mediaStream = null;
@@ -24,36 +26,63 @@ class AudioCapture {
         this._pendingStopCleanup = null;
         this._stopPromise = null;
         this._resolveStop = null;
+        this.captureDiagnostics = null;
+        this.actualCaptureRate = this.captureSampleRate;
 
         // Resampling state
         this.resampleBuffer = [];
+    }
+
+    setCaptureMode(mode) {
+        if (!mode) {
+            return;
+        }
+        this.captureMode = String(mode).trim().toLowerCase() || 'whole_room';
     }
 
     async start() {
         if (this.isCapturing) return;
 
         try {
-            // Get microphone access - request high quality
-            this.mediaStream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    channelCount: 1,
-                    sampleRate: this.captureSampleRate,
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true,
-                },
-            });
+            const supportedConstraints = typeof navigator.mediaDevices?.getSupportedConstraints === 'function'
+                ? navigator.mediaDevices.getSupportedConstraints()
+                : {};
+            const requestedConstraints = this._buildAudioConstraints();
+            let acquisitionAttempt = 'mode_request';
+            let fallbackUsed = false;
+
+            try {
+                this.mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: requestedConstraints,
+                });
+            } catch (error) {
+                fallbackUsed = true;
+                acquisitionAttempt = 'browser_default_fallback';
+                console.warn('[AudioCapture] mode-specific capture request failed, retrying with browser-default-safe constraints', {
+                    mode: this.captureMode,
+                    message: error?.message || error,
+                });
+                this.mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: this._buildFallbackAudioConstraints(),
+                });
+            }
 
             // Create audio context at hardware rate or requested capture rate
             this.audioContext = new AudioContext({
                 sampleRate: this.captureSampleRate,
             });
             this.actualCaptureRate = this.audioContext.sampleRate;
-            
+
             console.log(`[AudioCapture] Capturing at ${this.actualCaptureRate}Hz, target streaming at ${this.sampleRate}Hz`);
 
             // Create source from microphone
             const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+            this._emitCaptureDiagnostics({
+                acquisitionAttempt,
+                fallbackUsed,
+                requestedConstraints,
+                supportedConstraints,
+            });
 
             this._startMediaRecorder();
 
@@ -80,6 +109,72 @@ class AudioCapture {
             console.error('Failed to start audio capture:', error);
             throw error;
         }
+    }
+
+    _buildAudioConstraints() {
+        if (this.captureMode === 'single_speaker') {
+            return {
+                channelCount: 1,
+                sampleRate: this.captureSampleRate,
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+            };
+        }
+
+        return {
+            channelCount: 2,
+            sampleRate: this.captureSampleRate,
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+        };
+    }
+
+    _buildFallbackAudioConstraints() {
+        return {
+            sampleRate: this.captureSampleRate,
+        };
+    }
+
+    _emitCaptureDiagnostics({
+        acquisitionAttempt,
+        fallbackUsed,
+        requestedConstraints,
+        supportedConstraints,
+    }) {
+        const track = this.mediaStream?.getAudioTracks?.()[0] || null;
+        let appliedSettings = null;
+        let appliedConstraints = null;
+
+        if (track && typeof track.getSettings === 'function') {
+            try {
+                appliedSettings = track.getSettings() || null;
+            } catch (error) {
+                console.warn('[AudioCapture] failed to read track settings', error);
+            }
+        }
+
+        if (track && typeof track.getConstraints === 'function') {
+            try {
+                appliedConstraints = track.getConstraints() || null;
+            } catch (error) {
+                console.warn('[AudioCapture] failed to read track constraints', error);
+            }
+        }
+
+        this.captureDiagnostics = {
+            mode: this.captureMode,
+            acquisitionAttempt,
+            fallbackUsed,
+            requestedConstraints,
+            supportedConstraints,
+            appliedSettings,
+            appliedConstraints,
+            browserCanReportSettings: !!(track && typeof track.getSettings === 'function'),
+        };
+
+        this.onCaptureDiagnostics(this.captureDiagnostics);
     }
 
     async _setupWorklet(source) {

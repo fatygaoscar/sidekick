@@ -45,6 +45,7 @@ Legacy/direct export flow:
   - `_run_summary_job()` is the standard summary-draft generation path.
   - `_run_export_pipeline()` is the direct export path that also performs summarization when needed.
   - `/summary-drafts/*` endpoints cover manual edit, AI revise, and save.
+  - `POST /api/recordings/{id}/summary-draft` branches from the currently selected summary version when the workspace requests a draft.
 
 ### Summarization engine
 
@@ -306,6 +307,15 @@ The cohesive summarizer returns a `prompt_audit` payload containing:
 
 These fields are persisted on `Summary` and included in the Obsidian export.
 
+Export formatting rules:
+
+- `Meeting Info` appears first as a collapsed callout containing template, recorded/exported timestamps, duration, and processing time when available
+- the meeting summary content appears immediately after that top metadata callout
+- revision history appears immediately after the summary when present
+- revision history, prompt audit blocks, and transcript are rendered as Obsidian foldable callouts collapsed by default
+- `Meeting Info` is also rendered as a collapsed Obsidian foldable callout so the note opens directly into the summary
+- use foldable callouts instead of raw HTML `<details>` blocks so markdown content inside the collapsed sections still renders correctly in Obsidian
+
 ## Backend Runtime
 
 The default architecture supports multiple backends behind the same cohesive summarizer.
@@ -409,22 +419,62 @@ Important behavior:
 - there is only one active draft per meeting/transcript-version pair
 - draft regeneration deletes older drafts for that same scope
 - `source_type` is `generated` for the first summary and `resummarized` when a saved parent already exists
+- when the user explicitly branches from an older saved summary while another draft already exists, the existing draft is preserved as an in-app saved `Saved Copy` before the new draft replaces it
+- saved copies do not carry Obsidian export metadata and must not replace the latest exported summary for `Open in Obsidian` links
+- saved copies still consume the canonical saved-summary version number sequence, so dropdown labels and Obsidian note titles stay aligned
 
 ### Manual edit
 
 `PATCH /api/summary-drafts/{id}` updates draft content and marks the draft as `manual_edit`.
 
+When manual edit starts from a selected saved summary instead of the active draft, the workspace first branches a new draft from that selected version.
+
+### Undo
+
+The current `Undo` button is not persisted summary history.
+
+It is a browser-session-only draft convenience:
+
+- previous draft content is stored in client-side `summaryHistory`
+- entries are pushed before revise/manual-edit/apply operations in the current session
+- undo rewrites the active draft content from that in-memory stack
+
+Important limitations:
+
+- saving a draft does not preserve an undo stack for later
+- reloading or reopening the workspace clears the draft-session undo history
+- saved summaries do not currently support persistent undo
+
+Future direction:
+
+- if we add saved-version rollback later, prefer a dedicated `Revert to Previous Version` action based on summary lineage (`parent_summary_id`)
+- do not treat that as the same thing as the current draft-only `Undo` button
+
 ### AI revise
 
 `SummarizationManager.refine_summary()` is intentionally separate from full summarization.
 
-It edits an existing summary using:
+It edits an existing summary using one of two internal routes:
 
-- a narrow editing system prompt
-- the instruction
-- the current summary
+- `style_only`: instruction + current summary
+- `evidence_needed` / `uncertain`: instruction + current summary + retrieved transcript evidence windows from the active transcript version
 
-It does not rebuild from the transcript. This is fast, but it means AI revise is an editing pass over existing summary text, not a full regeneration.
+Important behavior:
+
+- AI revise is still an editing pass, not a full re-summarization run.
+- It does not send the full transcript by default.
+- The active template is used as structural guidance during revise, but not as a rigid schema.
+- The reviser may merge, omit, or tighten sections when that produces a clearer summary for the actual meeting.
+- For additive or factual requests, the backend retrieves compact evidence windows from the selected transcript version and only adds details grounded in those windows.
+- revise always starts from the summary version currently selected in the workspace. It must not silently jump back to a different active draft or the latest saved/exported summary.
+- If transcript evidence is insufficient for a factual expansion request, the revise flow should fail soft rather than invent new details.
+- A lightweight structure-repair pass may run when the first revise degrades headings, markdown tables, or overall scannability.
+
+Revision audit behavior:
+
+- AI revise appends lightweight history entries into `Summary.workflow_data_json`.
+- History entries record the instruction, route, whether transcript context was used, transcript version linkage, and lightweight evidence counts.
+- That revision history is serialized into the workspace, shown in the Summary and Transcript tabs, and included in Obsidian export when present.
 
 ### Save
 

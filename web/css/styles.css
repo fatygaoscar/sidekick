@@ -146,11 +146,6 @@ body.main-page .main-content {
     display: block;
 }
 
-.mobile-history-bar,
-.mobile-page-bar {
-    display: none;
-}
-
 /* Main Content - Centered */
 .main-content {
     flex: 1;
@@ -170,7 +165,7 @@ body.main-page .main-content {
 .record-support {
     position: absolute;
     left: 50%;
-    top: calc(var(--record-center-y) + 122px);
+    top: calc(var(--record-center-y) + 144px);
     transform: translateX(-50%);
     width: min(560px, calc(100% - 48px));
     display: flex;
@@ -179,8 +174,170 @@ body.main-page .main-content {
     gap: 32px;
 }
 
-.main-upload-btn {
-    min-width: 168px;
+.capture-mode-panel {
+    width: 100%;
+    padding: 4px 0 0;
+}
+
+.capture-mode-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.capture-mode-title {
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    font-weight: 400;
+}
+
+.capture-mode-list {
+    width: 100%;
+}
+
+.capture-mode-segmented {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+}
+
+.capture-mode-segment {
+    position: relative;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+}
+
+.capture-mode-segment:hover {
+    border-color: var(--border-hover);
+}
+
+.capture-mode-segment.selected {
+    border-color: var(--accent);
+    background: #101010;
+}
+
+.capture-mode-segment input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.capture-mode-segment:has(input:disabled) {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.capture-mode-segment-label {
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text);
+    text-align: center;
+}
+
+.capture-mode-note {
+    margin-top: 8px;
+}
+
+.capture-mode-description {
+    display: block;
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--text);
+}
+
+.capture-mode-meta {
+    display: block;
+    margin-top: 4px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--text-dim);
+}
+
+.capture-mode-diagnostics {
+    margin-top: 10px;
+}
+
+.capture-diagnostics-card {
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+}
+
+.capture-diagnostics-warning {
+    border-color: var(--border-hover);
+}
+
+.capture-diagnostics-details {
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+}
+
+.capture-diagnostics-summary {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    cursor: pointer;
+    list-style: none;
+}
+
+.capture-diagnostics-summary::-webkit-details-marker {
+    display: none;
+}
+
+.capture-diagnostics-details[open] .capture-diagnostics-summary {
+    margin-bottom: 10px;
+    color: var(--text-dim);
+}
+
+.capture-diagnostics-title {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+
+.capture-diagnostics-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.capture-diagnostics-row {
+    display: grid;
+    grid-template-columns: 104px minmax(0, 1fr);
+    gap: 12px;
+    align-items: start;
+}
+
+.capture-diagnostics-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.capture-diagnostics-value,
+.capture-diagnostics-interpretation {
+    font-size: 12px;
+    line-height: 1.65;
+    color: var(--text-dim);
+}
+
+.capture-diagnostics-interpretation {
+    margin-bottom: 8px;
+    color: var(--text);
 }
 
 .record-btn {
@@ -806,8 +963,37 @@ textarea.form-input {
     margin-left: auto;
     display: flex;
     align-items: center;
-    gap: 0;
+    gap: 10px;
     margin-right: 4px;
+}
+
+.header-upload-link {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    line-height: 1;
+    color: #f5f5f5;
+    background: #050505;
+    border-color: #111111;
+}
+
+.header-upload-link:hover,
+.header-upload-link:focus-visible {
+    color: #ffffff;
+    border-color: #2f2f2f;
+    background: #111111;
+}
+
+.header-upload-link:disabled,
+.header-upload-link[aria-disabled="true"] {
+    color: rgba(245, 245, 245, 0.72);
+    background: #050505;
+    border-color: #111111;
+    opacity: 0.55;
 }
 
 .back-link {
@@ -831,6 +1017,33 @@ textarea.form-input {
 
 .recordings-search-region {
     padding: 24px 24px 0;
+}
+
+.recordings-upload-progress {
+    margin: 20px 24px 0;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+}
+
+.recordings-upload-progress-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.recordings-upload-progress-name {
+    margin-bottom: 10px;
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--text);
+    word-break: break-word;
+}
+
+.recordings-upload-progress .processing-text {
+    margin-top: 10px;
 }
 
 .settings-page {
@@ -991,11 +1204,6 @@ textarea.form-input {
 .workspace-badge-success {
     color: var(--success);
     border-color: color-mix(in srgb, var(--success) 40%, transparent);
-}
-
-.mobile-page-links {
-    display: flex;
-    gap: 12px;
 }
 
 .recordings-search-shell {
@@ -1293,11 +1501,22 @@ textarea.form-input {
     padding: 14px 16px;
     border: 1px solid var(--border);
     background: var(--bg-elevated);
-    transition: border-color 0.2s ease;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background-color 0.2s ease;
 }
 
 .recording-card:hover {
     border-color: var(--border-hover);
+    background: color-mix(in srgb, var(--bg-elevated) 90%, var(--text) 3%);
+}
+
+.recording-card:focus {
+    outline: none;
+}
+
+.recording-card:focus-visible {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 
 .recording-card-shell {
@@ -1311,6 +1530,7 @@ textarea.form-input {
 .recording-title-row {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 12px;
     margin-bottom: 6px;
 }
@@ -1327,6 +1547,75 @@ textarea.form-input {
     color: var(--text);
     margin-bottom: 0;
     min-width: 0;
+}
+
+.recording-menu-shell {
+    position: relative;
+    flex-shrink: 0;
+}
+
+.recording-menu-btn {
+    min-width: 34px;
+    min-height: 34px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    transition: border-color 0.2s ease, color 0.2s ease, background-color 0.2s ease;
+}
+
+.recording-menu-btn:hover,
+.recording-menu-btn:focus-visible,
+.recording-menu-btn[aria-expanded="true"] {
+    border-color: var(--border-hover);
+    color: var(--text);
+    background: color-mix(in srgb, var(--bg) 70%, var(--text) 3%);
+    outline: none;
+}
+
+.recording-card-menu {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    min-width: 168px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    z-index: 5;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+}
+
+.recording-menu-delete-btn {
+    width: 100%;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--recording);
+    text-align: left;
+    font: inherit;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+}
+
+.recording-menu-delete-btn:hover,
+.recording-menu-delete-btn:focus-visible {
+    border-color: color-mix(in srgb, var(--recording) 45%, var(--border));
+    background: color-mix(in srgb, var(--recording) 8%, var(--bg));
+    outline: none;
+}
+
+.recording-menu-delete-btn:disabled {
+    opacity: 0.5;
+    cursor: progress;
 }
 
 .recording-subline {
@@ -1402,38 +1691,6 @@ textarea.form-input {
 .details-value {
     color: var(--text);
     word-break: break-word;
-}
-
-.recording-card-footer {
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 12px;
-    margin-top: 14px;
-}
-
-.recording-actions {
-    display: flex;
-    justify-content: flex-end;
-}
-
-.recording-actions .btn {
-    min-width: 108px;
-    padding: 10px 18px;
-    font-size: 11px;
-}
-
-.recording-card-footer .delete-btn {
-    min-width: 108px;
-    padding: 10px 18px;
-    font-size: 11px;
-    color: var(--text-dim);
-    background: transparent;
-}
-
-.recording-card-footer .delete-btn:hover {
-    border-color: var(--recording);
-    color: var(--recording);
 }
 
 /* Empty State */
@@ -1566,9 +1823,36 @@ textarea.form-input {
     }
 
     .record-support {
-        top: calc(var(--record-center-y) + 104px);
+        top: calc(var(--record-center-y) + 118px);
         width: calc(100% - 32px);
         gap: 20px;
+    }
+
+    .capture-mode-panel {
+        padding: 2px 0 0;
+    }
+
+    .capture-mode-segment {
+        min-height: 42px;
+        padding: 9px 10px;
+    }
+
+    .capture-mode-segment-label {
+        font-size: 11px;
+    }
+
+    .capture-mode-description {
+        font-size: 11px;
+    }
+
+    .capture-mode-meta {
+        font-size: 10px;
+        line-height: 1.55;
+    }
+
+    .capture-diagnostics-row {
+        grid-template-columns: 1fr;
+        gap: 2px;
     }
 
     .visualizer-section {
@@ -1590,42 +1874,17 @@ textarea.form-input {
     body.main-page .header-right {
         display: flex;
         margin-left: auto;
-        gap: 0;
+        gap: 10px;
         margin-right: 4px;
     }
 
     body.main-page .header-right .header-link:not(.header-icon-link) {
-        display: none;
+        padding: 8px 10px;
+        font-size: 11px;
     }
 
     .main-content {
         padding-bottom: 20px;
-    }
-
-    .mobile-history-bar,
-    .mobile-page-bar {
-        display: block;
-        padding: 0 16px 18px;
-    }
-
-    .mobile-page-bar {
-        position: fixed;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        z-index: 20;
-        padding: 10px 16px calc(18px + env(safe-area-inset-bottom, 0px));
-        border-top: 1px solid var(--border);
-        background: var(--bg);
-    }
-
-    .mobile-history-link,
-    .mobile-page-link {
-        width: auto;
-        flex: 1 1 0;
-        justify-content: center;
-        min-height: 48px;
-        font-size: 11px;
     }
 
     .page-header {
@@ -1635,6 +1894,11 @@ textarea.form-input {
     .page-header-actions {
         margin-left: auto;
         margin-right: 4px;
+    }
+
+    .recordings-upload-progress {
+        margin: 16px 16px 0;
+        padding: 12px 14px;
     }
 
     .settings-page {
@@ -1685,6 +1949,11 @@ textarea.form-input {
 
     .recording-card:hover {
         border-color: var(--border);
+        background: var(--bg-elevated);
+    }
+
+    .recording-card-menu {
+        min-width: 154px;
     }
 }
 
@@ -1883,6 +2152,59 @@ textarea.form-input {
     display: flex;
     gap: 16px;
     text-transform: uppercase;
+}
+
+.workspace-revision-history {
+    margin-bottom: 12px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+}
+
+.workspace-revision-history-header {
+    margin-bottom: 8px;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+
+.workspace-revision-history-list {
+    display: grid;
+    gap: 10px;
+}
+
+.workspace-revision-entry {
+    display: grid;
+    gap: 6px;
+}
+
+.workspace-revision-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 10px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.workspace-revision-badge {
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg);
+}
+
+.workspace-revision-badge-accent {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.workspace-revision-text {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text);
 }
 
 .summary-meeting-label {
@@ -2552,16 +2874,9 @@ textarea.form-input {
         margin-top: 6px;
     }
 
-    .recording-card-footer {
-        margin-top: 12px;
-    }
-
-    .recording-actions .btn {
-        min-width: 96px;
-    }
-
-    .recording-card-footer .delete-btn {
-        min-width: 96px;
+    .recording-menu-btn {
+        min-width: 32px;
+        min-height: 32px;
     }
 
     .workspace-modal {
@@ -2706,6 +3021,14 @@ textarea.form-input {
         margin-bottom: 10px;
         font-size: 10px;
         line-height: 1.35;
+    }
+
+    .workspace-revision-history {
+        padding: 10px;
+    }
+
+    .workspace-revision-text {
+        font-size: 12px;
     }
 
     .summary-body table,

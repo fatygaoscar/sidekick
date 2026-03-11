@@ -184,26 +184,28 @@ Default template: `meeting`
 ## UX Conventions
 
 - One primary action per step; no duplicate entry points.
-- Recording list cards: `Open` and `Delete` only.
+- Recording list cards open on card click/tap. Destructive actions belong in card overflow, not as inline footer buttons.
 - Export / re-summarize initiated from the workspace, not from cards.
 - **Unified Workspace:** History `Open` matches post-recording review. Both support AI Refine, Manual Edit, and Undo.
 - **Global Settings:** `/settings` is the app-level feature flag page. Experimental features live there, not in `.env`.
 - **Meeting Assistant:** Experimental, off by default, and hidden unless enabled in global settings.
 - **Recordings Search:** AI-assisted search is answer-first and transcript-grounded. The recordings page shows a summary answer, follow-up chips, and grouped recording results with `Open Summary` / `Open Transcript`.
 - **View Modal Title:** Plain meeting title. Date/time is in the Details section.
-- **Rename flow:** Rename from the editable workspace title after opening the recording. History cards stay `Open` / `Delete` only.
+- **Rename flow:** Rename from the editable workspace title after opening the recording. History cards open on card click/tap; destructive delete lives behind the card overflow menu plus confirmation.
 - **Workspace header metadata:** Simplified to date and time under the title.
 - **Details Section:** Two-column grid — Template (if stored), Recorded, Exported, Length, Processing Time. Updates on version change.
 - **Summary Version label:** "Summary Version" (not "Summary") in view modal.
-- **Summary Version labels:** `vN (Draft)`, `vN (Latest)`, then descending `vN-1 ... v1`.
+- **Summary Version labels:** `vN (Draft)`, `vN (Latest Exported)`, `vN (Exported)`, and `vN (Saved Copy)` for internal preserved drafts that were not written to Obsidian.
+- **Summary numbering:** `Saved Copy` entries still consume the canonical `vN` sequence so workspace labels and Obsidian note titles refer to the same version number.
 - **Transcript Versioning:** Transcript-aware workspaces load one transcript version at a time; summary drafts/saved summaries are tied to that version.
 - **Audio player** is at the bottom of the view modal.
 - **Card titles:** Plain meeting title (no date prefix); date shown separately.
-- **History delete:** Optimistic local removal first, then a non-blocking background refresh. Do not reintroduce a blocking full-list refetch requirement after delete.
+- **History delete:** Triggered from the card overflow menu, confirmed before execution, then optimistically removed locally with a non-blocking background refresh. Do not reintroduce a blocking full-list refetch requirement after delete.
 - **Mobile optimization:** `13px` text, `1.7` line height, single-unit scroll, Details grid uses `word-break` to prevent horizontal overflow.
 - **Workspace tab motion:** Desktop uses the polished hide/reveal motion. Mobile uses a simpler direct-tracking path to avoid touch-scroll jank.
 - **Main page guards:** The recording page disables page scroll / pull-to-refresh and blocks in-app navigation while recording.
-- **Recording CTA layout:** Main page has a single centered record button; mobile uses easy bottom CTAs for `History` and `Record`.
+- **Navigation layout:** Main page navigation lives in the header (`History` plus the `Settings` icon). The recordings page uses a top-left `Record` return link and the top-right `Settings` icon. Do not reintroduce fixed bottom navigation for these routes.
+- **Imported file flow:** Existing file imports are initiated from the recordings page header `+` action, not from the main recording page. If post-upload workspace opening fails, keep the imported recording recoverable in History instead of auto-deleting it.
 - Template chooser shows 4 templates in the order above.
 - `General Meeting` is default unless explicitly changed.
 
@@ -261,7 +263,13 @@ Default template: `meeting`
   3. Enter names in text fields
   4. Save speaker edits, then re-summarize when needed
 
-**Handoff Notes (2026-03-10, latest)**:
+**Handoff Notes (2026-03-11, latest)**:
+- **Session summary**: This pass covered workspace revision/versioning, Obsidian export compaction, recording/history UX cleanup, and global capture-mode persistence.
+- **Recording + history UX**: Main-page navigation now lives in the header, recordings import starts from the History header `+` action, cards open on click/tap, and destructive delete stays behind the overflow menu with optimistic removal plus background refresh.
+- **Capture mode persistence**: The main-page mic mode selector now persists through `app_settings` as `recording_capture_mode`, so changing `Single Speaker` vs `Whole Room` updates the shared app default immediately.
+- **Revision/versioning model**: AI revise is transcript-aware and template-aware, revision history is persisted per summary, the selected summary version is the branch base, and preserved in-app branches are labeled `Saved Copy` while still consuming canonical `vN` numbering.
+- **Obsidian export layout**: Exported notes now collapse `Meeting Info`, revision history, prompt audit, and transcript into foldable callouts so the summary opens first without losing auditability.
+- **Deferred follow-up items**: Saved-version undo remains documented as future `Revert to Previous Version` work, native system-audio capture remains deferred, and host-side auto-restart/watchdog work is still recommended for overnight reboot/update scenarios.
 - **Model**: `qwen3:8b` (5.2GB, 100% GPU). `OLLAMA_NUM_GPU=99` forces all layers to GPU. `temperature=0.3` added to all calls.
 - **Recording lifecycle**: Session start/stop is HTTP-authoritative. WebSocket is preview-only and attach/detach scoped.
 - **Audio durability**: Retained chunk storage is the recovery artifact. The finalized `.webm` is derived and can be rebuilt.
@@ -275,7 +283,11 @@ Default template: `meeting`
 - **Workspace Summary Gate**: Pending speaker review does not block summary generation. Users can summarize before naming every speaker.
 - **Settings Tab**: Summary-only. The workspace no longer shows a `People` or attendees field.
 - **Settings / Summary coupling**: The Settings tab reflects the selected summary version by default. `Reset` restores that version's template/prompt baseline.
-- **Obsidian audit trail**: Exported notes include `Pass 1: System Prompt`, `Pass 1: User Prompt`, `Pass 2: System Prompt`, `Pass 2: User Prompt`, plus a collapsed `Transcript` section.
+- **Selected summary version is authoritative**: If the user selects an older saved summary and starts `Edit`, `Ask AI to Revise`, or a summary-apply action, Sidekick branches from that selected version. If a different active draft already exists for that transcript version, the app preserves it as an internal `Saved Copy` before replacing the active draft. Obsidian links must continue to point at the latest exported summary, not the latest saved copy.
+- **Undo scope**: The current `Undo` button is draft-session-only. It uses browser-side history for the active draft and does not persist across save/reload, so it cannot undo a saved version like `v7`. If this is revisited later, prefer a dedicated `Revert to Previous Version` action based on summary lineage instead of trying to stretch the current draft-only undo semantics.
+- **AI revise**: `Ask AI to Revise` now routes between style-only edits and transcript-backed retrieval. It uses the active template as guidance, not a rigid schema, so it can add grounded detail from the active transcript version while still merging or dropping low-value sections when that improves readability.
+- **Summary revision history**: AI revise requests are stored on the summary in `workflow_data_json` and surfaced in the Summary tab, Transcript tab, and Obsidian export.
+- **Obsidian audit trail**: Exported notes render `Meeting Info` as a collapsed top callout, then the meeting summary, then revision history, then the prompt audit (`Pass 1: System Prompt`, `Pass 1: User Prompt`, `Pass 2: System Prompt`, `Pass 2: User Prompt`), with meeting info, revision history, prompt audit, and transcript all rendered as collapsed Obsidian foldable callouts by default.
 - **Workspace State Isolation**: Opening a different recording clears unsaved speaker assignments from the previous workspace, and closing the workspace flushes pending settings edits before dismissing the modal.
 - **Pipeline Optimizations**:
   - Speech-Aware Diarization: stops at last Whisper timestamp + 5s.
@@ -284,6 +296,7 @@ Default template: `meeting`
 - **Meeting Summaries**: `General Meeting` uses the cohesive two-pass summarizer with a relevance-first prompt contract. The structured pipeline in `src/summarization/pipeline/` is deprecated and not part of normal summary routing.
 - **Transcription cleanup**: Completed/failed transcription jobs free CUDA memory so repeated WhisperX runs do not retain VRAM.
 - **Audio Quality**: Captures and saves at 48kHz; downsampled to 16kHz for AI.
+- **Capture Mode**: Main-page mic mode (`Single Speaker` / `Whole Room`) is persisted as a global app setting. It is shared across devices using the same Sidekick instance and is not currently per-user or per-device.
 - **Live analyzer**: The recording page uses a higher-resolution log-spaced spectrum analyzer, not the saved file waveform.
 - **Unified View & Refinement:** functionally identical review/view modals.
 - **Obsidian Versioning:** exports append `(v2)`, `(v3)`, etc.
@@ -303,6 +316,8 @@ Default template: `meeting`
 - `get_settings()` is LRU-cached — restart required to pick up `.env` changes.
 - **Summarization architecture doc:** `docs/summarization-architecture.md` is the engineer-facing source of truth for the active summarization flow. Any change to summarization architecture, prompt assembly, transcript shaping, summary persistence, or default runtime path must update that doc in the same change.
 - Remote use through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The app injects fallback `wss://` and `https://*.trycloudflare.com` transport targets into rendered HTML, and `web/js/network.js` rewrites browser `/api/...` plus recording-media URLs onto that fallback when present.
+- Windows Update / host reboots can cleanly stop HWiNFO logging, WSL background processes, Cloudflare/ngrok tunnels, and Sidekick itself without leaving an app-level crash in `data/sidekick.log`. If automatic recovery after overnight reboots matters, plan a host-side auto-restart/watchdog script.
+- Native system-audio capture is deferred. Current recording uses browser microphone capture only. A future desktop-only browser mode could use `getDisplayMedia` shared audio, but true system-audio capture would require platform-specific native paths (`WASAPI` on Windows, `PipeWire/PulseAudio` monitor capture on Linux, and `CoreAudio`-based handling on macOS) and should be treated as a desktop-wrapper/native-helper feature, not a small web-only change.
 - `data/sidekick.log` is cleared on each start. If something dies between restarts, capture the log before starting again.
 - Starts triggered from the agent tool context can behave differently from a normal interactive shell because background child processes may be reaped by the execution environment. If a restart only fails when launched by the agent, verify it from the user's own shell before debugging the app itself.
 - Long recordings should finalize from retained chunks first. If the final audio file is missing but chunks exist, use `/recover-audio` or open the recording to trigger auto-recovery.
@@ -314,4 +329,5 @@ Default template: `meeting`
 - Mobile: removed `max-height` from internal containers to fix double scrolling.
 - Context budget: `OLLAMA_CONTEXT_LENGTH=32768` suits `qwen3:8b` (5.2GB model). Fits 100% in 16GB VRAM. Supports ~2.5+ hours of speech. Larger context or larger models cause CPU spillover.
 - Speaker naming no longer depends on an attendees field. If speakers are not mapped manually, user-facing output falls back to `Attendee`, `Attendee A`, `Attendee B`, etc.
+- Capture mode persistence is app-global because Sidekick currently has no user-account system or trusted device identity layer. Per-user or per-device persistence would require an architecture change rather than another field on `app_settings`.
 - Pull Ollama models from Windows PowerShell, not WSL: `powershell.exe -Command "ollama pull qwen3:8b"`

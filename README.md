@@ -17,7 +17,8 @@ Browser-based meeting recorder that captures audio, builds transcript versions, 
 - **Unified workspace** — the same modal is used post-recording and from History
 - **Answer-first recordings search** — cross-recording AI search returns a grounded answer, follow-up suggestions, and grouped recording hits
 - **Transcript versioning** — retranscription creates transcript versions; summary drafts and saved summaries are tied to the active version
-- **Prompt Audit Export** — Obsidian exports include the exact Pass 1 / Pass 2 prompts used plus a collapsed transcript section
+- **Transcript-aware AI revise** — `Ask AI to Revise` can pull grounded detail from the active transcript version using retrieval while treating the active template as flexible guidance instead of blindly editing the summary
+- **Prompt Audit Export** — Obsidian exports keep `Meeting Info`, revision history, Pass 1 / Pass 2 prompts, and transcript in collapsed foldable callouts so the note stays short until expanded
 - **DAW-style analyzer** — the live recording visualizer uses a higher-resolution log-spaced spectrum analyzer while keeping the same minimal style
 - **Relevance-first meeting summaries** — `General Meeting` uses the cohesive two-pass summarizer with a selective prompt contract that surfaces only useful, high-signal notes
 - **Smart Versioning** — Obsidian exports append `(v2)`, `(v3)`, etc., to prevent overwriting existing notes
@@ -330,7 +331,10 @@ All templates are editable before export from the workspace Settings tab.
 - Rename happens from the editable workspace title after opening a recording.
 - History delete removes the card locally first, then does a non-blocking background refresh.
 - The Settings tab is summary-only and follows the currently selected summary version by default.
-- Summary versions are labeled `vN (Draft)`, `vN (Latest)`, then descending `vN-1 ... v1`.
+- Summary versions are labeled `vN (Draft)`, `vN (Latest Exported)`, `vN (Exported)`, and `vN (Saved Copy)`.
+- If you select an older summary version and start `Edit` or `Ask AI to Revise`, Sidekick now branches from that selected version. Any different active draft is preserved in-app as a `Saved Copy` instead of silently becoming the new base.
+- `Saved Copy` versions still advance the canonical `vN` sequence, so Obsidian export titles and workspace version labels stay aligned.
+- `Undo` currently applies only to the active draft during the current browser session. Saved versions do not support persistent undo yet. If we add this later, the preferred shape is a separate `Revert to Previous Version` action rather than overloading the current draft-only undo button.
 - Desktop uses the polished tab-row hide/reveal motion; mobile uses a simpler direct-tracking path for smoother touch scrolling.
 
 ## Backups
@@ -434,7 +438,15 @@ Recommended approach:
 ## Gotchas
 
 - `get_settings()` is LRU-cached — restart required to pick up `.env` changes
+- Change visibility rules:
+  - Python/backend changes under `src/`, startup scripts, or API/server wiring require a Sidekick restart.
+  - Frontend JS/CSS changes under `web/static` paths usually need only a browser refresh.
+  - HTML entrypoint changes in `web/index.html`, `web/recordings.html`, or `web/settings.html` usually need a browser refresh, but if the browser keeps serving old assets, bump the `?v=` query string on the referenced `/static/js/*` or `/static/css/*` file and refresh again.
+  - Database-backed settings changed through the UI apply immediately unless the specific feature is documented otherwise.
+  - Pure documentation changes show immediately in the repo and do not require a restart.
 - Remote use through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The app injects fallback `wss://` and `https://*.trycloudflare.com` transport targets into rendered HTML, and `web/js/network.js` rewrites browser `/api/...` plus recording-media URLs onto that fallback when present. Restart Sidekick after the tunnel changes or if the custom domain starts loading UI but recorder/workspace requests stop reaching the app.
+- Windows Update / host reboots can cleanly stop HWiNFO logging, WSL background processes, Cloudflare/ngrok tunnels, and Sidekick itself without leaving an app-level crash in `data/sidekick.log`. If Sidekick should recover automatically after overnight reboots, implement a host-side auto-restart/watchdog script.
+- Sidekick currently records microphone input only. Desktop shared-audio capture may be feasible later through browser screen/tab sharing, but true native system-audio capture is intentionally deferred because cross-platform support would require significant OS-specific native integration.
 - **`qwen3` vs `qwen3.5` thinking**: `qwen3:8b` properly respects `OLLAMA_THINK=false`. `qwen3.5` models always generate internal thinking tokens regardless of this setting — not suppressable.
 - **`OLLAMA_NUM_GPU=99`**: required to prevent Ollama's conservative auto-estimate from offloading layers to CPU.
 - `SUMMARIZATION_TIMEOUT_SECONDS` is only a per-call timeout. It does not control model unloading.

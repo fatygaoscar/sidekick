@@ -9,6 +9,8 @@ class RecordingsPage {
     constructor() {
         this.recordings = [];
         this.deletingIds = new Set();
+        this.openMenuRecordingId = null;
+        this.clientId = crypto.randomUUID();
         this.searchState = {
             query: '',
             answer: null,
@@ -22,11 +24,26 @@ class RecordingsPage {
             error: null,
             filtersOpen: false,
         };
+        this.uploadState = {
+            isUploading: false,
+            phase: 'idle',
+            percent: 0,
+            fileName: '',
+            message: '',
+            indeterminate: false,
+        };
         this.workspace = new window.RecordingWorkspace({
             onClose: () => this._loadRecordings(),
         });
 
         this.elements = {
+            uploadBtn: document.getElementById('upload-btn'),
+            uploadInput: document.getElementById('upload-input'),
+            uploadProgress: document.getElementById('upload-progress'),
+            uploadProgressPercent: document.getElementById('upload-progress-percent'),
+            uploadProgressFile: document.getElementById('upload-progress-file'),
+            uploadProgressFill: document.getElementById('upload-progress-fill'),
+            uploadProgressMessage: document.getElementById('upload-progress-message'),
             recordingsList: document.getElementById('recordings-list'),
             loadingState: document.getElementById('loading-state'),
             searchForm: document.getElementById('recordings-search-form'),
@@ -44,6 +61,9 @@ class RecordingsPage {
 
     async _init() {
         this._bindSearchEvents();
+        this._bindUploadEvents();
+        this._bindGlobalEvents();
+        this._renderUploadProgress();
         this._renderSearch();
         await this._loadRecordings();
     }
@@ -68,6 +88,213 @@ class RecordingsPage {
             this.searchState.filtersOpen = !this.searchState.filtersOpen;
             this._renderSearch();
         });
+    }
+
+    _bindUploadEvents() {
+        this.elements.uploadBtn?.addEventListener('click', () => this._handleUploadClick());
+        this.elements.uploadInput?.addEventListener('change', (event) => this._handleUploadSelection(event));
+    }
+
+    _bindGlobalEvents() {
+        document.addEventListener('click', (event) => {
+            if (!this.openMenuRecordingId) {
+                return;
+            }
+            if (event.target.closest('.recording-menu-shell')) {
+                return;
+            }
+            this.openMenuRecordingId = null;
+            this._renderRecordings();
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape' || !this.openMenuRecordingId) {
+                return;
+            }
+            this.openMenuRecordingId = null;
+            this._renderRecordings();
+        });
+    }
+
+    _handleUploadClick() {
+        if (this.uploadState.isUploading) {
+            return;
+        }
+        this.elements.uploadInput?.click();
+    }
+
+    async _handleUploadSelection(event) {
+        const input = event.target;
+        const file = input?.files?.[0];
+        if (!file) {
+            return;
+        }
+
+        try {
+            await this._startFileUpload(file);
+        } finally {
+            if (input) {
+                input.value = '';
+            }
+        }
+    }
+
+    _setUploadProgressState(patch = {}) {
+        this.uploadState = {
+            ...this.uploadState,
+            ...patch,
+        };
+        this._renderUploadProgress();
+    }
+
+    _resetUploadProgress() {
+        this.uploadState = {
+            isUploading: false,
+            phase: 'idle',
+            percent: 0,
+            fileName: '',
+            message: '',
+            indeterminate: false,
+        };
+        this._renderUploadProgress();
+    }
+
+    _renderUploadProgress() {
+        const progress = this.elements.uploadProgress;
+        const percent = this.elements.uploadProgressPercent;
+        const file = this.elements.uploadProgressFile;
+        const fill = this.elements.uploadProgressFill;
+        const message = this.elements.uploadProgressMessage;
+        const uploadBtn = this.elements.uploadBtn;
+        if (!progress || !percent || !file || !fill || !message || !uploadBtn) {
+            return;
+        }
+
+        progress.classList.toggle('hidden', this.uploadState.phase === 'idle');
+        uploadBtn.disabled = this.uploadState.isUploading;
+        uploadBtn.textContent = this.uploadState.isUploading ? '...' : '+';
+
+        file.textContent = this.uploadState.fileName || 'Preparing upload...';
+        message.textContent = this.uploadState.message || 'Preparing upload...';
+        fill.classList.toggle('indeterminate', !!this.uploadState.indeterminate);
+        fill.style.width = this.uploadState.indeterminate ? '100%' : `${Math.max(0, Math.min(100, this.uploadState.percent || 0))}%`;
+        percent.textContent = this.uploadState.indeterminate
+            ? 'Processing'
+            : `${Math.max(0, Math.min(100, Math.round(this.uploadState.percent || 0)))}%`;
+    }
+
+    async _startFileUpload(file) {
+        if (this.uploadState.isUploading) {
+            return;
+        }
+
+        const extension = this._inferUploadExtension(file);
+        if (!this._isSupportedUpload(file, extension)) {
+            alert('Unsupported file type. Choose MP3, WAV, M4A, or MP4.');
+            return;
+        }
+
+        const mimeType = this._uploadMimeType(file, extension);
+        let sessionId = null;
+        let canDeleteFailedSession = false;
+        this._setUploadProgressState({
+            isUploading: true,
+            phase: 'uploading',
+            percent: 0,
+            fileName: file.name || 'Selected file',
+            message: 'Preparing upload...',
+            indeterminate: false,
+        });
+
+        try {
+            console.info('[upload:create_session:start]', { fileName: file.name, mimeType });
+            sessionId = await this._createSession({
+                timeoutMs: 15000,
+                retries: 1,
+                networkErrorMessage: 'Network request failed while creating upload session',
+                httpErrorMessage: 'Failed to create upload session',
+                logLabel: 'upload:create_session',
+            });
+            canDeleteFailedSession = true;
+            console.info('[upload:create_session:ok]', { sessionId });
+
+            this._setUploadProgressState({
+                phase: 'uploading',
+                percent: 0,
+                message: 'Uploading file...',
+                indeterminate: false,
+            });
+            console.info('[upload:audio:start]', {
+                sessionId,
+                fileName: file.name,
+                sizeBytes: Number.isFinite(file.size) ? file.size : null,
+            });
+            await this._uploadImportedAudioWithProgress(sessionId, file, extension, mimeType);
+            canDeleteFailedSession = false;
+            console.info('[upload:audio:ok]', { sessionId });
+
+            this._setUploadProgressState({
+                phase: 'finalizing',
+                percent: 100,
+                message: 'Finalizing upload...',
+                indeterminate: true,
+            });
+            console.info('[upload:title:start]', { sessionId });
+            await this._seedUploadedRecordingTitle(sessionId, file.name);
+            console.info('[upload:title:done]', { sessionId });
+            console.info('[upload:finalize:start]', { sessionId });
+            await this._finalizeUploadSession(sessionId, mimeType);
+            console.info('[upload:finalize:ok]', { sessionId });
+
+            this._setUploadProgressState({
+                phase: 'opening',
+                message: 'Opening workspace...',
+                indeterminate: true,
+            });
+            console.info('[upload:workspace:start]', { sessionId });
+            await this.workspace.open(sessionId, {
+                autoStartTranscription: false,
+                transcriptionStartMode: 'manual',
+                workspaceLoadTimeoutMs: 15000,
+                workspaceLoadRetries: 3,
+            });
+            console.info('[upload:workspace:ok]', { sessionId });
+            this._resetUploadProgress();
+        } catch (error) {
+            console.error('Failed to upload file:', error);
+            console.warn('[upload:workflow:fail]', {
+                sessionId,
+                canDeleteFailedSession,
+                message: error?.message || 'Failed to upload file',
+            });
+            if (sessionId && canDeleteFailedSession) {
+                console.warn('[upload:cleanup:execute]', {
+                    sessionId,
+                    message: error?.message || 'Upload failed before audio was fully stored',
+                });
+                await this._cleanupFailedUploadSession(sessionId);
+            } else if (sessionId) {
+                console.warn('[upload:cleanup:skip]', {
+                    sessionId,
+                    message: error?.message || 'Post-upload failure',
+                });
+            }
+            if (sessionId && !canDeleteFailedSession) {
+                this._setUploadProgressState({
+                    phase: 'opening',
+                    percent: 100,
+                    fileName: file.name || 'Selected file',
+                    message: 'Upload finished. Reopen it from History if the workspace does not open.',
+                    indeterminate: false,
+                });
+                await this._loadRecordings({ renderErrorOnFailure: false });
+                alert(error?.message || 'Upload finished, but opening the workspace failed. Reopen it from History.');
+                this._resetUploadProgress();
+                return;
+            }
+            this._resetUploadProgress();
+            alert(error?.message || 'Failed to upload file');
+        }
     }
 
     async _loadRecordings(options = {}) {
@@ -451,19 +678,50 @@ class RecordingsPage {
             .map((recording) => this._renderCard(recording))
             .join('');
 
-        this.elements.recordingsList.querySelectorAll('.view-btn').forEach((button) => {
-            button.addEventListener('click', async () => {
-                try {
-                    await this.workspace.open(button.dataset.id);
-                } catch (error) {
-                    alert(error.message || 'Failed to open recording workspace');
+        this.elements.recordingsList.querySelectorAll('.recording-card').forEach((card) => {
+            card.addEventListener('click', (event) => {
+                if (event.target.closest('button, a, input, select, textarea')) {
+                    return;
                 }
+                void this._openRecordingCard(card.dataset.id);
+            });
+
+            card.addEventListener('keydown', (event) => {
+                if (event.target.closest('button, a, input, select, textarea')) {
+                    return;
+                }
+                if (event.key !== 'Enter' && event.key !== ' ') {
+                    return;
+                }
+                event.preventDefault();
+                void this._openRecordingCard(card.dataset.id);
             });
         });
 
-        this.elements.recordingsList.querySelectorAll('.delete-btn').forEach((button) => {
-            button.addEventListener('click', () => this._deleteRecording(button.dataset.id));
+        this.elements.recordingsList.querySelectorAll('.recording-menu-btn').forEach((button) => {
+            button.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const nextOpenId = this.openMenuRecordingId === button.dataset.id ? null : button.dataset.id;
+                this.openMenuRecordingId = nextOpenId;
+                this._renderRecordings();
+            });
         });
+
+        this.elements.recordingsList.querySelectorAll('.recording-menu-delete-btn').forEach((button) => {
+            button.addEventListener('click', (event) => {
+                event.stopPropagation();
+                this.openMenuRecordingId = null;
+                void this._deleteRecording(button.dataset.id);
+            });
+        });
+    }
+
+    async _openRecordingCard(recordingId) {
+        try {
+            await this.workspace.open(recordingId);
+        } catch (error) {
+            alert(error.message || 'Failed to open recording workspace');
+        }
     }
 
     _renderCard(recording) {
@@ -491,15 +749,42 @@ class RecordingsPage {
         }
 
         const isDeleting = this.deletingIds.has(recording.id);
-        const deleteDisabledAttr = isDeleting ? ' disabled aria-disabled="true"' : '';
-        const deleteLabel = isDeleting ? 'Deleting...' : 'Delete';
+        const menuExpandedAttr = this.openMenuRecordingId === recording.id ? 'true' : 'false';
+        const menuMarkup = this.openMenuRecordingId === recording.id ? `
+            <div class="recording-card-menu" role="menu">
+                <button
+                    type="button"
+                    class="recording-menu-delete-btn"
+                    data-id="${recording.id}"
+                    role="menuitem"
+                    ${isDeleting ? ' disabled aria-disabled="true"' : ''}
+                >${isDeleting ? 'Deleting...' : 'Delete recording…'}</button>
+            </div>
+        ` : '';
 
         return `
-            <div class="recording-card" data-id="${recording.id}">
+            <div
+                class="recording-card"
+                data-id="${recording.id}"
+                role="button"
+                tabindex="0"
+                aria-label="Open ${this._escapeHtml(title)}"
+            >
                 <div class="recording-card-shell">
                     <div class="recording-primary">
                         <div class="recording-title-row">
                             <span class="recording-title">${this._escapeHtml(title)}</span>
+                            <div class="recording-menu-shell">
+                                <button
+                                    type="button"
+                                    class="recording-menu-btn"
+                                    data-id="${recording.id}"
+                                    aria-label="Recording actions"
+                                    aria-haspopup="menu"
+                                    aria-expanded="${menuExpandedAttr}"
+                                >⋯</button>
+                                ${menuMarkup}
+                            </div>
                         </div>
                         <div class="recording-subline">
                             <div class="recording-meta-line">
@@ -511,12 +796,6 @@ class RecordingsPage {
                             </div>
                         </div>
                         <div class="recording-badges">${badges.join('')}</div>
-                    </div>
-                </div>
-                <div class="recording-card-footer">
-                    <button class="btn delete-btn" data-id="${recording.id}"${deleteDisabledAttr}>${deleteLabel}</button>
-                    <div class="recording-actions">
-                        <button class="btn btn-primary view-btn" data-id="${recording.id}">Open</button>
                     </div>
                 </div>
             </div>
@@ -571,6 +850,302 @@ class RecordingsPage {
             this.deletingIds.delete(id);
             this._renderRecordings();
         }
+    }
+
+    async _createSession(config = {}) {
+        let timezoneName = null;
+        try {
+            timezoneName = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+        } catch (_error) {
+            timezoneName = null;
+        }
+
+        const payload = await window.SidekickNetwork.json('/api/sessions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                mode: 'work',
+                submode: null,
+                timezone_name: timezoneName,
+                timezone_offset_minutes: new Date().getTimezoneOffset(),
+            }),
+        }, config);
+
+        if (!payload?.id) {
+            throw new Error(config.httpErrorMessage || 'Failed to create session');
+        }
+
+        return payload.id;
+    }
+
+    async _endSession(sessionId, config = {}) {
+        if (!sessionId) {
+            return null;
+        }
+
+        return await window.SidekickNetwork.json(`/api/sessions/${sessionId}`, {
+            method: 'DELETE',
+        }, {
+            timeoutMs: 10000,
+            retries: 0,
+            httpErrorMessage: 'Failed to end session',
+            ...config,
+        });
+    }
+
+    async _uploadImportedAudioWithProgress(sessionId, file, extension, mimeType) {
+        const resolvedUrl = window.SidekickNetwork.resolveUrl(`/api/recordings/${sessionId}/audio`);
+
+        await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('PUT', resolvedUrl, true);
+            xhr.withCredentials = false;
+            xhr.timeout = 600000;
+            xhr.setRequestHeader('Content-Type', mimeType);
+            xhr.setRequestHeader('X-Upload-Extension', extension);
+
+            xhr.upload.onprogress = (event) => {
+                if (!event.lengthComputable) {
+                    return;
+                }
+                const percent = Math.round((event.loaded / event.total) * 100);
+                this._setUploadProgressState({
+                    phase: 'uploading',
+                    percent,
+                    message: 'Uploading file...',
+                    indeterminate: false,
+                });
+            };
+
+            xhr.onerror = () => {
+                console.warn('[upload:audio:fail]', { sessionId, status: xhr.status || null, kind: 'network' });
+                reject(new Error('Network request failed while uploading file'));
+            };
+            xhr.ontimeout = () => {
+                console.warn('[upload:audio:fail]', { sessionId, status: xhr.status || null, kind: 'timeout' });
+                reject(new Error('Network request timed out while uploading file'));
+            };
+            xhr.onabort = () => {
+                console.warn('[upload:audio:fail]', { sessionId, status: xhr.status || null, kind: 'abort' });
+                reject(new Error('Upload was cancelled'));
+            };
+
+            xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    this._setUploadProgressState({
+                        phase: 'uploading',
+                        percent: 100,
+                        message: 'Uploading file...',
+                        indeterminate: false,
+                    });
+                    resolve();
+                    return;
+                }
+
+                let detail = 'Failed to upload file';
+                try {
+                    const payload = JSON.parse(xhr.responseText || '{}');
+                    if (payload?.detail) {
+                        detail = payload.detail;
+                    }
+                } catch (_error) {
+                    if (xhr.status) {
+                        detail = `Failed to upload file (HTTP ${xhr.status})`;
+                    }
+                }
+                reject(new Error(detail));
+            };
+
+            xhr.send(file);
+        });
+    }
+
+    async _seedUploadedRecordingTitle(sessionId, filename) {
+        const title = this._deriveTitleFromFilename(filename);
+        if (!title) {
+            return;
+        }
+
+        try {
+            await window.SidekickNetwork.json(`/api/recordings/${sessionId}/settings`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    title,
+                }),
+            }, {
+                timeoutMs: 10000,
+                retries: 0,
+                networkErrorMessage: 'Network request failed while naming uploaded file',
+                httpErrorMessage: 'Failed to update uploaded recording title',
+                logLabel: 'upload:title',
+            });
+        } catch (error) {
+            console.warn('[upload:title:fail]', {
+                sessionId,
+                message: error?.message || 'Failed to update uploaded recording title',
+            });
+            console.warn('Failed to seed uploaded recording title:', error?.message || error);
+        }
+    }
+
+    async _finalizeUploadSession(sessionId, mimeType) {
+        try {
+            const completion = await this._completeRecording(sessionId, {
+                mimeType,
+                expectedChunks: 0,
+                allowFallbackBlob: true,
+            });
+            if (!completion?.workspace_ready) {
+                throw new Error('Uploaded audio is not ready yet');
+            }
+        } catch (error) {
+            try {
+                await this._endSession(sessionId, {
+                    networkErrorMessage: 'Network request failed while finalizing upload session',
+                    logLabel: 'upload:end_session',
+                });
+            } catch (endError) {
+                console.warn('Failed to end upload session cleanly after complete fallback:', {
+                    sessionId,
+                    message: endError?.message || 'Failed to end upload session',
+                });
+            }
+            console.warn('[upload:finalize:fail]', {
+                sessionId,
+                message: error?.message || 'Failed to finalize upload session',
+            });
+            console.warn('Failed to finalize upload session cleanly:', {
+                sessionId,
+                message: error?.message || 'Failed to finalize upload session',
+            });
+            throw error;
+        }
+    }
+
+    async _completeRecording(sessionId, options = {}) {
+        return await window.SidekickNetwork.json(`/api/recordings/${sessionId}/complete`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                client_id: this.clientId,
+                mime_type: options.mimeType || 'application/octet-stream',
+                expected_chunks: Number.isFinite(options.expectedChunks) ? options.expectedChunks : 0,
+                allow_fallback_blob: !!options.allowFallbackBlob,
+            }),
+        }, {
+            timeoutMs: 30000,
+            retries: 1,
+            networkErrorMessage: 'Network request failed while finalizing recording',
+            httpErrorMessage: 'Failed to finalize recording',
+            logLabel: 'recording_stop:complete',
+        });
+    }
+
+    async _cleanupFailedUploadSession(sessionId) {
+        try {
+            console.info('[upload:cleanup:start]', { sessionId });
+            const response = await window.SidekickNetwork.request(`/api/recordings/${sessionId}`, {
+                method: 'DELETE',
+            }, {
+                timeoutMs: 10000,
+                retries: 0,
+                networkErrorMessage: 'Network request failed while cleaning up failed upload',
+                logLabel: 'upload:cleanup',
+            });
+            if (!response.ok && response.status !== 404) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            console.info('[upload:cleanup:ok]', { sessionId, status: response.status });
+        } catch (cleanupError) {
+            console.warn('Failed to clean up failed upload session:', {
+                sessionId,
+                message: cleanupError?.message || 'Cleanup failed',
+            });
+        }
+    }
+
+    _inferUploadExtension(file) {
+        const filename = String(file?.name || '').toLowerCase();
+        if (filename.endsWith('.wav')) {
+            return 'wav';
+        }
+        if (filename.endsWith('.mp3')) {
+            return 'mp3';
+        }
+        if (filename.endsWith('.m4a')) {
+            return 'm4a';
+        }
+        if (filename.endsWith('.mp4')) {
+            return 'mp4';
+        }
+
+        const fileType = String(file?.type || '').toLowerCase();
+        if (fileType.includes('audio/wav') || fileType.includes('audio/x-wav')) {
+            return 'wav';
+        }
+        if (fileType.includes('audio/mpeg') || fileType.includes('audio/mp3')) {
+            return 'mp3';
+        }
+        if (fileType.includes('video/mp4')) {
+            return 'mp4';
+        }
+        if (fileType.includes('audio/mp4') || fileType.includes('audio/x-m4a') || fileType.includes('audio/m4a')) {
+            return 'm4a';
+        }
+        return '';
+    }
+
+    _isSupportedUpload(file, extension) {
+        const supportedExtensions = new Set(['wav', 'mp3', 'm4a', 'mp4']);
+        if (supportedExtensions.has(extension)) {
+            return true;
+        }
+
+        const fileType = String(file?.type || '').toLowerCase();
+        return (
+            fileType.includes('audio/wav')
+            || fileType.includes('audio/x-wav')
+            || fileType.includes('audio/mpeg')
+            || fileType.includes('audio/mp3')
+            || fileType.includes('audio/mp4')
+            || fileType.includes('audio/x-m4a')
+            || fileType.includes('video/mp4')
+        );
+    }
+
+    _uploadMimeType(file, extension) {
+        const fileType = String(file?.type || '').trim();
+        if (fileType) {
+            return fileType;
+        }
+        if (extension === 'wav') {
+            return 'audio/wav';
+        }
+        if (extension === 'mp3') {
+            return 'audio/mpeg';
+        }
+        if (extension === 'mp4') {
+            return 'video/mp4';
+        }
+        if (extension === 'm4a') {
+            return 'audio/mp4';
+        }
+        return 'application/octet-stream';
+    }
+
+    _deriveTitleFromFilename(filename) {
+        const normalized = String(filename || '').trim();
+        if (!normalized) {
+            return '';
+        }
+        return normalized.replace(/\.[^.]+$/, '').trim();
     }
 
     _formatDuration(seconds) {
