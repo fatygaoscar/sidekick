@@ -14,12 +14,12 @@ from src.sessions.manager import SessionManager
 logger = logging.getLogger(__name__)
 
 from .anthropic_backend import AnthropicBackend
-from .base import SummarizationBackend, SummarizationResult
+from .base import BackendProbeResult, SummarizationBackend, SummarizationResult
 from .ollama_backend import OllamaBackend
 from .openai_backend import OpenAIBackend
 from .prompts import get_template_content, normalize_template_key
 from .cohesive import generate_cohesive_summary
-from .pipeline.pipeline import run_pipeline, build_markdown_output
+from .pipeline.pipeline import run_pipeline
 from .pipeline.types import PipelineResult
 
 
@@ -42,23 +42,25 @@ class SummarizationManager:
         self._settings = settings or get_settings()
         self._event_bus = get_event_bus()
         self._backends: dict[SumBackendEnum, SummarizationBackend] = {}
+        self._selected_backend_type = self._settings.summarization_backend
         self._active_backend: SummarizationBackend | None = None
+        self._switch_lock = asyncio.Lock()
         self._initialized = False
 
     @property
     def active_backend(self) -> SummarizationBackend | None:
         """Get the currently active backend."""
-        return self._active_backend
+        return self._backends.get(self._selected_backend_type, self._active_backend)
 
     @property
     def active_backend_type(self) -> SumBackendEnum | None:
         """Get the currently active backend type."""
-        if self._active_backend is None:
-            return None
-        for backend_type, backend in self._backends.items():
-            if backend is self._active_backend:
-                return backend_type
-        return None
+        return self._selected_backend_type
+
+    def set_selected_backend(self, backend: SumBackendEnum | str) -> None:
+        """Update the selected backend without forcing immediate initialization."""
+        self._selected_backend_type = self._coerce_backend_type(backend)
+        self._active_backend = self._backends.get(self._selected_backend_type)
 
     async def initialize(self, backend: SumBackendEnum | None = None) -> None:
         """
@@ -67,7 +69,8 @@ class SummarizationManager:
         Args:
             backend: Backend to initialize (default from settings)
         """
-        backend = backend or self._settings.summarization_backend
+        backend = self._coerce_backend_type(backend or self._selected_backend_type)
+        self._selected_backend_type = backend
 
         # Create backend if not exists
         if backend not in self._backends:
@@ -97,15 +100,61 @@ class SummarizationManager:
         Returns:
             The new active backend
         """
-        if backend not in self._backends:
-            self._backends[backend] = self._create_backend(backend)
+        backend = self._coerce_backend_type(backend)
+        async with self._switch_lock:
+            backend_instance = await self._ensure_backend(backend)
+            self._selected_backend_type = backend
+            self._active_backend = backend_instance
+            self._initialized = True
+            return backend_instance
 
-        backend_instance = self._backends[backend]
-        if not backend_instance._initialized:
-            await backend_instance.initialize()
+    async def probe_backend(self, backend: SumBackendEnum | str) -> BackendProbeResult:
+        """Probe backend readiness."""
+        backend_type = self._coerce_backend_type(backend)
+        backend_instance = self._backends.get(backend_type) or self._create_backend(backend_type)
+        if backend_type not in self._backends:
+            self._backends[backend_type] = backend_instance
+        return await backend_instance.probe()
 
-        self._active_backend = backend_instance
-        return backend_instance
+    async def diagnose_backends(
+        self,
+        backends: list[SumBackendEnum] | None = None,
+    ) -> dict[str, dict[str, object]]:
+        """Probe multiple backends for settings-page diagnostics."""
+        selected = backends or [SumBackendEnum.OLLAMA, SumBackendEnum.OPENAI]
+        results: dict[str, dict[str, object]] = {}
+        for backend in selected:
+            probe = await self.probe_backend(backend)
+            results[backend.value] = probe.to_dict()
+        return results
+
+    def describe_backends(self) -> dict[str, dict[str, object]]:
+        """Return read-only provider metadata for the settings UI."""
+        return {
+            SumBackendEnum.OLLAMA.value: {
+                "label": "Local qwen3:8b",
+                "model": self._settings.ollama_model,
+                "configured": bool(self._settings.ollama_host and self._settings.ollama_model),
+                "host": self._settings.ollama_host,
+            },
+            SumBackendEnum.OPENAI.value: {
+                "label": "OpenAI",
+                "model": self._settings.openai_summarization_model,
+                "configured": bool(self._settings.openai_api_key.strip()),
+            },
+        }
+
+    def runtime_state(self) -> dict[str, object]:
+        """Return active selection state for the settings UI."""
+        active_backend = self._backends.get(self._selected_backend_type)
+        return {
+            "selected_backend": self._selected_backend_type.value,
+            "active_backend": (
+                self._selected_backend_type.value if active_backend is not None else None
+            ),
+            "applies_to": "new_requests_only",
+            "providers": self.describe_backends(),
+        }
 
     async def summarize_meeting(
         self,
@@ -126,8 +175,7 @@ class SummarizationManager:
         Returns:
             SummarizationResult with summary
         """
-        if not self._initialized or self._active_backend is None:
-            await self.initialize()
+        backend = await self._backend_for_operation()
 
         # Get transcript with important markers
         transcript = await session_manager.get_meeting_transcript(
@@ -137,8 +185,8 @@ class SummarizationManager:
         if not transcript.strip():
             return SummarizationResult(
                 content="No transcript available for this meeting.",
-                backend=self._active_backend.name,
-                model=self._active_backend.model,
+                backend=backend.name,
+                model=backend.model,
             )
 
         return await self.summarize(
@@ -173,18 +221,16 @@ class SummarizationManager:
         Returns:
             SummarizationResult with summary
         """
-        if not self._initialized or self._active_backend is None:
-            await self.initialize()
-
-        ctx_len = int(self._settings.ollama_context_length)
+        backend = await self._backend_for_operation()
+        ctx_len = self._context_length()
         normalized_prompt_type = normalize_template_key(prompt_type)
 
         # Emit start event
         await self._event_bus.emit(
             EventType.SUMMARIZATION_STARTED,
             {
-                "backend": self._active_backend.name,
-                "model": self._active_backend.model,
+                "backend": backend.name,
+                "model": backend.model,
                 "transcript_length": len(transcript),
             },
             source="summarization_manager",
@@ -194,6 +240,7 @@ class SummarizationManager:
             if system_prompt is not None or user_prompt is not None:
                 # Explicit prompt overrides use the legacy one-pass path.
                 result = await self._summarize_with_timeout(
+                    backend=backend,
                     transcript=transcript,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
@@ -202,6 +249,7 @@ class SummarizationManager:
             else:
                 async def llm_call(sys_prompt: str, usr_prompt: str) -> str:
                     llm_result = await self._summarize_with_timeout(
+                        backend=backend,
                         transcript="",
                         system_prompt=sys_prompt,
                         user_prompt=usr_prompt,
@@ -230,8 +278,8 @@ class SummarizationManager:
                 )
                 result = SummarizationResult(
                     content=cohesive_text,
-                    backend=self._active_backend.name,
-                    model=self._active_backend.model,
+                    backend=backend.name,
+                    model=backend.model,
                     speaker_map=speaker_map,
                     prompt_audit=prompt_audit,
                 )
@@ -254,7 +302,8 @@ class SummarizationManager:
             await self._event_bus.emit(
                 EventType.SUMMARIZATION_ERROR,
                 {
-                    "backend": self._active_backend.name if self._active_backend else "unknown",
+                    "backend": backend.name,
+                    "selected_backend": self._selected_backend_type.value,
                     "error": str(e),
                 },
                 source="summarization_manager",
@@ -297,12 +346,12 @@ class SummarizationManager:
         Returns:
             PipelineResult with narrative, structured items, and metadata
         """
-        if not self._initialized or self._active_backend is None:
-            await self.initialize()
+        backend = await self._backend_for_operation()
 
         # Create LLM call wrapper for the pipeline
         async def llm_call(system_prompt: str, user_prompt: str) -> str:
             result = await self._summarize_with_timeout(
+                backend=backend,
                 transcript="",  # Not used when prompts are provided
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
@@ -313,8 +362,8 @@ class SummarizationManager:
             await self._event_bus.emit(
                 EventType.SUMMARIZATION_STARTED,
                 {
-                    "backend": self._active_backend.name,
-                    "model": self._active_backend.model,
+                    "backend": backend.name,
+                    "model": backend.model,
                     "transcript_length": len(transcript),
                     "pipeline": True,
                 },
@@ -326,13 +375,13 @@ class SummarizationManager:
                 transcript=transcript,
                 template=template,
                 llm_call=llm_call,
-                backend_name=self._active_backend.name,
-                model_name=self._active_backend.model,
+                backend_name=backend.name,
+                model_name=backend.model,
                 progress_callback=progress_callback,
                 perspective=perspective,
                 narrative_strategy="template_native",
                 template_prompt=template_prompt_override or get_template_content(template),
-                llm_context_length=int(self._settings.ollama_context_length),
+                llm_context_length=self._context_length(),
             )
 
             if emit_events:
@@ -356,7 +405,7 @@ class SummarizationManager:
                 await self._event_bus.emit(
                     EventType.SUMMARIZATION_ERROR,
                     {
-                        "backend": self._active_backend.name if self._active_backend else "unknown",
+                        "backend": backend.name,
                         "error": str(e),
                         "pipeline": True,
                     },
@@ -369,8 +418,7 @@ class SummarizationManager:
 
         Context is just the summary + instruction — fast, ~10-20s vs 60-120s full pipeline.
         """
-        if not self._initialized or self._active_backend is None:
-            await self.initialize()
+        backend = await self._backend_for_operation()
 
         instr = instruction.strip()
         instr_preview = instr[:80] + ("..." if len(instr) > 80 else "")
@@ -385,6 +433,7 @@ class SummarizationManager:
         user_prompt = f"Instruction: {instr}\n\nCurrent summary:\n{current_summary.strip()}"
 
         result = await self._summarize_with_timeout(
+            backend=backend,
             transcript="",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -401,8 +450,7 @@ class SummarizationManager:
         recent_turns: list[dict[str, str]],
     ) -> dict[str, object]:
         """Answer a workspace chat turn with transcript-grounded context when available."""
-        if not self._initialized or self._active_backend is None:
-            await self.initialize()
+        backend = await self._backend_for_operation()
 
         evidence_lines = []
         for index, window in enumerate(evidence_windows):
@@ -453,15 +501,18 @@ class SummarizationManager:
         )
 
         result = await self._summarize_with_timeout(
+            backend=backend,
             transcript="",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            num_ctx=min(int(self._settings.ollama_context_length), 12288),
+            num_ctx=min(self._context_length(), 12288),
+            json_mode=backend.supports_structured_outputs,
         )
         parsed = self._parse_json_response(result.content)
         if parsed is None:
             repair = await self._repair_json_response(
-                result.content,
+                backend=backend,
+                invalid_response=result.content,
                 schema_hint=(
                     "answer, citations, confidence, intent_label, intent_confidence, "
                     "suggests_summary_change, suggested_change_kind, apply_ready"
@@ -530,8 +581,7 @@ class SummarizationManager:
         recent_turns: list[dict[str, str]],
     ) -> dict[str, object]:
         """Apply a transcript-grounded chat turn to an existing summary draft."""
-        if not self._initialized or self._active_backend is None:
-            await self.initialize()
+        backend = await self._backend_for_operation()
 
         evidence_lines = []
         for index, window in enumerate(evidence_windows):
@@ -573,15 +623,18 @@ class SummarizationManager:
         )
 
         result = await self._summarize_with_timeout(
+            backend=backend,
             transcript="",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            num_ctx=min(int(self._settings.ollama_context_length), 12288),
+            num_ctx=min(self._context_length(), 12288),
+            json_mode=backend.supports_structured_outputs,
         )
         parsed = self._parse_json_response(result.content)
         if parsed is None:
             repair = await self._repair_json_response(
-                result.content,
+                backend=backend,
+                invalid_response=result.content,
                 schema_hint="revised_summary, changed, reason",
             )
             parsed = self._parse_json_response(repair)
@@ -613,8 +666,7 @@ class SummarizationManager:
         evidence_windows: list[dict[str, str | None]],
     ) -> dict[str, object]:
         """Answer a user question using only provided evidence windows."""
-        if not self._initialized or self._active_backend is None:
-            await self.initialize()
+        backend = await self._backend_for_operation()
 
         if not evidence_windows:
             return {
@@ -660,14 +712,16 @@ class SummarizationManager:
         )
 
         result = await self._summarize_with_timeout(
+            backend=backend,
             transcript="",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            num_ctx=min(int(self._settings.ollama_context_length), 8192),
+            num_ctx=min(self._context_length(), 8192),
+            json_mode=backend.supports_structured_outputs,
         )
         parsed = self._parse_json_response(result.content)
         if parsed is None:
-            repair = await self._repair_json_response(result.content)
+            repair = await self._repair_json_response(backend=backend, invalid_response=result.content)
             parsed = self._parse_json_response(repair)
         if parsed is None:
             raise ValueError("Search answer model response was not valid JSON")
@@ -712,30 +766,34 @@ class SummarizationManager:
 
     async def _summarize_with_timeout(
         self,
+        backend: SummarizationBackend,
         transcript: str,
         system_prompt: str,
         user_prompt: str,
         num_ctx: int | None = None,
+        json_mode: bool = False,
+        max_output_tokens: int | None = None,
     ) -> SummarizationResult:
-        if not self._active_backend:
-            raise RuntimeError("No active summarization backend")
-
         timeout_seconds = int(self._settings.summarization_timeout_seconds)
         if timeout_seconds <= 0:
-            return await self._active_backend.summarize(
+            return await backend.summarize(
                 transcript=transcript,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 num_ctx=num_ctx,
+                json_mode=json_mode,
+                max_output_tokens=max_output_tokens,
             )
 
         try:
             return await asyncio.wait_for(
-                self._active_backend.summarize(
+                backend.summarize(
                     transcript=transcript,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     num_ctx=num_ctx,
+                    json_mode=json_mode,
+                    max_output_tokens=max_output_tokens,
                 ),
                 timeout=float(timeout_seconds),
             )
@@ -766,6 +824,7 @@ class SummarizationManager:
 
     async def _repair_json_response(
         self,
+        backend: SummarizationBackend,
         invalid_response: str,
         *,
         schema_hint: str = "answer, citations, confidence",
@@ -777,12 +836,37 @@ class SummarizationManager:
             f"{invalid_response.strip()}"
         )
         repaired = await self._summarize_with_timeout(
+            backend=backend,
             transcript="",
             system_prompt="You repair malformed JSON responses. Return JSON only.",
             user_prompt=repair_prompt,
             num_ctx=2048,
+            json_mode=backend.supports_structured_outputs,
         )
         return repaired.content
+
+    async def _backend_for_operation(self) -> SummarizationBackend:
+        backend = await self._ensure_backend(self._selected_backend_type)
+        self._active_backend = backend
+        self._initialized = True
+        return backend
+
+    async def _ensure_backend(self, backend: SumBackendEnum) -> SummarizationBackend:
+        backend = self._coerce_backend_type(backend)
+        if backend not in self._backends:
+            self._backends[backend] = self._create_backend(backend)
+        backend_instance = self._backends[backend]
+        if not backend_instance._initialized:
+            await backend_instance.initialize()
+        return backend_instance
+
+    def _coerce_backend_type(self, backend: SumBackendEnum | str) -> SumBackendEnum:
+        if isinstance(backend, SumBackendEnum):
+            return backend
+        return SumBackendEnum(str(backend).strip().lower())
+
+    def _context_length(self) -> int:
+        return int(self._settings.summarization_context_length)
 
     def _normalize_chat_intent(self, value: object, question: str) -> str:
         allowed = {

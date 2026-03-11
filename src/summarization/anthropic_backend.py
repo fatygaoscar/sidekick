@@ -1,10 +1,15 @@
 """Summarization backend using Anthropic Claude."""
 
+import time
 from typing import Any
+
+import httpx
 
 from config.settings import get_settings
 
-from .base import SummarizationBackend, SummarizationResult
+from src.core.exceptions import ConfigurationError
+
+from .base import BackendProbeResult, SummarizationBackend, SummarizationResult
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 
@@ -45,6 +50,8 @@ class AnthropicBackend(SummarizationBackend):
         """Initialize the Anthropic client."""
         if self._initialized:
             return
+        if not self._api_key.strip():
+            raise ConfigurationError("Anthropic is not configured: ANTHROPIC_API_KEY is empty")
 
         import anthropic
 
@@ -63,8 +70,12 @@ class AnthropicBackend(SummarizationBackend):
         transcript: str,
         system_prompt: str | None = None,
         user_prompt: str | None = None,
+        num_ctx: int | None = None,
+        json_mode: bool = False,
+        max_output_tokens: int | None = None,
     ) -> SummarizationResult:
         """Generate summary using Claude."""
+        del num_ctx, json_mode
         if not self._initialized:
             await self.initialize()
 
@@ -73,7 +84,7 @@ class AnthropicBackend(SummarizationBackend):
 
         response = await self._client.messages.create(
             model=self._model_name,
-            max_tokens=2048,
+            max_tokens=max_output_tokens or 2048,
             system=system,
             messages=[
                 {"role": "user", "content": user},
@@ -92,4 +103,49 @@ class AnthropicBackend(SummarizationBackend):
             model=self._model_name,
             prompt_tokens=response.usage.input_tokens,
             completion_tokens=response.usage.output_tokens,
+        )
+
+    async def probe(self) -> BackendProbeResult:
+        """Probe Anthropic readiness with a lightweight models call."""
+        started = time.monotonic()
+        if not self._api_key.strip():
+            return BackendProbeResult(
+                provider=self.name,
+                model=self._model_name,
+                ready=False,
+                message="ANTHROPIC_API_KEY is not configured.",
+            )
+        try:
+            async with httpx.AsyncClient(
+                base_url="https://api.anthropic.com",
+                timeout=20.0,
+                headers={
+                    "x-api-key": self._api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+            ) as client:
+                response = await client.get("/v1/models")
+        except httpx.HTTPError as exc:
+            return BackendProbeResult(
+                provider=self.name,
+                model=self._model_name,
+                ready=False,
+                message=f"Anthropic probe failed: {exc}",
+                latency_ms=(time.monotonic() - started) * 1000.0,
+            )
+        if response.is_success:
+            return BackendProbeResult(
+                provider=self.name,
+                model=self._model_name,
+                ready=True,
+                message="Ready",
+                latency_ms=(time.monotonic() - started) * 1000.0,
+            )
+        return BackendProbeResult(
+            provider=self.name,
+            model=self._model_name,
+            ready=False,
+            message=f"Anthropic probe failed with HTTP {response.status_code}.",
+            latency_ms=(time.monotonic() - started) * 1000.0,
+            details={"status_code": response.status_code},
         )

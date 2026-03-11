@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from config.settings import get_settings
+from config.settings import get_settings, SummarizationBackend as SumBackendEnum
 from src.core.datetime_utils import localize_datetime, timezone_label, to_utc_iso
 from src.core.markdown_utils import (
     build_obsidian_markdown,
@@ -73,6 +73,23 @@ async def _require_workspace_chat_enabled(repository: Repository) -> None:
 def _serialize_app_settings(settings) -> dict:
     return {
         "workspace_chat_enabled": bool(getattr(settings, "workspace_chat_enabled", False)),
+        "summarization_backend": str(
+            getattr(settings, "summarization_backend", get_settings().summarization_backend.value)
+        ),
+    }
+
+
+def _serialize_settings_payload(
+    settings,
+    summarization_manager: SummarizationManager,
+    diagnostics: dict[str, dict[str, object]] | None = None,
+) -> dict:
+    runtime = summarization_manager.runtime_state()
+    if diagnostics is not None:
+        runtime["diagnostics"] = diagnostics
+    return {
+        "settings": _serialize_app_settings(settings),
+        "summarization": runtime,
     }
 
 
@@ -1001,6 +1018,7 @@ class WorkspaceChatApplyRequest(BaseModel):
 
 class UpdateAppSettingsRequest(BaseModel):
     workspace_chat_enabled: Optional[bool] = None
+    summarization_backend: Optional[str] = None
 
 
 async def _resolve_workspace_chat_context(
@@ -1324,30 +1342,79 @@ async def get_recording_workspace(
 @router.get("/settings")
 async def get_app_settings(
     repository: Repository = Depends(get_repository),
+    summarization_manager: SummarizationManager = Depends(get_summarization_manager),
 ):
     """Return global app settings."""
     settings = await repository.get_app_settings(create_if_missing=True)
-    return {"settings": _serialize_app_settings(settings)}
+    return _serialize_settings_payload(settings, summarization_manager)
 
 
 @router.patch("/settings")
 async def update_app_settings(
     request: UpdateAppSettingsRequest,
     repository: Repository = Depends(get_repository),
+    summarization_manager: SummarizationManager = Depends(get_summarization_manager),
 ):
     """Persist global app settings."""
     provided_fields = getattr(request, "model_fields_set", set())
     if not provided_fields:
         raise HTTPException(status_code=422, detail="No settings were provided")
 
-    settings = await repository.update_app_settings(
-        workspace_chat_enabled=(
-            request.workspace_chat_enabled
-            if "workspace_chat_enabled" in provided_fields
-            else UNSET
-        ),
+    current_backend = summarization_manager.active_backend_type or get_settings().summarization_backend
+    target_backend = current_backend
+    switched_backend = False
+
+    if "summarization_backend" in provided_fields:
+        if request.summarization_backend is None:
+            raise HTTPException(status_code=422, detail="summarization_backend cannot be null")
+        try:
+            target_backend = SumBackendEnum(str(request.summarization_backend).strip().lower())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Unsupported summarization backend") from exc
+
+        if target_backend not in {SumBackendEnum.OLLAMA, SumBackendEnum.OPENAI}:
+            raise HTTPException(status_code=422, detail="Only OpenAI and Ollama are supported in settings")
+
+        probe = await summarization_manager.probe_backend(target_backend)
+        if not probe.ready:
+            raise HTTPException(status_code=503, detail=probe.message)
+
+        if target_backend != current_backend:
+            await summarization_manager.switch_backend(target_backend)
+            switched_backend = True
+
+    try:
+        settings = await repository.update_app_settings(
+            workspace_chat_enabled=(
+                request.workspace_chat_enabled
+                if "workspace_chat_enabled" in provided_fields
+                else UNSET
+            ),
+            summarization_backend=(
+                target_backend.value
+                if "summarization_backend" in provided_fields
+                else UNSET
+            ),
+        )
+    except Exception:
+        if switched_backend:
+            await summarization_manager.switch_backend(current_backend)
+        raise
+
+    return _serialize_settings_payload(settings, summarization_manager)
+
+
+@router.post("/settings/summarization/diagnostics")
+async def run_summarization_diagnostics(
+    repository: Repository = Depends(get_repository),
+    summarization_manager: SummarizationManager = Depends(get_summarization_manager),
+):
+    """Run live readiness checks for the supported summarization providers."""
+    settings = await repository.get_app_settings(create_if_missing=True)
+    diagnostics = await summarization_manager.diagnose_backends(
+        [SumBackendEnum.OLLAMA, SumBackendEnum.OPENAI]
     )
-    return {"settings": _serialize_app_settings(settings)}
+    return _serialize_settings_payload(settings, summarization_manager, diagnostics=diagnostics)
 
 
 @router.post("/recordings/{session_id}/chat/messages")

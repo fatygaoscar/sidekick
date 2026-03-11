@@ -135,15 +135,43 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
     def test_get_app_settings_returns_serialized_flags(self):
         repository = SimpleNamespace(
             get_app_settings=AsyncMock(
-                return_value=SimpleNamespace(workspace_chat_enabled=True)
+                return_value=SimpleNamespace(
+                    workspace_chat_enabled=True,
+                    summarization_backend="openai",
+                )
             )
+        )
+        summarization_manager = SimpleNamespace(
+            runtime_state=lambda: {
+                "selected_backend": "openai",
+                "active_backend": "openai",
+                "applies_to": "new_requests_only",
+                "providers": {},
+            }
         )
 
         payload = asyncio.run(
-            self.sessions.get_app_settings(repository=repository)
+            self.sessions.get_app_settings(
+                repository=repository,
+                summarization_manager=summarization_manager,
+            )
         )
 
-        self.assertEqual(payload, {"settings": {"workspace_chat_enabled": True}})
+        self.assertEqual(
+            payload,
+            {
+                "settings": {
+                    "workspace_chat_enabled": True,
+                    "summarization_backend": "openai",
+                },
+                "summarization": {
+                    "selected_backend": "openai",
+                    "active_backend": "openai",
+                    "applies_to": "new_requests_only",
+                    "providers": {},
+                },
+            },
+        )
 
     def test_update_app_settings_requires_at_least_one_field(self):
         with self.assertRaises(HTTPException) as ctx:
@@ -151,6 +179,9 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
                 self.sessions.update_app_settings(
                     self.sessions.UpdateAppSettingsRequest(),
                     repository=SimpleNamespace(update_app_settings=AsyncMock()),
+                    summarization_manager=SimpleNamespace(
+                        active_backend_type=self.sessions.SumBackendEnum.OLLAMA
+                    ),
                 )
             )
 
@@ -159,19 +190,101 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
     def test_update_app_settings_persists_feature_flags(self):
         repository = SimpleNamespace(
             update_app_settings=AsyncMock(
-                return_value=SimpleNamespace(workspace_chat_enabled=True)
+                return_value=SimpleNamespace(
+                    workspace_chat_enabled=True,
+                    summarization_backend="ollama",
+                )
             )
+        )
+        summarization_manager = SimpleNamespace(
+            active_backend_type=self.sessions.SumBackendEnum.OLLAMA,
+            runtime_state=lambda: {
+                "selected_backend": "ollama",
+                "active_backend": "ollama",
+                "applies_to": "new_requests_only",
+                "providers": {},
+            },
         )
 
         payload = asyncio.run(
             self.sessions.update_app_settings(
                 self.sessions.UpdateAppSettingsRequest(workspace_chat_enabled=True),
                 repository=repository,
+                summarization_manager=summarization_manager,
             )
         )
 
-        self.assertEqual(payload, {"settings": {"workspace_chat_enabled": True}})
+        self.assertEqual(
+            payload,
+            {
+                "settings": {
+                    "workspace_chat_enabled": True,
+                    "summarization_backend": "ollama",
+                },
+                "summarization": {
+                    "selected_backend": "ollama",
+                    "active_backend": "ollama",
+                    "applies_to": "new_requests_only",
+                    "providers": {},
+                },
+            },
+        )
         repository.update_app_settings.assert_awaited_once()
+
+    def test_update_app_settings_switches_backend_after_successful_probe(self):
+        repository = SimpleNamespace(
+            update_app_settings=AsyncMock(
+                return_value=SimpleNamespace(
+                    workspace_chat_enabled=False,
+                    summarization_backend="openai",
+                )
+            )
+        )
+        probe = SimpleNamespace(ready=True, message="Ready")
+        summarization_manager = SimpleNamespace(
+            active_backend_type=self.sessions.SumBackendEnum.OLLAMA,
+            probe_backend=AsyncMock(return_value=probe),
+            switch_backend=AsyncMock(),
+            runtime_state=lambda: {
+                "selected_backend": "openai",
+                "active_backend": "openai",
+                "applies_to": "new_requests_only",
+                "providers": {},
+            },
+        )
+
+        payload = asyncio.run(
+            self.sessions.update_app_settings(
+                self.sessions.UpdateAppSettingsRequest(summarization_backend="openai"),
+                repository=repository,
+                summarization_manager=summarization_manager,
+            )
+        )
+
+        self.assertEqual(payload["settings"]["summarization_backend"], "openai")
+        summarization_manager.probe_backend.assert_awaited_once_with(self.sessions.SumBackendEnum.OPENAI)
+        summarization_manager.switch_backend.assert_awaited_once_with(self.sessions.SumBackendEnum.OPENAI)
+
+    def test_update_app_settings_rejects_unready_backend(self):
+        repository = SimpleNamespace(update_app_settings=AsyncMock())
+        probe = SimpleNamespace(ready=False, message="OPENAI_API_KEY is not configured.")
+        summarization_manager = SimpleNamespace(
+            active_backend_type=self.sessions.SumBackendEnum.OLLAMA,
+            probe_backend=AsyncMock(return_value=probe),
+            switch_backend=AsyncMock(),
+        )
+
+        with self.assertRaises(HTTPException) as ctx:
+            asyncio.run(
+                self.sessions.update_app_settings(
+                    self.sessions.UpdateAppSettingsRequest(summarization_backend="openai"),
+                    repository=repository,
+                    summarization_manager=summarization_manager,
+                )
+            )
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        summarization_manager.switch_backend.assert_not_called()
 
     def test_end_session_by_id_reports_ended_for_active_session(self):
         repository = SimpleNamespace(

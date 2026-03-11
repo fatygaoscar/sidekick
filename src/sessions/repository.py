@@ -355,6 +355,7 @@ class Repository:
             settings = AppSettings(
                 id=1,
                 workspace_chat_enabled=bool(get_settings().workspace_chat_enabled),
+                summarization_backend=str(get_settings().summarization_backend.value),
             )
             db.add(settings)
             await db.commit()
@@ -365,6 +366,7 @@ class Repository:
         self,
         *,
         workspace_chat_enabled: bool | object = UNSET,
+        summarization_backend: str | object = UNSET,
     ) -> AppSettings:
         """Update global app settings."""
         async with self._session_factory() as db:
@@ -374,12 +376,15 @@ class Repository:
                 settings = AppSettings(
                     id=1,
                     workspace_chat_enabled=bool(get_settings().workspace_chat_enabled),
+                    summarization_backend=str(get_settings().summarization_backend.value),
                 )
                 db.add(settings)
                 await db.flush()
 
             if workspace_chat_enabled is not UNSET:
                 settings.workspace_chat_enabled = bool(workspace_chat_enabled)
+            if summarization_backend is not UNSET:
+                settings.summarization_backend = str(summarization_backend)
 
             await db.commit()
             await db.refresh(settings)
@@ -1775,21 +1780,47 @@ class Repository:
                 CREATE TABLE IF NOT EXISTS app_settings (
                     id INTEGER PRIMARY KEY,
                     workspace_chat_enabled BOOLEAN NOT NULL DEFAULT 0,
+                    summarization_backend VARCHAR(32) NOT NULL DEFAULT 'ollama',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
         )
+        result = await conn.execute(text("PRAGMA table_info(app_settings)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "summarization_backend" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE app_settings ADD COLUMN summarization_backend VARCHAR(32) DEFAULT 'ollama'")
+            )
         await conn.execute(
             text(
                 """
-                INSERT INTO app_settings (id, workspace_chat_enabled, created_at, updated_at)
-                SELECT 1, :workspace_chat_enabled, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                UPDATE app_settings
+                SET summarization_backend = :summarization_backend
+                WHERE summarization_backend IS NULL OR summarization_backend = ''
+                """
+            ),
+            {"summarization_backend": str(get_settings().summarization_backend.value)},
+        )
+        await conn.execute(
+            text(
+                """
+                INSERT INTO app_settings (
+                    id,
+                    workspace_chat_enabled,
+                    summarization_backend,
+                    created_at,
+                    updated_at
+                )
+                SELECT 1, :workspace_chat_enabled, :summarization_backend, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 WHERE NOT EXISTS (SELECT 1 FROM app_settings WHERE id = 1)
                 """
             ),
-            {"workspace_chat_enabled": 1 if get_settings().workspace_chat_enabled else 0},
+            {
+                "workspace_chat_enabled": 1 if get_settings().workspace_chat_enabled else 0,
+                "summarization_backend": str(get_settings().summarization_backend.value),
+            },
         )
 
     async def _ensure_transcript_search_table(self, conn) -> None:

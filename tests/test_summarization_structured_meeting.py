@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from config.settings import Settings, SummarizationBackend
-from src.summarization.base import SummarizationResult
+from src.summarization.base import BackendProbeResult, SummarizationResult
 from src.summarization.manager import SummarizationManager
 from src.summarization.pipeline.classifier import classify_items
 from src.summarization.pipeline.pipeline import run_pipeline
@@ -23,6 +23,66 @@ from src.summarization.pipeline.validation import validate_items, validated_to_s
 
 
 class ConciseMeetingSummarizationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manager_keeps_backend_snapshot_for_in_flight_summary(self):
+        settings = Settings(summarization_backend=SummarizationBackend.OLLAMA)
+        manager = SummarizationManager(settings)
+        manager._event_bus = SimpleNamespace(emit=AsyncMock())
+
+        class FakeBackend:
+            def __init__(self, name):
+                self._name = name
+                self._initialized = False
+
+            @property
+            def name(self):
+                return self._name
+
+            @property
+            def model(self):
+                return f"{self._name}-model"
+
+            @property
+            def is_local(self):
+                return self._name == "ollama"
+
+            @property
+            def supports_structured_outputs(self):
+                return self._name == "openai"
+
+            async def initialize(self):
+                self._initialized = True
+
+            async def shutdown(self):
+                self._initialized = False
+
+            async def summarize(self, transcript, system_prompt=None, user_prompt=None, num_ctx=None, json_mode=False, max_output_tokens=None):
+                del transcript, system_prompt, user_prompt, num_ctx, json_mode, max_output_tokens
+                return SummarizationResult(content=self._name, backend=self._name, model=f"{self._name}-model")
+
+            async def probe(self):
+                return BackendProbeResult(provider=self._name, model=f"{self._name}-model", ready=True, message="Ready")
+
+        manager._create_backend = lambda backend: FakeBackend(backend.value)
+
+        llm_outputs = []
+
+        async def fake_generate(**kwargs):
+            llm_call = kwargs["llm_call"]
+            llm_outputs.append(await llm_call("system-1", "user-1"))
+            await manager.switch_backend(SummarizationBackend.OPENAI)
+            llm_outputs.append(await llm_call("system-2", "user-2"))
+            return "summary", "full_transcript", 2, "style", {}, {}
+
+        with patch("src.summarization.manager.generate_cohesive_summary", new=AsyncMock(side_effect=fake_generate)):
+            result = await manager.summarize(
+                transcript="[00:00] Daniel: We agreed on the rollout path.",
+                prompt_type="meeting",
+            )
+
+        self.assertEqual(result.backend, "ollama")
+        self.assertEqual(llm_outputs, ["ollama", "ollama"])
+        self.assertEqual(manager.active_backend_type, SummarizationBackend.OPENAI)
+
     def test_classifier_and_validation_keep_reliability_rules(self):
         items = [
             ExtractedItem(

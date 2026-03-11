@@ -52,6 +52,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_manager = SessionManager(app.state.repository)
     app.state.transcription_manager = TranscriptionManager(settings)
     app.state.summarization_manager = SummarizationManager(settings)
+    app_settings = await app.state.repository.get_app_settings(create_if_missing=True)
+    if app_settings is not None:
+        app.state.summarization_manager.set_selected_backend(
+            getattr(app_settings, "summarization_backend", settings.summarization_backend.value)
+        )
 
     # Transcription model loads on-demand when recording starts (no pre-load)
 

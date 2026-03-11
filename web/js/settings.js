@@ -4,7 +4,11 @@
             this.state = {
                 loading: true,
                 settings: {},
+                summarization: null,
+                diagnostics: null,
                 savingKeys: new Set(),
+                switchingProvider: false,
+                diagnosticsLoading: false,
                 banner: null,
             };
             this._bannerTimer = null;
@@ -21,6 +25,10 @@
                 banner: document.getElementById('settings-banner'),
                 loading: document.getElementById('settings-loading'),
                 list: document.getElementById('settings-list'),
+                providerLoading: document.getElementById('settings-provider-loading'),
+                providerList: document.getElementById('settings-provider-list'),
+                diagnostics: document.getElementById('settings-diagnostics'),
+                runDiagnostics: document.getElementById('settings-run-diagnostics'),
             };
 
             this._bindEvents();
@@ -35,6 +43,16 @@
                 }
                 void this._toggleSetting(input.dataset.settingKey, input.checked);
             });
+            this.elements.providerList?.addEventListener('change', (event) => {
+                const input = event.target.closest('[name="summarization-backend"]');
+                if (!input) {
+                    return;
+                }
+                void this._switchProvider(input.value);
+            });
+            this.elements.runDiagnostics?.addEventListener('click', () => {
+                void this._runDiagnostics();
+            });
         }
 
         async _load() {
@@ -48,12 +66,21 @@
                     httpErrorMessage: 'Failed to load settings',
                     logLabel: 'settings:load',
                 });
-                this.state.settings = payload?.settings || {};
+                this._applyPayload(payload);
+                await this._runDiagnostics({ silentFailure: true });
             } catch (error) {
                 this._showBanner(error?.message || 'Failed to load settings.', 'error');
             } finally {
                 this.state.loading = false;
                 this._render();
+            }
+        }
+
+        _applyPayload(payload) {
+            this.state.settings = payload?.settings || {};
+            this.state.summarization = payload?.summarization || null;
+            if (payload?.summarization?.diagnostics) {
+                this.state.diagnostics = payload.summarization.diagnostics;
             }
         }
 
@@ -80,9 +107,9 @@
                     retryOnNetworkError: false,
                     networkErrorMessage: 'Settings network request failed',
                     httpErrorMessage: 'Failed to update settings',
-                    logLabel: 'settings:update',
+                    logLabel: 'settings:update-toggle',
                 });
-                this.state.settings = payload?.settings || this.state.settings;
+                this._applyPayload(payload);
                 this._showBanner('Settings saved.', 'success');
             } catch (error) {
                 this.state.settings = {
@@ -92,6 +119,80 @@
                 this._showBanner(error?.message || 'Failed to update settings.', 'error');
             } finally {
                 this.state.savingKeys.delete(key);
+                this._render();
+            }
+        }
+
+        async _switchProvider(provider) {
+            const normalized = String(provider || '').trim().toLowerCase();
+            const previous = String(this.state.settings?.summarization_backend || '').toLowerCase();
+            if (!normalized || normalized === previous || this.state.switchingProvider) {
+                this._render();
+                return;
+            }
+
+            this.state.settings = {
+                ...this.state.settings,
+                summarization_backend: normalized,
+            };
+            this.state.switchingProvider = true;
+            this._render();
+
+            try {
+                const payload = await window.SidekickNetwork.json('/api/settings', {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ summarization_backend: normalized }),
+                }, {
+                    timeoutMs: 20000,
+                    retries: 0,
+                    retryOnNetworkError: false,
+                    networkErrorMessage: 'Settings network request failed',
+                    httpErrorMessage: 'Failed to switch summarization provider',
+                    logLabel: 'settings:update-provider',
+                });
+                this._applyPayload(payload);
+                this._showBanner('Summarization provider updated.', 'success');
+                await this._runDiagnostics({ silentFailure: true });
+            } catch (error) {
+                this.state.settings = {
+                    ...this.state.settings,
+                    summarization_backend: previous,
+                };
+                this._showBanner(error?.message || 'Failed to switch provider.', 'error');
+            } finally {
+                this.state.switchingProvider = false;
+                this._render();
+            }
+        }
+
+        async _runDiagnostics({ silentFailure = false } = {}) {
+            if (this.state.diagnosticsLoading) {
+                return;
+            }
+            this.state.diagnosticsLoading = true;
+            this._render();
+            try {
+                const payload = await window.SidekickNetwork.json('/api/settings/summarization/diagnostics', {
+                    method: 'POST',
+                }, {
+                    timeoutMs: 20000,
+                    retries: 0,
+                    retryOnNetworkError: false,
+                    networkErrorMessage: 'Settings network request failed',
+                    httpErrorMessage: 'Failed to run diagnostics',
+                    logLabel: 'settings:diagnostics',
+                });
+                this._applyPayload(payload);
+                if (!silentFailure) {
+                    this._showBanner('Diagnostics complete.', 'success');
+                }
+            } catch (error) {
+                if (!silentFailure) {
+                    this._showBanner(error?.message || 'Failed to run diagnostics.', 'error');
+                }
+            } finally {
+                this.state.diagnosticsLoading = false;
                 this._render();
             }
         }
@@ -126,11 +227,87 @@
             if (this.elements.loading) {
                 this.elements.loading.classList.toggle('hidden', !this.state.loading);
             }
-            if (!this.elements.list) {
-                return;
+            if (this.elements.list) {
+                this.elements.list.classList.toggle('hidden', this.state.loading);
+                this.elements.list.innerHTML = this.features.map((feature) => this._renderFeature(feature)).join('');
             }
-            this.elements.list.classList.toggle('hidden', this.state.loading);
-            this.elements.list.innerHTML = this.features.map((feature) => this._renderFeature(feature)).join('');
+            if (this.elements.providerLoading) {
+                this.elements.providerLoading.classList.toggle('hidden', !this.state.switchingProvider);
+            }
+            if (this.elements.providerList) {
+                this.elements.providerList.classList.toggle('hidden', this.state.loading);
+                this.elements.providerList.innerHTML = this._renderProviders();
+            }
+            if (this.elements.runDiagnostics) {
+                this.elements.runDiagnostics.disabled = this.state.loading || this.state.diagnosticsLoading || this.state.switchingProvider;
+                this.elements.runDiagnostics.textContent = this.state.diagnosticsLoading ? 'Running Diagnostics...' : 'Run Diagnostics';
+            }
+            if (this.elements.diagnostics) {
+                const shouldShow = Boolean(this.state.diagnostics);
+                this.elements.diagnostics.classList.toggle('hidden', !shouldShow);
+                this.elements.diagnostics.innerHTML = shouldShow ? this._renderDiagnostics() : '';
+            }
+        }
+
+        _renderProviders() {
+            const summarization = this.state.summarization || {};
+            const providers = summarization.providers || {};
+            const selected = String(this.state.settings?.summarization_backend || summarization.selected_backend || '').toLowerCase();
+            return Object.entries(providers).map(([key, provider]) => {
+                const checked = key === selected;
+                const disabled = this.state.loading || this.state.switchingProvider;
+                const configured = provider?.configured ? 'Configured' : 'Not configured';
+                const subtitle = provider?.host
+                    ? `${provider.model || ''} · ${provider.host}`
+                    : (provider?.model || 'No model configured');
+                return `
+                    <label class="settings-item settings-provider-option">
+                        <div class="settings-item-copy">
+                            <div class="settings-item-head">
+                                <h5>${this._escapeHtml(provider?.label || key)}</h5>
+                            </div>
+                            <p class="settings-item-description">${this._escapeHtml(subtitle)}</p>
+                            <div class="settings-item-meta">${this._escapeHtml(configured)} · Applies to new requests only.</div>
+                        </div>
+                        <span class="settings-choice">
+                            <input
+                                type="radio"
+                                name="summarization-backend"
+                                value="${this._escapeHtml(key)}"
+                                ${checked ? 'checked' : ''}
+                                ${disabled ? 'disabled' : ''}
+                            >
+                        </span>
+                    </label>
+                `;
+            }).join('');
+        }
+
+        _renderDiagnostics() {
+            const diagnostics = this.state.diagnostics || {};
+            return Object.entries(diagnostics).map(([key, diagnostic]) => {
+                const ready = Boolean(diagnostic?.ready);
+                const status = ready ? 'Ready' : 'Issue detected';
+                const detailParts = [];
+                if (diagnostic?.latency_ms != null) {
+                    detailParts.push(`${Math.round(diagnostic.latency_ms)} ms`);
+                }
+                if (diagnostic?.request_id) {
+                    detailParts.push(`request ${diagnostic.request_id}`);
+                }
+                return `
+                    <article class="settings-item">
+                        <div class="settings-item-copy">
+                            <div class="settings-item-head">
+                                <h5>${this._escapeHtml(this._providerLabel(key))}</h5>
+                                <span class="workspace-badge ${ready ? 'workspace-badge-success' : 'workspace-badge-warning'}">${this._escapeHtml(status)}</span>
+                            </div>
+                            <p class="settings-item-description">${this._escapeHtml(diagnostic?.message || 'No diagnostic message returned.')}</p>
+                            <div class="settings-item-meta">${this._escapeHtml(detailParts.join(' · ') || 'No extra diagnostic details.')}</div>
+                        </div>
+                    </article>
+                `;
+            }).join('');
         }
 
         _renderFeature(feature) {
@@ -161,6 +338,10 @@
                     </label>
                 </article>
             `;
+        }
+
+        _providerLabel(key) {
+            return key === 'ollama' ? 'Local qwen3:8b' : 'OpenAI';
         }
 
         _escapeHtml(value) {

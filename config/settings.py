@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     # Summarization
     summarization_backend: SummarizationBackend = SummarizationBackend.OLLAMA
     summarization_timeout_seconds: int = 600
+    summarization_context_length: int = 32768
     summarization_meeting_structured_enabled: bool = False
     workspace_chat_enabled: bool = False
 
@@ -71,6 +72,10 @@ class Settings(BaseSettings):
 
     # OpenAI summarization
     openai_summarization_model: str = "gpt-4o-mini"
+    openai_timeout_seconds: int = 60
+    openai_max_retries: int = 2
+    openai_summarization_temperature: float = 0.2
+    openai_summarization_max_output_tokens: int = 4096
 
     # Anthropic summarization
     anthropic_summarization_model: str = "claude-3-haiku-20240307"

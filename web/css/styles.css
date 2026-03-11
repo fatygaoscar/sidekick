@@ -957,6 +957,42 @@ textarea.form-input {
     opacity: 0.6;
 }
 
+.settings-actions {
+    display: flex;
+    justify-content: flex-start;
+}
+
+.settings-action-button {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    padding: 10px 14px;
+    font: inherit;
+}
+
+.settings-action-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.settings-provider-option {
+    cursor: pointer;
+}
+
+.settings-choice {
+    flex-shrink: 0;
+}
+
+.settings-choice input[type="radio"] {
+    width: 18px;
+    height: 18px;
+}
+
+.workspace-badge-success {
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 40%, transparent);
+}
+
 .mobile-page-links {
     display: flex;
     gap: 12px;

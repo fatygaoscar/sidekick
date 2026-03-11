@@ -50,6 +50,8 @@ Legacy/direct export flow:
 
 - `src/summarization/manager.py`
   - backend selection
+  - runtime provider switching for future requests
+  - provider diagnostics
   - timeout handling
   - normal summarize path
   - summary refinement path
@@ -245,6 +247,8 @@ Current behavior:
 
 This path is lossy compared with full-transcript mode, but much better than summarizing arbitrary truncated text.
 
+Context selection remains the same architecture regardless of provider. Provider differences may influence the effective budget or whether a given transcript can stay in `full_transcript` mode, but they do not change the core routing model.
+
 ### Step 3: pass 1 draft generation
 
 Pass 1 is a constrained drafting step.
@@ -304,7 +308,16 @@ These fields are persisted on `Summary` and included in the Obsidian export.
 
 ## Backend Runtime
 
-The normal backend is `OllamaBackend`.
+The default architecture supports multiple backends behind the same cohesive summarizer.
+
+Normal runtime today supports:
+
+- `OllamaBackend`
+- `OpenAIBackend`
+
+Both backends feed the same summarization architecture.
+
+### Ollama runtime notes
 
 Each call:
 
@@ -321,7 +334,26 @@ Response cleanup strips:
 - orphan `</think>` tails
 - tokenizer/control-token tails
 
-This backend is local-only in the normal Sidekick setup.
+### OpenAI runtime notes
+
+OpenAI uses the same cohesive summarizer and prompt flow, but differs at the transport boundary:
+
+- no local context override is required for the API call itself
+- JSON-returning assistant tasks should use structured JSON mode where supported
+- provider diagnostics should capture request IDs and readiness failures
+
+The architecture does not split into a second OpenAI-specific summary pipeline.
+
+### Live provider switching
+
+The selected summarization provider is persisted in global app settings and can be changed from the settings page.
+
+Rules:
+
+- switching is runtime-live and does not require restart
+- switching applies to future summarize/refine/chat/search/export requests
+- in-flight work stays on the backend it started with
+- provider selection does not change transcript versioning, prompt audit persistence, or draft/save behavior
 
 ## Draft Lifecycle
 
@@ -407,6 +439,7 @@ These are the rules future changes should preserve unless intentionally redesign
 - prompt audit fields must remain persisted for generated summaries
 - the cohesive summarizer is the default path for normal meeting summaries
 - export should not use a different summary algorithm than workspace draft generation without explicit documentation
+- provider switching must not let one in-flight summary operation mix multiple backends
 
 ## Change Checklist
 
@@ -428,4 +461,3 @@ At minimum, keep these files aligned:
 - `AGENTS.md`
 - `CLAUDE.md`
 - `GEMINI.md`
-

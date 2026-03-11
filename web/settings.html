@@ -23,6 +23,24 @@
 
                 <div id="settings-banner" class="workspace-banner hidden" aria-live="polite"></div>
 
+                <section class="settings-section" aria-labelledby="settings-provider-title">
+                    <div class="settings-section-head">
+                        <h4 id="settings-provider-title">Summarization Provider</h4>
+                    </div>
+                    <div id="settings-provider-loading" class="recordings-search-status hidden">
+                        <div class="processing-spinner"></div>
+                        <div>
+                            <div class="recordings-search-status-title">Updating provider</div>
+                            <div class="recordings-search-status-copy">Applying to new summarize, refine, chat, and search requests.</div>
+                        </div>
+                    </div>
+                    <div id="settings-provider-list" class="settings-list hidden"></div>
+                    <div class="settings-actions">
+                        <button id="settings-run-diagnostics" class="settings-action-button" type="button">Run Diagnostics</button>
+                    </div>
+                    <div id="settings-diagnostics" class="settings-list hidden"></div>
+                </section>
+
                 <section class="settings-section" aria-labelledby="settings-experimental-title">
                     <div class="settings-section-head">
                         <h4 id="settings-experimental-title">Experimental Features</h4>
