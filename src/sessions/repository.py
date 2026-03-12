@@ -819,6 +819,7 @@ class Repository:
         content: str,
         backend: str,
         model: str,
+        summary_id: str | None = None,
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
         processing_duration_seconds: float | None = None,
@@ -840,7 +841,11 @@ class Repository:
     ) -> Summary:
         """Add a summary for a meeting."""
         async with self._session_factory() as db:
+            summary_kwargs: dict[str, Any] = {}
+            if summary_id:
+                summary_kwargs["id"] = summary_id
             summary = Summary(
+                **summary_kwargs,
                 meeting_id=meeting_id,
                 transcript_version_id=transcript_version_id,
                 content=content,
@@ -1120,6 +1125,7 @@ class Repository:
         self,
         draft_id: str,
         *,
+        summary_id: str | None = None,
         saved_to_obsidian_at: datetime | None = None,
         obsidian_relative_path: str | None = None,
     ) -> Summary:
@@ -1132,6 +1138,7 @@ class Repository:
 
         saved = await self.add_summary(
             meeting_id=draft.meeting_id,
+            summary_id=summary_id,
             transcript_version_id=draft.transcript_version_id,
             content=draft.content,
             backend=draft.backend,

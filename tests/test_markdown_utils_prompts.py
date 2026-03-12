@@ -13,13 +13,34 @@ class MarkdownUtilsPromptTests(unittest.TestCase):
             duration_str="5 min",
             processing_time_str="12s",
             transcript="[00:00] Speaker: Hello",
+            meeting_display_id="SK-abc12345",
+            summary_version_number=4,
+            transcript_version_number=2,
+            frontmatter={
+                "type": "meeting-note",
+                "sidekick_meeting_id": "meeting-1",
+                "sidekick_summary_version": 4,
+                "sidekick_export_status": "latest",
+                "recording_duration_minutes": 5,
+                "tags": [],
+            },
         )
 
+        self.assertTrue(markdown.startswith("---\n"))
+        self.assertIn('type: "meeting-note"', markdown)
+        self.assertIn('sidekick_meeting_id: "meeting-1"', markdown)
+        self.assertIn('sidekick_export_status: "latest"', markdown)
+        self.assertIn("recording_duration_minutes: 5", markdown)
+        self.assertIn("tags: []", markdown)
+        self.assertNotIn("aliases:", markdown)
         self.assertIn("> [!info]- Meeting Info", markdown)
         self.assertIn("> **Template**: Custom", markdown)
+        self.assertIn("> **Sidekick ID**: SK-abc12345", markdown)
         self.assertIn("> **Recorded**: March 7, 2026 at 9am (CST)", markdown)
         self.assertIn("> **Exported**: March 7, 2026 at 9:05am (CST)", markdown)
         self.assertIn("> **Meeting Length**: 5 min", markdown)
+        self.assertIn("> **Summary Version**: v4", markdown)
+        self.assertIn("> **Transcript Version**: t2", markdown)
         self.assertIn("> **Processing Time**: 12s", markdown)
         self.assertLess(markdown.index("> [!info]- Meeting Info"), markdown.index("## Summary"))
 

@@ -21,7 +21,6 @@ from src.core.markdown_utils import (
     format_datetime_human,
     format_duration_human,
     format_processing_time,
-    week_folder,
 )
 from src.core.speaker_labels import (
     build_user_facing_speaker_map,
@@ -1784,77 +1783,81 @@ async def save_recording_summary(
     # Best-effort vault write
     settings = get_settings()
     if settings.obsidian_vault_path:
-        # Determine filename with versioning
-        version_suffix = ""
-        if len(existing_summaries) >= 1:
-            version_suffix = f" (v{len(existing_summaries) + 1})"
-            
-        local_started_at = localize_datetime(
-            session.started_at,
-            session.timezone_name,
-            session.timezone_offset_minutes,
+        transcript_version_id = (
+            getattr(original_summary, "transcript_version_id", None)
+            if original_summary
+            else None
         )
-        tz_label = timezone_label(session.timezone_name, session.timezone_offset_minutes)
-        
-        # Get title
-        title = primary_meeting.title or "Untitled Recording"
-        safe_title = re.sub(r'[<>:"/\\|?*]', '', title.strip())
-        dow = local_started_at.strftime("%a")
-        time_hhmm = local_started_at.strftime("%H%M")
-        
-        filename = f"{local_started_at.day:02d} {dow} {time_hhmm} - {safe_title}{version_suffix}.md"
-        week_folder_name = week_folder(local_started_at)
-        relative_path = f"Meetings/{week_folder_name}/{filename}"
-        
-        # Build metadata for markdown
-        recorded_at = format_datetime_human(local_started_at, tz_label)
+        if not transcript_version_id:
+            transcript_version = await repository.get_latest_transcript_version(session_id)
+            transcript_version_id = str(transcript_version.id) if transcript_version else None
+        from src.api.routes.export import (
+            _archive_previous_export_if_needed,
+            _build_summary_save_params,
+            _write_obsidian_file,
+        )
+        params = await _build_summary_save_params(
+            repository,
+            session,
+            primary_meeting,
+            transcript_version_id=transcript_version_id,
+            summary_id=summary.id,
+            summary_content=request.content,
+            template_label="Refined",
+            processing_duration_seconds=(
+                original_summary.processing_duration_seconds if original_summary else None
+            ),
+            pass1_system_prompt=original_summary.pass1_system_prompt if original_summary else None,
+            pass1_user_prompt=original_summary.pass1_user_prompt if original_summary else None,
+            pass2_system_prompt=original_summary.pass2_system_prompt if original_summary else None,
+            pass2_user_prompt=original_summary.pass2_user_prompt if original_summary else None,
+            workflow_data_json=getattr(original_summary, "workflow_data_json", None) if original_summary else None,
+        )
         local_exported_at = localize_datetime(
             datetime.now(timezone.utc),
             session.timezone_name,
             session.timezone_offset_minutes,
         )
-        exported_at = format_datetime_human(local_exported_at, tz_label)
-        
-        # Get transcript
-        segments = await repository.get_segments(session_id=session_id)
-        from src.api.routes.export import _segments_to_transcript
-        full_transcript, audio_duration_seconds = _segments_to_transcript(segments)
-        
-        duration_str = format_duration_human(int(audio_duration_seconds))
-        processing_time_str = ""
-        if original_summary and original_summary.processing_duration_seconds:
-            processing_time_str = format_processing_time(original_summary.processing_duration_seconds)
-
+        exported_at = format_datetime_human(local_exported_at, params["tz_label"])
+        frontmatter = dict(params.get("frontmatter") or {})
+        frontmatter["exported_at"] = local_exported_at.isoformat()
         markdown_content = build_obsidian_markdown(
             content=request.content,
-            template_label="Refined",
-            recorded_at=recorded_at,
+            template_label=params["template_label"],
+            recorded_at=params["recorded_at"],
             exported_at=exported_at,
-            duration_str=duration_str,
-            processing_time_str=processing_time_str,
-            transcript=full_transcript,
-            pass1_system_prompt=original_summary.pass1_system_prompt if original_summary else None,
-            pass1_user_prompt=original_summary.pass1_user_prompt if original_summary else None,
-            pass2_system_prompt=original_summary.pass2_system_prompt if original_summary else None,
-            pass2_user_prompt=original_summary.pass2_user_prompt if original_summary else None,
-            revision_history=(
-                _safe_json_loads(getattr(original_summary, "workflow_data_json", None), {}).get("revision_history", [])
-                if original_summary
-                else None
-            ),
+            duration_str=params["duration_str"],
+            processing_time_str=params["processing_time_str"],
+            transcript=params["transcript"],
+            meeting_display_id=params.get("meeting_display_id"),
+            summary_version_number=params.get("summary_version_number"),
+            transcript_version_number=params.get("transcript_version_number"),
+            frontmatter=frontmatter,
+            pass1_system_prompt=params.get("pass1_system_prompt"),
+            pass1_user_prompt=params.get("pass1_user_prompt"),
+            pass2_system_prompt=params.get("pass2_system_prompt"),
+            pass2_user_prompt=params.get("pass2_user_prompt"),
+            revision_history=params.get("revision_history"),
             revision_instruction=request.revision_instruction,
         )
 
         obsidian_uri = None
         try:
-            from src.api.routes.export import _write_obsidian_file
+            await _archive_previous_export_if_needed(
+                repository,
+                summary_to_archive=params.get("latest_exported_summary"),
+                archive_relative_path=params.get("previous_archive_relative_path"),
+                obsidian_vault_path=settings.obsidian_vault_path,
+            )
             _, obsidian_uri = await _write_obsidian_file(
-                markdown_content, relative_path, settings.obsidian_vault_path
+                markdown_content,
+                params["relative_path"],
+                settings.obsidian_vault_path,
             )
             await repository.update_summary(
                 summary.id,
                 saved_to_obsidian_at=datetime.utcnow(),
-                obsidian_relative_path=relative_path,
+                obsidian_relative_path=params["relative_path"],
             )
         except Exception as e:
             logger.warning("save_recording_summary: vault write failed (non-fatal): %s", e)

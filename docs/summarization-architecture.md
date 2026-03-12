@@ -309,11 +309,14 @@ These fields are persisted on `Summary` and included in the Obsidian export.
 
 Export formatting rules:
 
-- `Meeting Info` appears first as a collapsed callout containing template, recorded/exported timestamps, duration, and processing time when available
+- exported notes now write a stable latest file under `Meetings/YYYY/YYYY-MM/Title.md`; previous exported versions are copied into `Meetings/YYYY/YYYY-MM/_versions/Title/vN.md`
+- `Meeting Info` appears first as a collapsed callout containing template, recorded/exported timestamps, duration, processing time when available, and the short `Sidekick ID` plus summary/transcript version labels
 - the meeting summary content appears immediately after that top metadata callout
 - revision history appears immediately after the summary when present
 - revision history, prompt audit blocks, and transcript are rendered as Obsidian foldable callouts collapsed by default
 - `Meeting Info` is also rendered as a collapsed Obsidian foldable callout so the note opens directly into the summary
+- exported notes include YAML frontmatter with full machine IDs and the small query-safe field set (`meeting_date`, `meeting_month`, `template_key`, `recording_duration_minutes`, `tags`, `sidekick_export_status`) so Bases/Dataview can query meetings without depending on long filenames or week-based folders
+- `sidekick_export_status` is stored as a string (`latest` / `archived`) instead of a boolean checkbox so users do not accidentally break Base filters; older notes can be repaired with `scripts/repair_obsidian_export_status.py`
 - use foldable callouts instead of raw HTML `<details>` blocks so markdown content inside the collapsed sections still renders correctly in Obsidian
 
 ## Backend Runtime

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 import urllib.parse
@@ -27,7 +28,14 @@ from src.core.markdown_utils import (
     format_datetime_human,
     format_duration_human,
     format_processing_time,
-    week_folder,
+)
+from src.core.obsidian_exports import (
+    build_archive_relative_path,
+    copy_obsidian_markdown_with_frontmatter_updates,
+    extract_tags_from_frontmatter,
+    find_note_by_summary_id,
+    resolve_latest_export_target,
+    write_obsidian_markdown_atomic,
 )
 from src.core.speaker_labels import (
     build_user_facing_speaker_map,
@@ -67,6 +75,107 @@ def _summary_revision_history(summary) -> list[dict]:
     workflow_data = _safe_json_loads(getattr(summary, "workflow_data_json", None), {})
     history = workflow_data.get("revision_history", []) if isinstance(workflow_data, dict) else []
     return history if isinstance(history, list) else []
+
+
+def _saved_summary_version_map(saved_summaries: list) -> dict[str, int]:
+    ordered = list(saved_summaries or [])
+    total_saved = len(ordered)
+    return {
+        str(getattr(summary, "id", "")): total_saved - index
+        for index, summary in enumerate(ordered)
+    }
+
+
+def _latest_exported_summary(saved_summaries: list):
+    return next(
+        (
+            summary
+            for summary in (saved_summaries or [])
+            if getattr(summary, "saved_to_obsidian_at", None)
+            or getattr(summary, "obsidian_relative_path", None)
+        ),
+        None,
+    )
+
+
+def _build_obsidian_frontmatter(
+    *,
+    meeting_id: str,
+    summary_id: str | None,
+    transcript_version_id: str | None,
+    display_id: str,
+    summary_version_number: int,
+    transcript_version_number: int | None,
+    meeting_title: str,
+    local_started_at: datetime,
+    target,
+    template_key: str | None,
+    local_exported_at: datetime | None = None,
+    recording_duration_minutes: int | None = None,
+    tags: list[str] | None = None,
+) -> dict[str, object]:
+    frontmatter: dict[str, object] = {
+        "type": "meeting-note",
+        "sidekick_meeting_id": meeting_id,
+        "sidekick_summary_id": summary_id,
+        "sidekick_transcript_version_id": transcript_version_id,
+        "sidekick_summary_version": summary_version_number,
+        "sidekick_export_status": "latest",
+        "meeting_date": local_started_at.strftime("%Y-%m-%d"),
+        "meeting_month": target.meeting_month,
+        "template_key": template_key or "",
+        "tags": list(tags or []),
+    }
+    if transcript_version_id:
+        frontmatter["sidekick_transcript_version_id"] = transcript_version_id
+    if transcript_version_number:
+        frontmatter["sidekick_transcript_version"] = transcript_version_number
+    if recording_duration_minutes is not None:
+        frontmatter["recording_duration_minutes"] = recording_duration_minutes
+    if local_exported_at:
+        frontmatter["exported_at"] = local_exported_at.isoformat()
+    return frontmatter
+
+
+def _resolve_exported_note_path(
+    summary,
+    *,
+    obsidian_vault_path: str,
+) -> tuple[str | None, bool]:
+    """Return the on-disk note path for a saved export and whether it was rediscovered elsewhere."""
+    source_relative_path = getattr(summary, "obsidian_relative_path", None)
+    if not source_relative_path:
+        return None, False
+    vault_root = Path(obsidian_vault_path)
+    source_path = vault_root / Path(source_relative_path)
+    if source_path.exists():
+        return source_relative_path, False
+    discovered_relative_path = find_note_by_summary_id(
+        obsidian_vault_path=obsidian_vault_path,
+        summary_id=str(getattr(summary, "id", "")),
+    )
+    if discovered_relative_path and discovered_relative_path != source_relative_path:
+        return discovered_relative_path, True
+    return None, False
+
+
+def _load_preserved_tags(
+    latest_exported_summary,
+    *,
+    obsidian_vault_path: str | None,
+) -> list[str]:
+    """Load user-managed tags from the current latest exported note when available."""
+    if not latest_exported_summary or not obsidian_vault_path:
+        return []
+    resolved_relative_path, _ = _resolve_exported_note_path(
+        latest_exported_summary,
+        obsidian_vault_path=obsidian_vault_path,
+    )
+    if not resolved_relative_path:
+        return []
+    note_path = Path(obsidian_vault_path) / Path(resolved_relative_path)
+    preserved_tags = extract_tags_from_frontmatter(note_path)
+    return list(preserved_tags or [])
 
 
 def _build_revision_history_entry(
@@ -663,22 +772,89 @@ async def _write_obsidian_file(
             status_code=500,
             detail=f"Obsidian vault path does not exist: {obsidian_vault_path}",
         )
-    filepath = vault_path / Path(relative_path)
     try:
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        filepath.write_text(markdown_content, encoding="utf-8")
+        filepath, obsidian_uri = write_obsidian_markdown_atomic(
+            markdown_content,
+            relative_path,
+            obsidian_vault_path,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to write file: {str(e)}")
+    return filepath, obsidian_uri
 
-    vault_name = vault_path.name
-    # Obsidian URIs use forward slashes regardless of OS
-    uri_path = relative_path.replace("\\", "/")
-    obsidian_uri = (
-        f"obsidian://open?"
-        f"vault={urllib.parse.quote(vault_name)}&"
-        f"file={urllib.parse.quote(uri_path)}"
+
+async def _archive_previous_export_if_needed(
+    repository: Repository,
+    *,
+    summary_to_archive,
+    archive_relative_path: str | None,
+    obsidian_vault_path: str,
+) -> None:
+    """Copy the previous latest export into the hidden versions tree and update its DB path."""
+    if not summary_to_archive or not archive_relative_path:
+        return
+    source_relative_path, was_rediscovered = _resolve_exported_note_path(
+        summary_to_archive,
+        obsidian_vault_path=obsidian_vault_path,
     )
-    return str(filepath), obsidian_uri
+    if not source_relative_path:
+        return
+    if was_rediscovered:
+        await repository.update_summary(
+            summary_to_archive.id,
+            obsidian_relative_path=source_relative_path,
+        )
+        return
+    vault_root = Path(obsidian_vault_path)
+    source_path = vault_root / Path(source_relative_path)
+    if not source_path.exists():
+        return
+    try:
+        copied = copy_obsidian_markdown_with_frontmatter_updates(
+            obsidian_vault_path=obsidian_vault_path,
+            source_relative_path=source_relative_path,
+            destination_relative_path=archive_relative_path,
+            frontmatter_updates={"sidekick_export_status": "archived"},
+            remove_frontmatter_keys=("sidekick_is_latest_export",),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to archive previous export: {exc}")
+    if copied:
+        await repository.update_summary(
+            summary_to_archive.id,
+            obsidian_relative_path=archive_relative_path,
+        )
+
+
+async def _persist_latest_summary_export(
+    repository: Repository,
+    *,
+    summary_id: str,
+    markdown_content: str,
+    latest_relative_path: str,
+    obsidian_vault_path: str,
+    previous_latest_summary=None,
+    previous_archive_relative_path: str | None = None,
+    saved_at: datetime | None = None,
+) -> tuple[str, str]:
+    """Archive the previous latest export, write the new latest note, and persist DB paths."""
+    await _archive_previous_export_if_needed(
+        repository,
+        summary_to_archive=previous_latest_summary,
+        archive_relative_path=previous_archive_relative_path,
+        obsidian_vault_path=obsidian_vault_path,
+    )
+    filepath, obsidian_uri = await _write_obsidian_file(
+        markdown_content,
+        latest_relative_path,
+        obsidian_vault_path,
+    )
+    await repository.update_summary(
+        summary_id,
+        saved_to_obsidian_at=saved_at or datetime.utcnow(),
+        obsidian_relative_path=latest_relative_path,
+    )
+    return filepath, obsidian_uri
 
 
 async def _run_export_pipeline(
@@ -834,27 +1010,39 @@ async def _run_export_pipeline(
     summary_content = summary_result.content
     processing_time_str = format_processing_time(summarization_duration)
 
-    # Build filename and folder
     local_started_at = localize_datetime(
         session.started_at,
         session.timezone_name,
         session.timezone_offset_minutes,
     )
     tz_label = timezone_label(session.timezone_name, session.timezone_offset_minutes)
-    safe_title = re.sub(r'[<>:"/\\|?*]', '', request_payload.title.strip())
-    dow = local_started_at.strftime("%a")   # Mon, Tue, …
-    time_hhmm = local_started_at.strftime("%H%M")  # 0930
-    base_filename = f"{local_started_at.day:02d} {dow} {time_hhmm} - {safe_title}"
-    
-    # Check for existing summaries to determine version
     existing_summaries = await repository.get_summaries(primary_meeting_id, status="saved")
-    version_suffix = ""
-    if existing_summaries:
-        version_suffix = f" (v{len(existing_summaries) + 1})"
-    
-    filename = f"{base_filename}{version_suffix}.md"
-    week_folder_name = week_folder(local_started_at)
-    relative_path = f"Meetings/{week_folder_name}/{filename}"
+    version_map = _saved_summary_version_map(existing_summaries)
+    latest_exported_summary = _latest_exported_summary(existing_summaries)
+    target = resolve_latest_export_target(
+        vault_path=settings.obsidian_vault_path,
+        meeting_id=primary_meeting_id,
+        title=request_payload.title,
+        local_started_at=local_started_at,
+        preferred_relative_path=(
+            latest_exported_summary.obsidian_relative_path
+            if latest_exported_summary
+            else None
+        ),
+    )
+    summary_version_number = len(existing_summaries) + 1
+    previous_archive_relative_path = None
+    if latest_exported_summary:
+        archived_version_number = version_map.get(str(latest_exported_summary.id))
+        if archived_version_number:
+            previous_archive_relative_path = build_archive_relative_path(
+                target,
+                archived_version_number,
+            )
+    preserved_tags = _load_preserved_tags(
+        latest_exported_summary,
+        obsidian_vault_path=settings.obsidian_vault_path,
+    )
 
     recorded_at = format_datetime_human(local_started_at, tz_label)
     duration_str = format_duration_human(int(audio_duration_seconds))
@@ -871,12 +1059,33 @@ async def _run_export_pipeline(
         "session_timezone_offset_minutes": session.timezone_offset_minutes,
         "duration_str": duration_str,
         "processing_time_str": processing_time_str,
-        "filename": filename,
-        "relative_path": relative_path,
+        "processing_duration_seconds": summarization_duration,
+        "filename": target.filename,
+        "relative_path": target.relative_path,
         "draft_summary_id": draft_summary.id,
         "meeting_id": primary_meeting_id,
+        "transcript_version_id": str(transcript_version.id),
         "template_key": template,
         "custom_prompt": request_payload.custom_prompt,
+        "meeting_display_id": target.display_id,
+        "summary_version_number": summary_version_number,
+        "transcript_version_number": int(transcript_version.version_number),
+        "frontmatter": _build_obsidian_frontmatter(
+            meeting_id=str(primary_meeting_id),
+            summary_id=None,
+            transcript_version_id=str(transcript_version.id),
+            display_id=target.display_id,
+            summary_version_number=summary_version_number,
+            transcript_version_number=int(transcript_version.version_number),
+            meeting_title=(request_payload.title or "Untitled Recording").strip() or "Untitled Recording",
+            local_started_at=local_started_at,
+            target=target,
+            template_key=template,
+            recording_duration_minutes=max(1, int(audio_duration_seconds // 60)),
+            tags=preserved_tags,
+        ),
+        "latest_exported_summary": latest_exported_summary,
+        "previous_archive_relative_path": previous_archive_relative_path,
         "pass1_system_prompt": summary_result.prompt_audit.get("pass1_system_prompt"),
         "pass1_user_prompt": summary_result.prompt_audit.get("pass1_user_prompt"),
         "pass2_system_prompt": summary_result.prompt_audit.get("pass2_system_prompt"),
@@ -1146,6 +1355,7 @@ async def _build_summary_save_params(
     meeting,
     *,
     transcript_version_id: str | None,
+    summary_id: str | None = None,
     summary_content: str,
     template_label: str,
     processing_duration_seconds: float | None,
@@ -1168,18 +1378,38 @@ async def _build_summary_save_params(
         session.timezone_offset_minutes,
     )
     tz_label = timezone_label(session.timezone_name, session.timezone_offset_minutes)
-    safe_title = re.sub(r'[<>:"/\\|?*]', "", (meeting.title or "Untitled Recording").strip())
-    dow = local_started_at.strftime("%a")
-    time_hhmm = local_started_at.strftime("%H%M")
-    base_filename = f"{local_started_at.day:02d} {dow} {time_hhmm} - {safe_title or 'Untitled Recording'}"
+    settings = get_settings()
     existing_summaries = await repository.get_summaries(
         meeting.id,
         status="saved",
     )
-    version_suffix = f" (v{len(existing_summaries) + 1})" if existing_summaries else ""
-    filename = f"{base_filename}{version_suffix}.md"
-    week_folder_name = week_folder(local_started_at)
-    relative_path = f"Meetings/{week_folder_name}/{filename}"
+    version_map = _saved_summary_version_map(existing_summaries)
+    latest_exported_summary = _latest_exported_summary(existing_summaries)
+    next_version_number = len(existing_summaries) + 1
+    preferred_relative_path = (
+        latest_exported_summary.obsidian_relative_path
+        if latest_exported_summary
+        else None
+    )
+    target = resolve_latest_export_target(
+        vault_path=settings.obsidian_vault_path,
+        meeting_id=meeting.id,
+        title=meeting.title,
+        local_started_at=local_started_at,
+        preferred_relative_path=preferred_relative_path,
+    )
+    previous_archive_relative_path = None
+    if latest_exported_summary:
+        archived_version_number = version_map.get(str(latest_exported_summary.id))
+        if archived_version_number:
+            previous_archive_relative_path = build_archive_relative_path(
+                target,
+                archived_version_number,
+            )
+    preserved_tags = _load_preserved_tags(
+        latest_exported_summary,
+        obsidian_vault_path=settings.obsidian_vault_path,
+    )
     recorded_at = format_datetime_human(local_started_at, tz_label)
     processing_time_str = (
         format_processing_time(processing_duration_seconds)
@@ -1187,6 +1417,29 @@ async def _build_summary_save_params(
         else ""
     )
     duration_str = format_duration_human(int(audio_duration_seconds))
+    transcript_version = None
+    if transcript_version_id:
+        transcript_version = await repository.get_transcript_version_for_session(
+            session.id,
+            transcript_version_id,
+        )
+    transcript_version_number = (
+        int(getattr(transcript_version, "version_number", 0)) or None
+    )
+    frontmatter = _build_obsidian_frontmatter(
+        meeting_id=str(meeting.id),
+        summary_id=summary_id,
+        transcript_version_id=transcript_version_id,
+        display_id=target.display_id,
+        summary_version_number=next_version_number,
+        transcript_version_number=transcript_version_number,
+        meeting_title=(meeting.title or "Untitled Recording").strip() or "Untitled Recording",
+        local_started_at=local_started_at,
+        target=target,
+        template_key=getattr(meeting, "template_key", None),
+        recording_duration_minutes=max(1, int(audio_duration_seconds // 60)),
+        tags=preserved_tags,
+    )
     workflow_data = _safe_json_loads(workflow_data_json, {})
     revision_history = workflow_data.get("revision_history", []) if isinstance(workflow_data, dict) else []
     if not isinstance(revision_history, list):
@@ -1202,8 +1455,14 @@ async def _build_summary_save_params(
         "session_timezone_offset_minutes": session.timezone_offset_minutes,
         "duration_str": duration_str,
         "processing_time_str": processing_time_str,
-        "filename": filename,
-        "relative_path": relative_path,
+        "filename": target.filename,
+        "relative_path": target.relative_path,
+        "meeting_display_id": target.display_id,
+        "summary_version_number": next_version_number,
+        "transcript_version_number": transcript_version_number,
+        "frontmatter": frontmatter,
+        "latest_exported_summary": latest_exported_summary,
+        "previous_archive_relative_path": previous_archive_relative_path,
         "pass1_system_prompt": pass1_system_prompt,
         "pass1_user_prompt": pass1_user_prompt,
         "pass2_system_prompt": pass2_system_prompt,
@@ -1371,6 +1630,8 @@ async def export_to_obsidian(
         bp.get("session_timezone_offset_minutes"),
     )
     exported_at = format_datetime_human(local_exported_at, bp["tz_label"])
+    frontmatter = dict(bp.get("frontmatter") or {})
+    frontmatter["exported_at"] = local_exported_at.isoformat()
     markdown_content = build_obsidian_markdown(
         content=bp["summary_content"],
         template_label=bp["template_label"],
@@ -1379,6 +1640,10 @@ async def export_to_obsidian(
         duration_str=bp["duration_str"],
         processing_time_str=bp["processing_time_str"],
         transcript=bp["transcript"],
+        meeting_display_id=bp.get("meeting_display_id"),
+        summary_version_number=bp.get("summary_version_number"),
+        transcript_version_number=bp.get("transcript_version_number"),
+        frontmatter=frontmatter,
         pass1_system_prompt=bp.get("pass1_system_prompt"),
         pass1_user_prompt=bp.get("pass1_user_prompt"),
         pass2_system_prompt=bp.get("pass2_system_prompt"),
@@ -1570,30 +1835,69 @@ async def save_export_job(
         else bp["summary_content"]
     )
 
-    markdown_content = build_obsidian_markdown(
-        content=summary,
+    settings = get_settings()
+    draft_id = bp.get("draft_summary_id")
+    meeting = await repository.get_meeting(bp["meeting_id"])
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    session = await repository.get_session(meeting.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    pending_summary_id = str(uuid.uuid4()) if draft_id else None
+    save_params = await _build_summary_save_params(
+        repository,
+        session,
+        meeting,
+        transcript_version_id=bp.get("transcript_version_id"),
+        summary_id=pending_summary_id,
+        summary_content=summary,
         template_label=bp["template_label"],
-        recorded_at=bp["recorded_at"],
-        exported_at=exported_at,
-        duration_str=bp["duration_str"],
-        processing_time_str=bp["processing_time_str"],
-        transcript=bp["transcript"],
+        processing_duration_seconds=bp.get("processing_duration_seconds"),
         pass1_system_prompt=bp.get("pass1_system_prompt"),
         pass1_user_prompt=bp.get("pass1_user_prompt"),
         pass2_system_prompt=bp.get("pass2_system_prompt"),
         pass2_user_prompt=bp.get("pass2_user_prompt"),
-        revision_history=bp.get("revision_history"),
+    )
+    save_params["revision_history"] = bp.get("revision_history") or []
+    frontmatter = dict(save_params.get("frontmatter") or {})
+    frontmatter["exported_at"] = local_exported_at.isoformat()
+
+    markdown_content = build_obsidian_markdown(
+        content=summary,
+        template_label=save_params["template_label"],
+        recorded_at=save_params["recorded_at"],
+        exported_at=exported_at,
+        duration_str=save_params["duration_str"],
+        processing_time_str=save_params["processing_time_str"],
+        transcript=save_params["transcript"],
+        meeting_display_id=save_params.get("meeting_display_id"),
+        summary_version_number=save_params.get("summary_version_number"),
+        transcript_version_number=save_params.get("transcript_version_number"),
+        frontmatter=frontmatter,
+        pass1_system_prompt=save_params.get("pass1_system_prompt"),
+        pass1_user_prompt=save_params.get("pass1_user_prompt"),
+        pass2_system_prompt=save_params.get("pass2_system_prompt"),
+        pass2_user_prompt=save_params.get("pass2_user_prompt"),
+        revision_history=save_params.get("revision_history"),
         revision_instruction=request.revision_instruction,
     )
 
-    settings = get_settings()
-    with pipeline_step(logger, "vault_write", path=bp["relative_path"]):
-        filepath, obsidian_uri = await _write_obsidian_file(
-            markdown_content, bp["relative_path"], settings.obsidian_vault_path
-        )
-
-    draft_id = bp.get("draft_summary_id")
     saved_at = datetime.utcnow()
+    filepath = ""
+    obsidian_uri = None
+    if settings.obsidian_vault_path:
+        with pipeline_step(logger, "vault_write", path=save_params["relative_path"]):
+            await _archive_previous_export_if_needed(
+                repository,
+                summary_to_archive=save_params.get("latest_exported_summary"),
+                archive_relative_path=save_params.get("previous_archive_relative_path"),
+                obsidian_vault_path=settings.obsidian_vault_path,
+            )
+            filepath, obsidian_uri = await _write_obsidian_file(
+                markdown_content,
+                save_params["relative_path"],
+                settings.obsidian_vault_path,
+            )
     if draft_id:
         if request.edited_summary and request.edited_summary.strip():
             source_type = "ai_revised" if request.revision_instruction else "manual_edit"
@@ -1602,17 +1906,18 @@ async def save_export_job(
                 content=summary,
                 source_type=source_type,
             )
-        await repository.save_draft_summary(
+        saved_summary = await repository.save_draft_summary(
             draft_id,
+            summary_id=pending_summary_id,
             saved_to_obsidian_at=saved_at,
-            obsidian_relative_path=bp["relative_path"],
+            obsidian_relative_path=save_params["relative_path"] if settings.obsidian_vault_path else None,
         )
 
     _update_export_job(job_id, status="completed", stage="completed", message="Saved to Obsidian")
 
     return {
         "success": True,
-        "filename": bp["filename"],
+        "filename": save_params["filename"],
         "filepath": filepath,
         "obsidian_uri": obsidian_uri,
         "summary_preview": result_data.get("summary_preview", ""),
@@ -1900,6 +2205,7 @@ async def save_summary_draft(
         session,
         meeting,
         transcript_version_id=draft.transcript_version_id,
+        summary_id=str(uuid.uuid4()),
         summary_content=draft.content,
         template_label=draft.template or TEMPLATE_INFO.get(
             normalize_template_key(draft.template_key or meeting.template_key or DEFAULT_TEMPLATE_KEY),
@@ -1922,6 +2228,8 @@ async def save_summary_draft(
             params.get("session_timezone_offset_minutes"),
         )
         exported_at = format_datetime_human(local_exported_at, params["tz_label"])
+        frontmatter = dict(params.get("frontmatter") or {})
+        frontmatter["exported_at"] = local_exported_at.isoformat()
         markdown_content = build_obsidian_markdown(
             content=params["summary_content"],
             template_label=params["template_label"],
@@ -1930,11 +2238,21 @@ async def save_summary_draft(
             duration_str=params["duration_str"],
             processing_time_str=params["processing_time_str"],
             transcript=params["transcript"],
+            meeting_display_id=params.get("meeting_display_id"),
+            summary_version_number=params.get("summary_version_number"),
+            transcript_version_number=params.get("transcript_version_number"),
+            frontmatter=frontmatter,
             pass1_system_prompt=params.get("pass1_system_prompt"),
             pass1_user_prompt=params.get("pass1_user_prompt"),
             pass2_system_prompt=params.get("pass2_system_prompt"),
             pass2_user_prompt=params.get("pass2_user_prompt"),
             revision_history=params.get("revision_history"),
+        )
+        await _archive_previous_export_if_needed(
+            repository,
+            summary_to_archive=params.get("latest_exported_summary"),
+            archive_relative_path=params.get("previous_archive_relative_path"),
+            obsidian_vault_path=settings.obsidian_vault_path,
         )
         _, obsidian_uri = await _write_obsidian_file(
             markdown_content,
@@ -1944,6 +2262,7 @@ async def save_summary_draft(
 
     saved_summary = await repository.save_draft_summary(
         summary_id,
+        summary_id=params.get("frontmatter", {}).get("sidekick_summary_id"),
         saved_to_obsidian_at=datetime.utcnow(),
         obsidian_relative_path=params["relative_path"] if settings.obsidian_vault_path else None,
     )

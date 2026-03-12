@@ -19,14 +19,15 @@ Browser-based meeting recorder that captures audio, builds transcript versions, 
 - **Transcript versioning** — retranscription creates transcript versions; summary drafts and saved summaries are tied to the active version
 - **Transcript-aware AI revise** — `Ask AI to Revise` can pull grounded detail from the active transcript version using retrieval while treating the active template as flexible guidance instead of blindly editing the summary
 - **Prompt Audit Export** — Obsidian exports keep `Meeting Info`, revision history, Pass 1 / Pass 2 prompts, and transcript in collapsed foldable callouts so the note stays short until expanded
+- **Clean Latest Notes** — Obsidian latest exports now live in year/month folders with short filenames, while older exported versions are copied into `_versions/`
 - **DAW-style analyzer** — the live recording visualizer uses a higher-resolution log-spaced spectrum analyzer while keeping the same minimal style
 - **Relevance-first meeting summaries** — `General Meeting` uses the cohesive two-pass summarizer with a selective prompt contract that surfaces only useful, high-signal notes
-- **Smart Versioning** — Obsidian exports append `(v2)`, `(v3)`, etc., to prevent overwriting existing notes
+- **Smart Versioning** — canonical `vN` summary numbering still exists, but the latest visible note keeps a clean filename while archived exports use `vN.md`
 - **Performance Optimizations** — dynamic context sizing and single-pass early exit for ultra-fast short meeting processing
 - **Structured templates** — general meeting, strategic review, working session, custom
 - **Editable prompts** — customize any template before export
 - **Real-time progress** — live percent tracking through transcription and summarization
-- **Obsidian export** — writes a dated `.md` file and opens it with `obsidian://`
+- **Obsidian export** — writes a stable latest `.md` note, preserves older exported versions in `_versions/`, and opens the latest file with `obsidian://`
 - **Global settings page** — app-level feature flags such as the experimental Meeting Assistant
 - **Experimental Meeting Assistant** — transcript-aware workspace chat behind a DB-backed feature flag
 - **Phone access** — ngrok or Cloudflare tunnel support
@@ -333,8 +334,14 @@ All templates are editable before export from the workspace Settings tab.
 - The Settings tab is summary-only and follows the currently selected summary version by default.
 - Summary versions are labeled `vN (Draft)`, `vN (Latest Exported)`, `vN (Exported)`, and `vN (Saved Copy)`.
 - If you select an older summary version and start `Edit` or `Ask AI to Revise`, Sidekick now branches from that selected version. Any different active draft is preserved in-app as a `Saved Copy` instead of silently becoming the new base.
-- `Saved Copy` versions still advance the canonical `vN` sequence, so Obsidian export titles and workspace version labels stay aligned.
+- `Saved Copy` versions still advance the canonical `vN` sequence, so archived Obsidian version files and workspace version labels stay aligned.
 - `Undo` currently applies only to the active draft during the current browser session. Saved versions do not support persistent undo yet. If we add this later, the preferred shape is a separate `Revert to Previous Version` action rather than overloading the current draft-only undo button.
+- Latest Obsidian exports now live under `Meetings/YYYY/YYYY-MM/Title.md`. Prior exported versions are copied into `Meetings/YYYY/YYYY-MM/_versions/Title/vN.md`, which keeps the visible month folder clean.
+- If you manually rename or move an exported note in Obsidian, Sidekick should preserve that note and write the next export to a fresh managed latest path instead of overwriting your renamed file.
+- `Meeting Info` now includes a short `Sidekick ID` plus `Summary Version` and `Transcript Version`. Full machine IDs live in minimal YAML frontmatter at the top of the exported note so Bases/Dataview and Sidekick can still identify the note reliably. That frontmatter intentionally keeps `meeting_date`, `meeting_month`, `template_key`, `recording_duration_minutes`, `tags`, and `sidekick_export_status`.
+- Sidekick does not auto-generate Obsidian tags or aliases for exported notes. It writes `tags: []` by default and carries forward any tags you manually add to the latest exported note on future exports.
+- `sidekick_export_status` now uses string values (`latest` / `archived`) instead of a boolean checkbox field so it is harder to break Base filtering with an accidental click. Update Bases/Dataview filters to `sidekick_export_status == "latest"`. Use `python3 scripts/repair_obsidian_export_status.py --apply` to repair older exported notes after reviewing the dry run.
+- Existing old `Meetings/` notes can be reorganized with `python3 scripts/migrate_obsidian_meetings_layout.py`. It is dry-run by default and only performs a copy-first migration with a backup when `--apply` is passed.
 - Desktop uses the polished tab-row hide/reveal motion; mobile uses a simpler direct-tracking path for smoother touch scrolling.
 
 ## Backups

@@ -1035,10 +1035,11 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             get_summaries=AsyncMock(
                 return_value=[
                     SimpleNamespace(id="sum-3"),
-                    SimpleNamespace(id="sum-2"),
+                    SimpleNamespace(id="sum-2", obsidian_relative_path="Meetings/2026 Week 11/Goals Touchbase (v2).md"),
                     SimpleNamespace(id="sum-1"),
                 ]
             ),
+            get_transcript_version_for_session=AsyncMock(return_value=SimpleNamespace(version_number=1)),
         )
         session = SimpleNamespace(
             id="session-1",
@@ -1049,6 +1050,76 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
         meeting = SimpleNamespace(
             id="meeting-1",
             title="Goals Touchbase",
+        )
+
+        with patch.object(
+            self.export,
+            "get_settings",
+            return_value=SimpleNamespace(obsidian_vault_path=None),
+        ):
+            params = asyncio.run(
+                self.export._build_summary_save_params(
+                    repository,
+                    session,
+                    meeting,
+                    transcript_version_id="tv-1",
+                    summary_content="Summary body",
+                    template_label="General Meeting",
+                    processing_duration_seconds=12.0,
+                )
+            )
+
+        expected_month = f"{now.year:04d}/{now.year:04d}-{now.month:02d}"
+        self.assertIn(f"Meetings/{expected_month}/Goals Touchbase.md", params["relative_path"])
+        self.assertEqual(params["summary_version_number"], 4)
+        self.assertEqual(params["transcript_version_number"], 1)
+        self.assertEqual(params["meeting_display_id"], "SK-meeting-")
+        self.assertIn("/_versions/Goals Touchbase/v2.md", params["previous_archive_relative_path"])
+        self.assertEqual(
+            sorted(params["frontmatter"].keys()),
+            [
+                "meeting_date",
+                "meeting_month",
+                "recording_duration_minutes",
+                "sidekick_export_status",
+                "sidekick_meeting_id",
+                "sidekick_summary_id",
+                "sidekick_summary_version",
+                "sidekick_transcript_version",
+                "sidekick_transcript_version_id",
+                "tags",
+                "template_key",
+                "type",
+            ],
+        )
+        self.assertEqual(params["frontmatter"]["tags"], [])
+        self.assertEqual(params["frontmatter"]["sidekick_export_status"], "latest")
+
+    def test_build_summary_save_params_reuses_existing_new_layout_latest_path(self):
+        now = datetime.now(UTC)
+        repository = SimpleNamespace(
+            get_segments=AsyncMock(return_value=[]),
+            get_summaries=AsyncMock(
+                return_value=[
+                    SimpleNamespace(
+                        id="sum-2",
+                        obsidian_relative_path="Meetings/2026/2026-03/Goals Touchbase - 2026-03-11.md",
+                        saved_to_obsidian_at=datetime.now(UTC),
+                    ),
+                ]
+            ),
+            get_transcript_version_for_session=AsyncMock(return_value=SimpleNamespace(version_number=1)),
+        )
+        session = SimpleNamespace(
+            id="session-1",
+            started_at=datetime(2026, 3, 11, 16, 31, tzinfo=UTC),
+            timezone_name="America/Chicago",
+            timezone_offset_minutes=-300,
+        )
+        meeting = SimpleNamespace(
+            id="meeting-1",
+            title="Goals Touchbase",
+            template_key="meeting",
         )
 
         params = asyncio.run(
@@ -1063,7 +1134,73 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             )
         )
 
-        self.assertIn(" (v4).md", params["relative_path"])
+        self.assertEqual(
+            params["relative_path"],
+            "Meetings/2026/2026-03/Goals Touchbase - 2026-03-11.md",
+        )
+
+    def test_build_summary_save_params_preserves_tags_from_latest_export(self):
+        session_started_at = datetime(2026, 3, 11, 16, 31, tzinfo=UTC)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            vault = Path(tmpdir)
+            latest_note = vault / "Meetings" / "2026" / "2026-03" / "Goals Touchbase.md"
+            latest_note.parent.mkdir(parents=True, exist_ok=True)
+            latest_note.write_text(
+                "---\n"
+                "sidekick_summary_id: \"sum-2\"\n"
+                "tags:\n"
+                "  - client/acme\n"
+                "  - followup\n"
+                "---\n\n"
+                "# Test\n",
+                encoding="utf-8",
+            )
+
+            repository = SimpleNamespace(
+                get_segments=AsyncMock(return_value=[]),
+                get_summaries=AsyncMock(
+                    return_value=[
+                        SimpleNamespace(
+                            id="sum-2",
+                            obsidian_relative_path="Meetings/2026/2026-03/Goals Touchbase.md",
+                            saved_to_obsidian_at=datetime.now(UTC),
+                        ),
+                    ]
+                ),
+                get_transcript_version_for_session=AsyncMock(
+                    return_value=SimpleNamespace(version_number=1)
+                ),
+            )
+            session = SimpleNamespace(
+                id="session-1",
+                started_at=session_started_at,
+                timezone_name="America/Chicago",
+                timezone_offset_minutes=-300,
+            )
+            meeting = SimpleNamespace(
+                id="meeting-1",
+                title="Goals Touchbase",
+                template_key="meeting",
+            )
+
+            with patch.object(
+                self.export,
+                "get_settings",
+                return_value=SimpleNamespace(obsidian_vault_path=str(vault)),
+            ):
+                params = asyncio.run(
+                    self.export._build_summary_save_params(
+                        repository,
+                        session,
+                        meeting,
+                        transcript_version_id="tv-1",
+                        summary_content="Summary body",
+                        template_label="General Meeting",
+                        processing_duration_seconds=12.0,
+                    )
+                )
+
+        self.assertEqual(params["frontmatter"]["tags"], ["client/acme", "followup"])
 
     def test_revise_summary_draft_returns_conflict_when_draft_disappears(self):
         draft = SimpleNamespace(

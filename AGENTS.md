@@ -288,6 +288,9 @@ Default template: `meeting`
 - **AI revise**: `Ask AI to Revise` now routes between style-only edits and transcript-backed retrieval. It uses the active template as guidance, not a rigid schema, so it can add grounded detail from the active transcript version while still merging or dropping low-value sections when that improves readability.
 - **Summary revision history**: AI revise requests are stored on the summary in `workflow_data_json` and surfaced in the Summary tab, Transcript tab, and Obsidian export.
 - **Obsidian audit trail**: Exported notes render `Meeting Info` as a collapsed top callout, then the meeting summary, then revision history, then the prompt audit (`Pass 1: System Prompt`, `Pass 1: User Prompt`, `Pass 2: System Prompt`, `Pass 2: User Prompt`), with meeting info, revision history, prompt audit, and transcript all rendered as collapsed Obsidian foldable callouts by default.
+- **Obsidian note metadata**: `Meeting Info` now includes a short `Sidekick ID` plus `Summary Version` and `Transcript Version`. Full machine IDs and the small query-safe field set live in YAML frontmatter at the top of the note for Bases/Dataview queries and rename-safe note rediscovery. Keep `meeting_date`, `meeting_month`, `template_key`, `recording_duration_minutes`, `tags`, and `sidekick_export_status` in frontmatter. `tags` should default to `[]` and preserve any manual edits from the latest exported note on future exports. `sidekick_export_status` should use string values (`latest` / `archived`) rather than a boolean checkbox so users do not accidentally break Base filters. Do not reintroduce auto-generated aliases.
+- **Obsidian folder layout**: Latest meeting exports now live under `Meetings/YYYY/YYYY-MM/Title.md`. Older exported versions are copied into `Meetings/YYYY/YYYY-MM/_versions/Title/vN.md`, which keeps the visible month folder clean while preserving history.
+- **Manual Obsidian renames**: If the user renames or moves an exported note in Obsidian, Sidekick should preserve that relocated note and write the next export to a fresh managed latest path instead of overwriting the renamed file.
 - **Workspace State Isolation**: Opening a different recording clears unsaved speaker assignments from the previous workspace, and closing the workspace flushes pending settings edits before dismissing the modal.
 - **Pipeline Optimizations**:
   - Speech-Aware Diarization: stops at last Whisper timestamp + 5s.
@@ -299,7 +302,8 @@ Default template: `meeting`
 - **Capture Mode**: Main-page mic mode (`Single Speaker` / `Whole Room`) is persisted as a global app setting. It is shared across devices using the same Sidekick instance and is not currently per-user or per-device.
 - **Live analyzer**: The recording page uses a higher-resolution log-spaced spectrum analyzer, not the saved file waveform.
 - **Unified View & Refinement:** functionally identical review/view modals.
-- **Obsidian Versioning:** exports append `(v2)`, `(v3)`, etc.
+- **Obsidian Versioning:** canonical `vN` numbering still applies to saved summaries and archived export files, but the visible latest note keeps a clean filename without `(vN)`.
+- **Obsidian migration tool:** `python3 scripts/migrate_obsidian_meetings_layout.py` is the backup-first, dry-run-by-default way to reorganize old week/archive notes into the new year/month layout. It copies first, verifies hashes, updates DB paths only after successful copy, and does not auto-delete originals.
 - **Markdown Logic:** Consolidated into `src/core/markdown_utils.py`.
 - **Database:** Auto-migrations in `repository.py` for `processing_duration_seconds` and `template`.
 - **Attendees Compatibility:** `meeting.attendees` and `attendees_snapshot` still exist in the DB/API for backward compatibility, but they are deprecated and no longer drive speaker resolution or summary gating.

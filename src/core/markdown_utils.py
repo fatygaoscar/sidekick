@@ -1,10 +1,11 @@
 """Markdown formatting utilities for summaries and Obsidian exports."""
 
+import json
 import re
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 _PASS1_CONTEXT_BLOCK_RE = re.compile(
@@ -88,6 +89,30 @@ def _build_folded_callout(title: str, body: str, callout_type: str = "note") -> 
     return f"> [!{callout_type}]- {title}\n" + "\n".join(quoted_lines)
 
 
+def _yaml_scalar(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if value is None:
+        return "null"
+    if isinstance(value, list):
+        return json.dumps(value, ensure_ascii=False)
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _build_frontmatter(frontmatter: dict[str, Any] | None) -> str:
+    if not frontmatter:
+        return ""
+    lines = ["---"]
+    for key, value in frontmatter.items():
+        if value is None or value == "":
+            continue
+        lines.append(f"{key}: {_yaml_scalar(value)}")
+    lines.append("---")
+    return "\n".join(lines)
+
+
 def build_obsidian_markdown(
     content: str,
     template_label: str,
@@ -96,6 +121,10 @@ def build_obsidian_markdown(
     duration_str: str,
     processing_time_str: str,
     transcript: str,
+    meeting_display_id: Optional[str] = None,
+    summary_version_number: Optional[int] = None,
+    transcript_version_number: Optional[int] = None,
+    frontmatter: Optional[dict[str, Any]] = None,
     pass1_system_prompt: Optional[str] = None,
     pass1_user_prompt: Optional[str] = None,
     pass2_system_prompt: Optional[str] = None,
@@ -150,6 +179,12 @@ def build_obsidian_markdown(
         f"**Exported**: {exported_at}",
         f"**Meeting Length**: {duration_str}",
     ]
+    if meeting_display_id:
+        info_lines.insert(1, f"**Sidekick ID**: {meeting_display_id}")
+    if summary_version_number:
+        info_lines.append(f"**Summary Version**: v{summary_version_number}")
+    if transcript_version_number:
+        info_lines.append(f"**Transcript Version**: t{transcript_version_number}")
     if processing_time_str and processing_time_str != "N/A":
         info_lines.append(f"**Processing Time**: {processing_time_str}")
 
@@ -190,8 +225,11 @@ def build_obsidian_markdown(
         "Transcript",
         f"```text\n{transcript}\n```",
     )
+
+    frontmatter_block = _build_frontmatter(frontmatter)
     
     return (
+        f"{frontmatter_block + '\n\n' if frontmatter_block else ''}"
         f"{info_section}\n\n"
         f"---\n\n"
         f"{content}\n"
