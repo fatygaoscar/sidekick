@@ -107,6 +107,7 @@ Legacy templates (constants kept for backward compat, not in UI): `one_on_one`, 
 - Template chooser shows 4 templates in the order above.
 - Keep `General Meeting` as default unless explicit product changes requested.
 - Speaker naming is manual-first in the workspace `Speakers` tab.
+- Speaker cards expose preview-quality metadata; unusable legacy micro-clips should render as `No Preview`, not as a broken play button.
 - Summary generation is allowed before speaker review is complete.
 - Settings is summary-only and follows the currently selected summary version by default.
 - Workspace tab hide/reveal motion is device-specific: polished on desktop, simpler direct tracking on mobile.
@@ -211,5 +212,6 @@ OBSIDIAN_VAULT_PATH=/mnt/c/Users/ozzfa/Documents/Obsidian Sync Vault
 - First local WhisperX run may download alignment and diarization assets (cached after first use).
 - `get_settings()` is LRU-cached — always `./restart.sh` after `.env` changes.
 - Remote use through `go.sidekickgo.app` depends on the current Cloudflare quick tunnel URL. The rendered HTML injects fallback `wss://` and `https://*.trycloudflare.com` transport targets, and `web/js/network.js` rewrites browser `/api/...` plus recording-media URLs onto that fallback when present.
+- Speaker preview playback in `web/js/recording-workspace.js` should stay on the Web Audio fetch/decode path. Do not regress it back to a fragile raw `new Audio().src = clipUrl` flow; short preview clips are fetched through `SidekickNetwork.request(...)`, decoded locally, and rendered as `No Preview` when `clip_available` is false.
 - Frontend cache busting: if a change to `web/index.html`, `web/recordings.html`, `web/css/styles.css`, or `web/js/*.js` does not show up after refresh, bump the `?v=` asset query string in the relevant HTML entrypoint first. Treat stale browser assets as a common cause before assuming the CSS/JS change failed.
 - Completed and failed WhisperX transcription jobs now free CUDA memory after cleanup so repeated runs do not pin VRAM.

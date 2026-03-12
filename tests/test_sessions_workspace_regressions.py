@@ -2295,6 +2295,10 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             cards[0]["clip_url"],
             "/api/recordings/session-1/speaker-clips/SPEAKER_00/audio?transcript_version_id=tv-1",
         )
+        self.assertTrue(cards[0]["clip_available"])
+        self.assertEqual(cards[0]["preview_quality"], "weak")
+        self.assertEqual(cards[0]["preview_reason"], "low_content_fallback")
+        self.assertAlmostEqual(cards[0]["clip_duration_seconds"], 5.0)
 
     def test_speaker_cards_prefer_representative_segment_over_short_greeting(self):
         segments = [
@@ -2322,7 +2326,40 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
 
         self.assertEqual(cards[0]["preview_text"], "Let's walk through the targets and open questions.")
         self.assertAlmostEqual(cards[0]["clip_start"], 11.75)
-        self.assertAlmostEqual(cards[0]["clip_end"], 16.5)
+        self.assertAlmostEqual(cards[0]["clip_end"], 16.75)
+        self.assertAlmostEqual(cards[0]["clip_duration_seconds"], 5.0)
+        self.assertTrue(cards[0]["clip_available"])
+        self.assertEqual(cards[0]["preview_quality"], "good")
+        self.assertEqual(cards[0]["preview_reason"], "preferred_duration")
+
+    def test_speaker_cards_mark_legacy_micro_clips_as_unavailable(self):
+        segments = [
+            SimpleNamespace(
+                id="seg-1",
+                start_time=1993.648,
+                end_time=1993.748,
+                text="So...",
+                speaker="LEGACY_SPEAKER_00",
+                speaker_cluster="LEGACY_SPEAKER_00",
+                is_important=False,
+            ),
+            SimpleNamespace(
+                id="seg-2",
+                start_time=2001.100,
+                end_time=2001.180,
+                text="Yeah.",
+                speaker="LEGACY_SPEAKER_00",
+                speaker_cluster="LEGACY_SPEAKER_00",
+                is_important=False,
+            ),
+        ]
+
+        cards = self.sessions._build_speaker_cards(segments, "session-1", "tv-1")
+
+        self.assertEqual(len(cards), 1)
+        self.assertFalse(cards[0]["clip_available"])
+        self.assertEqual(cards[0]["preview_quality"], "fallback_short")
+        self.assertEqual(cards[0]["preview_reason"], "legacy_short_fallback")
 
     def test_serialize_transcript_version_includes_repair_metadata_and_labels(self):
         version = SimpleNamespace(

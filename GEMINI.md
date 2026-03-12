@@ -37,6 +37,7 @@ This document contains foundational mandates for the Gemini CLI agent working on
 - **Card Actions:** Recording cards use `Open` and `Delete`, with `Open` as the primary action.
 - **History Delete Flow:** Keep delete optimistic on the History page. Remove the card locally first, then refresh in the background; do not require a blocking full-list reload just to keep delete usable.
 - **Custom Domain Transport:** When running through `go.sidekickgo.app`, keep browser `/api/...` requests and recording-media URLs on the shared fallback-aware transport layer in `web/js/network.js`; do not bypass it with raw same-origin URLs.
+- **Speaker Preview Playback:** Keep workspace speaker preview clips on the Web Audio fetch/decode path in `web/js/recording-workspace.js`. Respect `clip_available`; clusters marked unavailable should render as `No Preview`, not as a clickable broken player.
 - **Search Contract:** Preserve transcript-grounded answer-first search via `POST /api/search/recordings`; grouped recording results and follow-up suggestions are part of the product behavior.
 - **Draft Summary Flow:** Preserve the async draft summary path (`/summary-job`, `/summary-draft`, `/summary-drafts/*`) used by the shared workspace.
 - **Experimental Chat Gate:** Workspace chat remains hidden by default and must stay behind the DB-backed `workspace_chat_enabled` flag.

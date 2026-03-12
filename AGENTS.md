@@ -263,7 +263,7 @@ Default template: `meeting`
 **Features**:
 - **Manual Speaker Resolution**: Users identify speakers from the `Speakers` tab in the workspace:
   1. Open a recording
-  2. See audio clips for each detected speaker (first 5 seconds of their first utterance)
+  2. Review representative speaker clips for usable clusters; weak legacy fragment clusters now render as `No Preview` instead of exposing a dead clip button
   3. Enter names in text fields
   4. Save speaker edits, then re-summarize when needed
 
@@ -296,6 +296,7 @@ Default template: `meeting`
 - **Obsidian folder layout**: Latest meeting exports now live under `Meetings/YYYY/YYYY-MM/Title.md`. Older exported versions are copied into `Meetings/YYYY/YYYY-MM/_versions/Title/vN.md`, which keeps the visible month folder clean while preserving history.
 - **Manual Obsidian renames**: If the user renames or moves an exported note in Obsidian, Sidekick should preserve that relocated note and write the next export to a fresh managed latest path instead of overwriting the renamed file.
 - **Workspace State Isolation**: Opening a different recording clears unsaved speaker assignments from the previous workspace, and closing the workspace flushes pending settings edits before dismissing the modal.
+- **Speaker preview clips**: Speaker cards now classify preview quality (`good`, `weak`, `fallback_short`) and expose `clip_available` so the UI can disable unusable preview clips instead of pretending they will play.
 - **Pipeline Optimizations**:
   - Speech-Aware Diarization: stops at last Whisper timestamp + 5s.
   - Dynamic Context: `num_ctx` calculated from input size.
@@ -319,7 +320,7 @@ Default template: `meeting`
 - Speaker attribution and speaker-review state are centralized in shared helpers so initial transcription and speaker-detection reruns follow the same rules.
 - `TRANSCRIPTION_BACKEND=local` disables live preview; only the saved-file pipeline is authoritative for local runs.
 - Audio loaded via **PyAV** — no system `ffmpeg` needed.
-- Manual resolution endpoint returns clip URLs; frontend plays cached WAV speaker clips directly.
+- Manual resolution endpoint returns clip URLs plus preview metadata; frontend fetches cached WAV clips over the shared fallback-aware network layer and plays them with Web Audio instead of relying on raw media-element URL loading.
 - `src/core/speaker_labels.py` centralizes fallback speaker labels for transcript and summary output.
 
 ## Gotchas

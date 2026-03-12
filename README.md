@@ -9,6 +9,7 @@ Browser-based meeting recorder that captures audio, builds transcript versions, 
 - **Local transcription** via WhisperX large-v3 (CUDA, float16)
 - **Speaker alignment + diarization** via WhisperX forced alignment plus pyannote `speaker-diarization-community-1`
 - **Manual-first speaker identification** — review speaker clips and assign names directly in the workspace
+- **Robust speaker preview playback** — workspace speaker clips are fetched through the shared network transport and played with Web Audio so remote/fallback loading is less brittle
 - **Readable unresolved speakers** — transcript and summary views use `Attendee`, `Attendee A`, `Attendee B`, etc. instead of raw `SPEAKER_XX`
 - **Authoritative stop flow** — browser waits for chunk uploads, asks the server to finalize, and only uses a large backup upload as a last resort
 - **Auto-recovery** — if a final audio file is missing but retained chunks exist, the app can rebuild it later
@@ -31,6 +32,7 @@ Browser-based meeting recorder that captures audio, builds transcript versions, 
 - **Global settings page** — app-level feature flags such as the experimental Meeting Assistant
 - **Experimental Meeting Assistant** — transcript-aware workspace chat behind a DB-backed feature flag
 - **Phone access** — ngrok or Cloudflare tunnel support
+- **Speaker preview guardrails** — speaker cards with only unusable legacy micro-fragments are marked `No Preview` instead of exposing a broken play button
 
 ## Quick Start
 

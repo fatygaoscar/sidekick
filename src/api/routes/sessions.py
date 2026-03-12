@@ -81,6 +81,34 @@ logger = logging.getLogger(__name__)
 _SPEAKER_DETECTION_JOBS: dict[str, dict] = {}
 _SPEAKER_DETECTION_TASKS: dict[str, asyncio.Task] = {}
 _SPEAKER_PROFILE_SAVE_SEMAPHORE = asyncio.Semaphore(1)
+_SPEAKER_PREVIEW_TARGET_SECONDS = 5.0
+_SPEAKER_PREVIEW_FILLER_TEXT = {
+    "ah",
+    "alright",
+    "but",
+    "bye",
+    "hello",
+    "hey",
+    "hi",
+    "hmm",
+    "mm hmm",
+    "mmhmm",
+    "mhm",
+    "nah",
+    "no",
+    "okay",
+    "ok",
+    "right",
+    "so",
+    "thanks",
+    "thank you",
+    "uh",
+    "uh huh",
+    "uhhuh",
+    "um",
+    "yeah",
+    "yep",
+}
 
 
 async def _workspace_chat_enabled(repository: Repository) -> bool:
@@ -826,35 +854,88 @@ def _build_speaker_cards(
     speaker_profiles: list | None = None,
     speaker_profile_overrides: list | None = None,
 ) -> list[dict]:
+    def normalized_preview_text(value: str | None) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip()
+
+    def normalized_preview_key(value: str | None) -> str:
+        lowered = normalized_preview_text(value).lower()
+        lowered = re.sub(r"[^a-z0-9']+", " ", lowered)
+        return re.sub(r"\s+", " ", lowered).strip()
+
     def segment_duration(segment) -> float:
         return max(0.0, float(segment.end_time) - float(segment.start_time))
 
-    def choose_representative_segment(speaker_segments: list):
-        preferred = [
-            segment for segment in speaker_segments
-            if 3.0 <= segment_duration(segment) <= 8.0
+    def preview_text_metrics(segment) -> dict[str, object]:
+        preview_text = normalized_preview_text(getattr(segment, "text", ""))
+        preview_key = normalized_preview_key(preview_text)
+        words = re.findall(r"[A-Za-z0-9']+", preview_text)
+        non_filler_words = [
+            word for word in words
+            if normalized_preview_key(word) not in _SPEAKER_PREVIEW_FILLER_TEXT
         ]
-        if preferred:
-            return preferred[0]
+        return {
+            "text": preview_text,
+            "key": preview_key,
+            "word_count": len(words),
+            "non_filler_word_count": len(non_filler_words),
+            "char_count": len(preview_text.replace(" ", "")),
+            "is_filler_only": bool(preview_key) and preview_key in _SPEAKER_PREVIEW_FILLER_TEXT,
+        }
 
-        bounded = [
-            segment for segment in speaker_segments
-            if segment_duration(segment) <= 10.0
-        ]
-        if bounded:
-            return max(
-                bounded,
-                key=lambda segment: (segment_duration(segment), -float(segment.start_time)),
-            )
+    def classify_preview(segment, speaker_cluster: str) -> tuple[str, str | None]:
+        duration = segment_duration(segment)
+        text_metrics = preview_text_metrics(segment)
+        is_legacy_cluster = str(speaker_cluster).startswith("LEGACY_SPEAKER_")
+        has_content = (
+            text_metrics["non_filler_word_count"] >= 3
+            or text_metrics["char_count"] >= 24
+        )
+        if duration >= 2.0 and has_content:
+            return "good", "preferred_duration"
+        if duration >= 1.5 and text_metrics["non_filler_word_count"] >= 2:
+            return "weak", "low_content_fallback"
+        if is_legacy_cluster and duration < 2.0:
+            return "fallback_short", "legacy_short_fallback"
+        return "fallback_short", "fallback_short_segment"
 
-        long_enough = [
-            segment for segment in speaker_segments
-            if segment_duration(segment) >= 1.5
-        ]
-        if long_enough:
-            return long_enough[0]
+    def preview_score(segment, speaker_cluster: str) -> tuple[float, ...]:
+        duration = segment_duration(segment)
+        text_metrics = preview_text_metrics(segment)
+        preview_quality, _preview_reason = classify_preview(segment, speaker_cluster)
+        is_legacy_cluster = str(speaker_cluster).startswith("LEGACY_SPEAKER_")
+        in_preferred_window = 3.0 <= duration <= 8.0
+        is_short = duration < 2.0
+        lexical_bonus = (
+            float(text_metrics["non_filler_word_count"]) * 5.0
+            + float(text_metrics["word_count"])
+            + min(float(text_metrics["char_count"]) / 12.0, 6.0)
+        )
+        if text_metrics["is_filler_only"]:
+            lexical_bonus -= 8.0
+        if not text_metrics["text"]:
+            lexical_bonus -= 12.0
+        if is_legacy_cluster and is_short:
+            lexical_bonus -= 12.0
+        quality_rank = {"good": 3.0, "weak": 2.0, "fallback_short": 1.0}.get(preview_quality, 0.0)
+        duration_distance = -abs(duration - _SPEAKER_PREVIEW_TARGET_SECONDS)
+        return (
+            quality_rank,
+            1.0 if in_preferred_window else 0.0,
+            0.0 if is_short else 1.0,
+            lexical_bonus,
+            duration_distance,
+            -float(segment.start_time),
+        )
 
-        return speaker_segments[0]
+    def choose_representative_segment(speaker_cluster: str, speaker_segments: list):
+        ranked_segments = sorted(
+            speaker_segments,
+            key=lambda segment: preview_score(segment, speaker_cluster),
+            reverse=True,
+        )
+        representative = ranked_segments[0]
+        preview_quality, preview_reason = classify_preview(representative, speaker_cluster)
+        return representative, preview_quality, preview_reason
 
     grouped: dict[str, list] = {}
     profiles_by_name = _speaker_profiles_by_name(speaker_profiles or [])
@@ -868,12 +949,17 @@ def _build_speaker_cards(
     cards: list[dict] = []
     for speaker_cluster, speaker_segments in sorted(grouped.items(), key=lambda item: item[0]):
         speaker_segments.sort(key=lambda segment: segment.start_time)
-        representative = choose_representative_segment(speaker_segments)
+        representative, preview_quality, preview_reason = choose_representative_segment(
+            speaker_cluster,
+            speaker_segments,
+        )
         display_name = getattr(representative, "speaker", None)
         clip_start = max(0.0, float(representative.start_time) - 0.25)
-        clip_end = min(float(representative.end_time), clip_start + 5.0)
+        clip_end = max(float(representative.end_time), clip_start + _SPEAKER_PREVIEW_TARGET_SECONDS)
         if clip_end <= clip_start:
             clip_end = max(clip_start + 0.5, float(representative.end_time))
+        clip_duration_seconds = max(0.0, clip_end - clip_start)
+        clip_available = preview_quality != "fallback_short"
         override = overrides_by_cluster.get(str(speaker_cluster))
         matched_profile = getattr(override, "speaker_profile", None) if override is not None else None
         match_source = "override" if matched_profile is not None else "none"
@@ -894,6 +980,10 @@ def _build_speaker_cards(
                 "can_change_match": bool(matched_profile),
                 "raw_label": speaker_cluster,
                 "preview_text": representative.text[:160],
+                "clip_duration_seconds": clip_duration_seconds,
+                "clip_available": clip_available,
+                "preview_quality": preview_quality,
+                "preview_reason": preview_reason,
                 "clip_start": clip_start,
                 "clip_end": clip_end,
                 "clip_url": (

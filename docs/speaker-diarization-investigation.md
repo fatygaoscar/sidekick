@@ -5,7 +5,7 @@
 This document records the speaker-diarization work completed during the recent repair/debugging pass, the current state of the product, and the remaining open hypothesis:
 
 - the diarization itself may now be materially better than before,
-- but the speaker review experience may still be misleading because the preview clips and representative segments are not always showing the most diagnostic moments.
+- but the speaker review experience can still be misleading if the chosen representative segment is not especially diagnostic, even though obviously broken preview cases have now been removed.
 
 This is especially relevant to `Goals Touchbase - Voice Memo`, where the user expectation is:
 
@@ -110,6 +110,7 @@ For `go.sidekickgo.app`, media playback and workspace loading were made more res
 - fallback media URL second
 - longer remote workspace timeout
 - better timing instrumentation
+- speaker preview clips fetched through the shared network helper and played through Web Audio instead of raw media-element URL loading
 
 ### 11. Added legacy workspace normalization
 
@@ -136,6 +137,15 @@ This means:
 
 The practical goal is not new model quality by itself. It is to reduce drift between initial transcription and rerun behavior so speaker bugs are easier to reason about and fix.
 
+### 13. Hardened speaker preview selection and playback
+
+Speaker preview behavior is now explicitly classified and guarded:
+
+- representative segments are scored for content quality instead of just taking the earliest short snippet
+- speaker cards now expose preview metadata such as `clip_available`, `preview_quality`, and `preview_reason`
+- clusters that only contain unusable legacy micro-fragments are rendered as `No Preview`
+- playable preview clips are fetched and decoded through Web Audio, which avoids the browser media-element hangs that previously left buttons stuck on `Loading...` or failed with a generic play error
+
 ## Current Product Behavior
 
 ### Initial transcription
@@ -150,6 +160,7 @@ The practical goal is not new model quality by itself. It is to reduce drift bet
 The Speakers tab now supports:
 
 - representative preview clips
+- `No Preview` for unusable fallback-short legacy clusters
 - renaming
 - merging duplicate clusters
 - fast speaker detection reruns
@@ -190,7 +201,7 @@ That points to two possible explanations:
 
 ## Current Hypothesis: Preview Quality May Be Misleading
 
-The speaker preview system was already improved to avoid very short greeting/backchannel clips, but it still chooses **one representative segment per cluster**.
+The speaker preview system now avoids unusable micro-clips and disables playback for fallback-short legacy fragments, but it still chooses **one representative segment per cluster**.
 
 That can still be misleading when:
 
@@ -202,7 +213,8 @@ That can still be misleading when:
 In other words:
 
 - the cluster may be acceptable,
-- but the preview may not be diagnostic enough for a human to tell that it is actually Greg.
+- the preview may now be technically playable,
+- but a single chosen snippet may still not be diagnostic enough for a human to tell that it is actually Greg.
 
 ## Likely Next Step
 
@@ -239,7 +251,7 @@ Recommended follow-up:
 ## Operational Notes
 
 - If `community-1` is unavailable, the app should report that explicitly rather than silently degrading.
-- Remote workspace/media failures should now be easier to diagnose via timing logs.
+- Remote workspace/media failures should now be easier to diagnose via timing logs and explicit speaker clip fetch/decode logs in the browser.
 - Legacy older recordings may normalize themselves on first workspace open.
 
 ## Status
@@ -250,4 +262,5 @@ The best current interpretation is:
 
 - diarization quality has improved,
 - identity matching is now meaningfully better,
-- but the review UI may still under-represent the clusters through weak preview selection.
+- and the review UI no longer exposes obviously broken preview clips,
+- but it may still under-represent some clusters through weak single-clip selection.

@@ -2,6 +2,7 @@
     const SUMMARY_REVISE_TIMEOUT_MS = 45000;
     const SUMMARY_REVISE_TIMEOUT_MESSAGE = 'AI revision timed out. Please try again.';
     const SUMMARY_REVISE_NETWORK_MESSAGE = 'AI revision failed to reach the server. Please try again.';
+    const SPEAKER_CLIP_FETCH_TIMEOUT_MS = 10000;
 
     class RecordingWorkspace {
         constructor(options = {}) {
@@ -13,7 +14,7 @@
             this._bannerTimer = null;
             this._metaTooltipTimer = null;
             this._bodyScrollLocked = false;
-            this._speakerAudio = null;
+            this._speakerPlaybackContext = null;
             this._speakerPlayback = null;
             this._repairAudio = null;
             this._repairAudioSource = '';
@@ -91,12 +92,97 @@
             return window.matchMedia('(max-width: 700px), (hover: none) and (pointer: coarse)').matches;
         }
 
-        _ensureSpeakerAudio() {
-            if (!this._speakerAudio) {
-                this._speakerAudio = new Audio();
-                this._speakerAudio.preload = 'auto';
+        _ensureSpeakerPlaybackContext() {
+            if (!this._speakerPlaybackContext) {
+                const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                if (!AudioContextClass) {
+                    return null;
+                }
+                this._speakerPlaybackContext = new AudioContextClass();
             }
-            return this._speakerAudio;
+            return this._speakerPlaybackContext;
+        }
+
+        _speakerPlaybackMatches(button, speakerCluster) {
+            return Boolean(
+                this._speakerPlayback
+                && this._speakerPlayback.button === button
+                && this._speakerPlayback.speakerCluster === speakerCluster
+            );
+        }
+
+        _clearSpeakerPlaybackNodes(playbackState) {
+            if (!playbackState) {
+                return;
+            }
+            if (playbackState.sourceNode) {
+                playbackState.sourceNode.onended = null;
+                try {
+                    playbackState.sourceNode.stop(0);
+                } catch (error) {
+                    // Ignore invalid state when the source has already ended.
+                }
+                try {
+                    playbackState.sourceNode.disconnect();
+                } catch (error) {
+                    // Ignore disconnect errors on already-closed nodes.
+                }
+                playbackState.sourceNode = null;
+            }
+            if (playbackState.gainNode) {
+                try {
+                    playbackState.gainNode.disconnect();
+                } catch (error) {
+                    // Ignore disconnect errors on already-closed nodes.
+                }
+                playbackState.gainNode = null;
+            }
+        }
+
+        async _resumeSpeakerPlaybackContext(audioContext) {
+            if (!audioContext) {
+                throw new Error('Web Audio is unavailable in this browser.');
+            }
+            if (audioContext.state === 'running') {
+                return;
+            }
+            await audioContext.resume();
+        }
+
+        async _fetchSpeakerClipArrayBuffer(candidateUrl) {
+            const response = await window.SidekickNetwork.request(
+                candidateUrl,
+                { method: 'GET' },
+                {
+                    timeoutMs: SPEAKER_CLIP_FETCH_TIMEOUT_MS,
+                    retries: 0,
+                    retryOnNetworkError: false,
+                    networkErrorMessage: 'Unable to load speaker clip.',
+                    logLabel: 'speaker_clip',
+                }
+            );
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const contentType = (response.headers.get('content-type') || '').toLowerCase();
+            if (contentType && !contentType.includes('audio/') && !contentType.includes('application/octet-stream')) {
+                throw new Error(`Unexpected speaker clip content type: ${contentType}`);
+            }
+            const arrayBuffer = await response.arrayBuffer();
+            if (!arrayBuffer || !arrayBuffer.byteLength) {
+                throw new Error('Speaker clip response was empty.');
+            }
+            return arrayBuffer;
+        }
+
+        _decodeSpeakerClipBuffer(audioContext, arrayBuffer) {
+            const bufferCopy = arrayBuffer.slice(0);
+            return new Promise((resolve, reject) => {
+                const maybePromise = audioContext.decodeAudioData(bufferCopy, resolve, reject);
+                if (maybePromise && typeof maybePromise.then === 'function') {
+                    maybePromise.then(resolve).catch(reject);
+                }
+            });
         }
 
         _ensureRepairAudio() {
@@ -1253,6 +1339,10 @@
                 .map((speaker, index) => {
                     const value = this.state.speakerAssignments[speaker.speaker_cluster] ?? speaker.display_name ?? '';
                     const disabledAttr = inputsLocked ? 'disabled' : '';
+                    const clipAvailable = speaker.clip_available !== false && Boolean(speaker.clip_url);
+                    const clipButtonTitle = clipAvailable
+                        ? 'Play representative speaker clip'
+                        : 'No usable preview clip was found for this speaker.';
                     const savingProfile = this.state.savingSpeakerProfileClusters.has(speaker.speaker_cluster);
                     const queuedProfile = this.state.queuedSpeakerProfileClusters.has(speaker.speaker_cluster);
                     const correctingMatch = this.state.correctingSpeakerProfileClusters.has(speaker.speaker_cluster);
@@ -1282,8 +1372,10 @@
                                     class="btn btn-small speaker-audio-btn"
                                     data-speaker-cluster="${this._escapeHtml(speaker.speaker_cluster)}"
                                     data-clip-url="${this._escapeHtml(speaker.clip_url || '')}"
+                                    title="${this._escapeHtml(clipButtonTitle)}"
+                                    ${clipAvailable ? '' : 'disabled'}
                                 >
-                                    Play Clip
+                                    ${clipAvailable ? 'Play Clip' : 'No Preview'}
                                 </button>
                                 <input
                                     type="text"
@@ -1386,8 +1478,8 @@
             this.elements.speakersList.querySelectorAll('.speaker-audio-btn').forEach((button) => {
                 button.addEventListener('click', () => {
                     const clipUrl = button.dataset.clipUrl || '';
-                    const isCurrent = this._speakerPlayback?.button === button
-                        && this._speakerPlayback?.clipUrl === clipUrl;
+                    const speakerCluster = button.dataset.speakerCluster || '';
+                    const isCurrent = this._speakerPlaybackMatches(button, speakerCluster);
                     if (isCurrent) {
                         this._stopSpeakerPlayback();
                         return;
@@ -1395,7 +1487,7 @@
                     this._playSpeakerClip({
                         button,
                         clipUrl,
-                        speakerCluster: button.dataset.speakerCluster || '',
+                        speakerCluster,
                     });
                 });
             });
@@ -1540,84 +1632,98 @@
         }
 
         async _playSpeakerClip({ button, clipUrl, speakerCluster }) {
-            const clipCandidates = this._apiMediaCandidates(clipUrl);
+            const clipCandidates = clipUrl ? [clipUrl] : [];
             if (!clipCandidates.length) {
                 this._showBanner('Unable to play speaker clip.', 'error');
                 return;
             }
 
             this._stopSpeakerPlayback();
-            const audio = this._ensureSpeakerAudio();
-            const handleEnded = () => {
-                this._stopSpeakerPlayback();
-            };
-            const handleError = () => {
-                const playbackState = this._speakerPlayback;
-                if (!playbackState) {
-                    return;
-                }
-                const currentUrl = playbackState.candidates[playbackState.candidateIndex] || clipUrl;
-                const nextIndex = playbackState.candidateIndex + 1;
-                if (!playbackState.retrying && nextIndex < playbackState.candidates.length) {
-                    playbackState.retrying = true;
-                    console.warn('[speaker_clip:play:retry]', {
-                        sessionId: this.state.sessionId,
-                        speakerCluster,
-                        from: currentUrl,
-                        to: playbackState.candidates[nextIndex],
-                        mediaError: audio.error?.message || audio.error?.code || 'unknown',
-                    });
-                    void attemptPlayback(nextIndex);
-                    return;
-                }
-                console.warn('[speaker_clip:play:fail]', {
-                    sessionId: this.state.sessionId,
-                    speakerCluster,
-                    url: currentUrl,
-                    mediaError: audio.error?.message || audio.error?.code || 'unknown',
-                });
-                this._stopSpeakerPlayback();
-                this._showBanner('Unable to play speaker clip.', 'error');
-            };
+            const audioContext = this._ensureSpeakerPlaybackContext();
+            if (!audioContext) {
+                this._showBanner('Speaker clip playback is unavailable in this browser.', 'error');
+                return;
+            }
+            const playbackToken = Symbol('speakerPlayback');
 
             this._speakerPlayback = {
-                audio,
                 button,
-                clipUrl: clipCandidates[0],
+                clipUrl,
                 speakerCluster,
                 candidates: clipCandidates,
                 candidateIndex: 0,
-                retrying: false,
-                handleEnded,
-                handleError,
+                audioContext,
+                sourceNode: null,
+                gainNode: null,
+                playbackToken,
             };
-            button.disabled = true;
+            button.disabled = false;
             button.textContent = 'Loading...';
-            audio.addEventListener('ended', handleEnded);
-            audio.addEventListener('error', handleError);
+
+            try {
+                await this._resumeSpeakerPlaybackContext(audioContext);
+            } catch (error) {
+                console.warn('[speaker_clip:play:fail]', {
+                    sessionId: this.state.sessionId,
+                    speakerCluster,
+                    url: clipUrl,
+                    message: error?.message || 'Unable to resume speaker playback context',
+                });
+                this._stopSpeakerPlayback('resume_failed');
+                this._showBanner('Unable to play speaker clip.', 'error');
+                return;
+            }
 
             const attemptPlayback = async (candidateIndex) => {
                 const playbackState = this._speakerPlayback;
-                if (!playbackState || playbackState.button !== button) {
+                if (!playbackState || playbackState.playbackToken !== playbackToken) {
                     return;
                 }
                 playbackState.candidateIndex = candidateIndex;
-                playbackState.retrying = false;
                 const candidateUrl = playbackState.candidates[candidateIndex] || clipCandidates[0];
-                console.info('[speaker_clip:play:start]', {
+                console.info('[speaker_clip:fetch:start]', {
                     sessionId: this.state.sessionId,
                     speakerCluster,
                     url: candidateUrl,
                     attempt: candidateIndex + 1,
                 });
-                audio.pause();
-                if (audio.src !== candidateUrl) {
-                    audio.src = candidateUrl;
-                }
-                audio.currentTime = 0;
-                audio.load();
                 try {
-                    await audio.play();
+                    const arrayBuffer = await this._fetchSpeakerClipArrayBuffer(candidateUrl);
+                    if (this._speakerPlayback?.playbackToken !== playbackToken) {
+                        return;
+                    }
+                    let audioBuffer = null;
+                    try {
+                        audioBuffer = await this._decodeSpeakerClipBuffer(audioContext, arrayBuffer);
+                    } catch (error) {
+                        console.warn('[speaker_clip:decode:fail]', {
+                            sessionId: this.state.sessionId,
+                            speakerCluster,
+                            url: candidateUrl,
+                            attempt: candidateIndex + 1,
+                            name: error?.name || 'Error',
+                            message: error?.message || 'Unable to decode speaker clip',
+                        });
+                        throw error;
+                    }
+                    if (this._speakerPlayback?.playbackToken !== playbackToken) {
+                        return;
+                    }
+                    this._clearSpeakerPlaybackNodes(playbackState);
+                    const gainNode = audioContext.createGain();
+                    const sourceNode = audioContext.createBufferSource();
+                    sourceNode.buffer = audioBuffer;
+                    sourceNode.connect(gainNode);
+                    gainNode.connect(audioContext.destination);
+                    sourceNode.onended = () => {
+                        if (this._speakerPlayback?.playbackToken !== playbackToken) {
+                            return;
+                        }
+                        this._stopSpeakerPlayback('ended');
+                    };
+                    playbackState.gainNode = gainNode;
+                    playbackState.sourceNode = sourceNode;
+                    sourceNode.start(0);
                     if (this._speakerPlayback?.button === button) {
                         button.disabled = false;
                         button.textContent = 'Stop Clip';
@@ -1629,19 +1735,17 @@
                         attempt: candidateIndex + 1,
                     });
                 } catch (error) {
-                    const aborted = error?.name === 'AbortError';
-                    if (aborted) {
-                        this._stopSpeakerPlayback();
+                    if (this._speakerPlayback?.playbackToken !== playbackToken) {
                         return;
                     }
                     const nextIndex = candidateIndex + 1;
-                    if (!playbackState.retrying && nextIndex < playbackState.candidates.length) {
-                        playbackState.retrying = true;
-                        console.warn('[speaker_clip:play:retry]', {
+                    if (nextIndex < playbackState.candidates.length) {
+                        console.warn('[speaker_clip:fetch:retry]', {
                             sessionId: this.state.sessionId,
                             speakerCluster,
                             from: candidateUrl,
                             to: playbackState.candidates[nextIndex],
+                            name: error?.name || 'Error',
                             message: error?.message || 'Unable to play clip',
                         });
                         await attemptPlayback(nextIndex);
@@ -1651,9 +1755,10 @@
                         sessionId: this.state.sessionId,
                         speakerCluster,
                         url: candidateUrl,
+                        name: error?.name || 'Error',
                         message: error?.message || 'Unable to play clip',
                     });
-                    this._stopSpeakerPlayback();
+                    this._stopSpeakerPlayback('failed');
                     this._showBanner('Unable to play speaker clip.', 'error');
                 }
             };
@@ -1661,22 +1766,25 @@
             await attemptPlayback(0);
         }
 
-        _stopSpeakerPlayback() {
+        _stopSpeakerPlayback(reason = 'cancelled') {
             if (!this._speakerPlayback) {
                 return;
             }
 
-            const { audio, button, handleEnded, handleError } = this._speakerPlayback;
-            audio.removeEventListener('ended', handleEnded);
-            audio.removeEventListener('error', handleError);
-            if (!audio.paused) {
-                audio.pause();
-            }
+            const playbackState = this._speakerPlayback;
+            const { button, speakerCluster, candidates, candidateIndex } = playbackState;
+            this._speakerPlayback = null;
+            this._clearSpeakerPlaybackNodes(playbackState);
             if (button?.isConnected) {
                 button.disabled = false;
                 button.textContent = 'Play Clip';
             }
-            this._speakerPlayback = null;
+            console.info('[speaker_clip:stop]', {
+                sessionId: this.state.sessionId,
+                speakerCluster,
+                url: candidates?.[candidateIndex] || playbackState.clipUrl || '',
+                reason,
+            });
         }
 
         _repairAudioEffectiveDuration() {
