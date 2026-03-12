@@ -15,6 +15,12 @@
             this._bodyScrollLocked = false;
             this._speakerAudio = null;
             this._speakerPlayback = null;
+            this._repairAudio = null;
+            this._repairAudioSource = '';
+            this._repairAudioCandidates = [];
+            this._repairAudioCandidateIndex = 0;
+            this._repairAudioRetrying = false;
+            this._repairAudioShouldResume = false;
             this._useNativeScrollTimeline = false;
             this._useSimpleMobileTabMotion = this._detectSimpleMobileTabMotion();
             this._tabStageCurrent = 0;
@@ -36,8 +42,21 @@
                 activeTab: 'summary',
                 jobStatus: null,
                 speakerAssignments: {},
+                savingSpeakerProfileClusters: new Set(),
+                queuedSpeakerProfileClusters: new Set(),
+                correctingSpeakerProfileClusters: new Set(),
+                matchCorrectionCluster: null,
+                matchCorrectionTargetProfileId: '',
+                matchCorrectionNewProfileName: '',
                 speakerDirty: false,
                 speakerEditMode: false,
+                repairPanelOpen: false,
+                repairExpectedSpeakerCount: '',
+                repairAudioDuration: 0,
+                repairAudioCurrentTime: 0,
+                repairAudioPlaying: false,
+                mergeSourceCluster: '',
+                mergeTargetCluster: '',
                 promptEditMode: false,
                 promptEditValue: '',
                 promptEditInitialValue: '',
@@ -59,6 +78,7 @@
                 chatApplyingMessageId: null,
                 expandedChatMessageIds: {},
             };
+            this._speakerProfileSaveQueue = Promise.resolve();
 
             this._ensureDom();
             this._bindEvents();
@@ -79,6 +99,63 @@
             return this._speakerAudio;
         }
 
+        _ensureRepairAudio() {
+            if (!this._repairAudio) {
+                this._repairAudio = new Audio();
+                this._repairAudio.preload = 'metadata';
+                this._repairAudio.addEventListener('loadedmetadata', () => {
+                    this.state.repairAudioDuration = Number.isFinite(this._repairAudio.duration)
+                        ? this._repairAudio.duration
+                        : 0;
+                    this._renderSpeakers();
+                });
+                this._repairAudio.addEventListener('timeupdate', () => {
+                    this.state.repairAudioCurrentTime = Number.isFinite(this._repairAudio.currentTime)
+                        ? this._repairAudio.currentTime
+                        : 0;
+                    this._renderRepairScrubber();
+                });
+                this._repairAudio.addEventListener('play', () => {
+                    this.state.repairAudioPlaying = true;
+                    this._renderRepairScrubber();
+                });
+                this._repairAudio.addEventListener('pause', () => {
+                    this.state.repairAudioPlaying = false;
+                    this._renderRepairScrubber();
+                });
+                this._repairAudio.addEventListener('ended', () => {
+                    this.state.repairAudioPlaying = false;
+                    this._repairAudioShouldResume = false;
+                    this._renderRepairScrubber();
+                });
+                this._repairAudio.addEventListener('error', () => {
+                    this.state.repairAudioPlaying = false;
+                    const hasFallback = this._repairAudioCandidateIndex + 1 < this._repairAudioCandidates.length;
+                    if (hasFallback && !this._repairAudioRetrying) {
+                        this._repairAudioRetrying = true;
+                        const nextIndex = this._repairAudioCandidateIndex + 1;
+                        console.warn('[repair_audio:retry]', {
+                            sessionId: this.state.sessionId,
+                            from: this._repairAudioCandidates[this._repairAudioCandidateIndex] || this._repairAudioSource,
+                            to: this._repairAudioCandidates[nextIndex] || '',
+                        });
+                        this._setRepairAudioSourceCandidate(nextIndex);
+                        if (this._repairAudioShouldResume) {
+                            void this._repairAudio.play().catch((error) => {
+                                this._repairAudioShouldResume = false;
+                                this._showBanner(error?.message || 'Unable to play recording audio.', 'error');
+                            });
+                        }
+                        return;
+                    }
+                    this._repairAudioShouldResume = false;
+                    this._renderRepairScrubber();
+                    this._showBanner('Unable to play recording audio.', 'error');
+                });
+            }
+            return this._repairAudio;
+        }
+
         async open(sessionId, options = {}) {
             this.options = { ...this.baseOptions, ...options };
             this.state.sessionId = sessionId;
@@ -88,6 +165,19 @@
             this.state.speakerAssignments = {};
             this.state.speakerDirty = false;
             this.state.speakerEditMode = false;
+            this.state.savingSpeakerProfileClusters = new Set();
+            this.state.queuedSpeakerProfileClusters = new Set();
+            this.state.correctingSpeakerProfileClusters = new Set();
+            this.state.matchCorrectionCluster = null;
+            this.state.matchCorrectionTargetProfileId = '';
+            this.state.matchCorrectionNewProfileName = '';
+            this.state.repairPanelOpen = false;
+            this.state.repairExpectedSpeakerCount = '';
+            this.state.repairAudioDuration = 0;
+            this.state.repairAudioCurrentTime = 0;
+            this.state.repairAudioPlaying = false;
+            this.state.mergeSourceCluster = '';
+            this.state.mergeTargetCluster = '';
             this.state.promptEditMode = false;
             this.state.promptEditValue = '';
             this.state.promptEditInitialValue = '';
@@ -117,12 +207,15 @@
             try {
                 await this._loadWorkspace();
             } catch (error) {
+                const normalizedError = error?.message === 'Network request timed out'
+                    ? new Error('Workspace load timed out. Please try again.')
+                    : error;
                 console.warn('[workspace_open:fail]', {
                     sessionId,
-                    message: error?.message || 'Workspace unavailable',
+                    message: normalizedError?.message || 'Workspace unavailable',
                 });
                 this._revertOpenState();
-                throw error;
+                throw normalizedError;
             }
 
             try {
@@ -173,6 +266,19 @@
             this.state.speakerAssignments = {};
             this.state.speakerDirty = false;
             this.state.speakerEditMode = false;
+            this.state.savingSpeakerProfileClusters = new Set();
+            this.state.queuedSpeakerProfileClusters = new Set();
+            this.state.correctingSpeakerProfileClusters = new Set();
+            this.state.matchCorrectionCluster = null;
+            this.state.matchCorrectionTargetProfileId = '';
+            this.state.matchCorrectionNewProfileName = '';
+            this.state.repairPanelOpen = false;
+            this.state.repairExpectedSpeakerCount = '';
+            this.state.repairAudioDuration = 0;
+            this.state.repairAudioCurrentTime = 0;
+            this.state.repairAudioPlaying = false;
+            this.state.mergeSourceCluster = '';
+            this.state.mergeTargetCluster = '';
             this.state.promptEditMode = false;
             this.state.promptEditValue = '';
             this.state.promptEditInitialValue = '';
@@ -191,6 +297,7 @@
             this._settingsSavePromise = null;
             this._resetTabScrollStage();
             this._stopSpeakerPlayback();
+            this._stopRepairAudio({ resetPosition: true });
             this.options = { ...this.baseOptions };
             if (typeof this.options.onClose === 'function') {
                 this.options.onClose();
@@ -225,7 +332,7 @@
                 workspaceUrl.searchParams.set('transcript_version_id', this.state.selectedTranscriptVersionId);
             }
             const payload = await this._jsonRequest(`${workspaceUrl.pathname}${workspaceUrl.search}`, {}, {
-                timeoutMs: this.options.workspaceLoadTimeoutMs || 8000,
+                timeoutMs: this.options.workspaceLoadTimeoutMs || this._workspaceLoadTimeoutMs(),
                 retries: this.options.workspaceLoadRetries ?? 2,
                 networkErrorMessage: 'Workspace network request failed',
                 httpErrorMessage: 'Failed to load recording workspace',
@@ -249,6 +356,14 @@
                 (payload.speaker_review?.speakers || []).forEach((speaker) => {
                     this.state.speakerAssignments[speaker.speaker_cluster] = speaker.display_name || '';
                 });
+            }
+            if (
+                this.state.matchCorrectionCluster
+                && !(payload.speaker_review?.speakers || []).some((speaker) => speaker.speaker_cluster === this.state.matchCorrectionCluster)
+            ) {
+                this.state.matchCorrectionCluster = null;
+                this.state.matchCorrectionTargetProfileId = '';
+                this.state.matchCorrectionNewProfileName = '';
             }
 
             if (!keepTab) {
@@ -366,6 +481,73 @@
                                     <div id="workspace-speakers-list" class="speaker-card-list"></div>
                                     <div id="workspace-speaker-actions" class="workspace-summary-actions hidden">
                                         <button type="button" class="btn" id="workspace-speaker-edit-btn">Edit</button>
+                                        <button type="button" class="btn btn-small hidden" id="workspace-speaker-repair-btn">Speaker Tools</button>
+                                    </div>
+                                    <div id="workspace-speaker-repair-panel" class="workspace-repair-panel hidden">
+                                        <div class="workspace-panel-copy workspace-repair-copy">
+                                            <h4>Speaker Tools</h4>
+                                            <p class="workspace-copy">Choose the fix that matches the problem. Renaming changes display names, merging combines duplicate clusters, and speaker detection reruns from the audio.</p>
+                                        </div>
+                                        <div class="workspace-repair-guidance">
+                                            <div class="workspace-repair-guidance-item">
+                                                <div class="workspace-repair-guidance-title">Only the names are wrong</div>
+                                                <div class="workspace-repair-guidance-text">Rename speakers above.</div>
+                                            </div>
+                                            <div class="workspace-repair-guidance-item">
+                                                <div class="workspace-repair-guidance-title">Same person split twice</div>
+                                                <div class="workspace-repair-guidance-text">Merge duplicate speakers into a new transcript version.</div>
+                                            </div>
+                                            <div class="workspace-repair-guidance-item">
+                                                <div class="workspace-repair-guidance-title">A speaker is missing</div>
+                                                <div class="workspace-repair-guidance-text">Re-run speaker detection with the final speaker count you expect.</div>
+                                            </div>
+                                        </div>
+                                        <div class="workspace-repair-divider"></div>
+                                        <div class="workspace-repair-section">
+                                            <div class="workspace-repair-section-header">
+                                                <h5>Re-run Speaker Detection</h5>
+                                                <p class="workspace-copy">Runs speaker detection again using the current transcript timing, which is faster than rerunning the full transcript. Expected speakers is the final count Sidekick will try to return.</p>
+                                            </div>
+                                            <div class="workspace-repair-grid">
+                                                <label class="form-group">
+                                                    <span class="form-label">Expected speakers</span>
+                                                    <input type="number" min="2" max="10" step="1" id="workspace-repair-speaker-count" class="form-input" placeholder="3">
+                                                </label>
+                                            </div>
+                                            <div class="workspace-repair-scrubber">
+                                                <div class="workspace-repair-scrubber-row">
+                                                    <button type="button" class="btn btn-small" id="workspace-repair-playback-btn">Play Audio</button>
+                                                    <button type="button" class="btn btn-small" id="workspace-repair-back-btn">-5s</button>
+                                                    <button type="button" class="btn btn-small" id="workspace-repair-forward-btn">+5s</button>
+                                                    <div id="workspace-repair-time" class="workspace-repair-time">00:00:00 / 00:00:00</div>
+                                                </div>
+                                                <input type="range" min="0" max="0" step="0.1" value="0" id="workspace-repair-seek" class="workspace-repair-seek" aria-label="Speaker repair audio scrubber">
+                                                <div class="workspace-repair-scrubber-copy">Use the scrubber to review who is speaking before you rerun detection or merge duplicate speakers.</div>
+                                            </div>
+                                            <div class="workspace-summary-actions workspace-repair-actions">
+                                                <button type="button" class="btn btn-primary" id="workspace-repair-run-btn">Re-run Speaker Detection</button>
+                                            </div>
+                                        </div>
+                                        <div class="workspace-repair-divider"></div>
+                                        <div class="workspace-repair-section">
+                                            <div class="workspace-repair-section-header">
+                                                <h5>Merge Duplicate Speakers</h5>
+                                                <p class="workspace-copy">Combines two detected clusters into one new transcript version. This helps the current transcript version only and does not train future speaker detection.</p>
+                                            </div>
+                                            <div class="workspace-repair-grid">
+                                                <label class="form-group">
+                                                    <span class="form-label">Merge source</span>
+                                                    <select id="workspace-merge-source-select" class="version-select"></select>
+                                                </label>
+                                                <label class="form-group">
+                                                    <span class="form-label">Merge into</span>
+                                                    <select id="workspace-merge-target-select" class="version-select"></select>
+                                                </label>
+                                            </div>
+                                            <div class="workspace-summary-actions workspace-repair-actions">
+                                                <button type="button" class="btn" id="workspace-merge-run-btn">Merge Duplicate Speakers</button>
+                                            </div>
+                                        </div>
                                     </div>
                                 </section>
                                 <section class="workspace-panel hidden" id="workspace-panel-summary" data-panel="summary" role="tabpanel" aria-labelledby="workspace-tab-summary" aria-hidden="true">
@@ -410,11 +592,11 @@
                                 <section class="workspace-panel hidden" id="workspace-panel-transcript" data-panel="transcript" role="tabpanel" aria-labelledby="workspace-tab-transcript" aria-hidden="true">
                                     <div class="workspace-panel-copy">
                                         <h3>Transcript</h3>
-                                        <p class="workspace-copy">The transcript stays available while you review speakers and summary changes.</p>
+                                        <p id="workspace-transcript-copy" class="workspace-copy">The transcript stays available while you review speakers and summary changes.</p>
                                     </div>
                                     <div id="workspace-transcript-version-row" class="summary-version-row hidden">
                                         <select id="workspace-transcript-version-select" class="version-select"></select>
-                                        <button type="button" class="btn btn-small" id="workspace-retranscribe-btn">Re-transcribe</button>
+                                        <button type="button" class="btn btn-small" id="workspace-retranscribe-btn">Re-run Transcript</button>
                                     </div>
                                     <div id="workspace-transcript-revision-history" class="workspace-revision-history hidden"></div>
                                     <div id="workspace-transcript" class="transcript-view"></div>
@@ -482,6 +664,18 @@
                 speakersList: modal.querySelector('#workspace-speakers-list'),
                 speakerActions: modal.querySelector('#workspace-speaker-actions'),
                 speakerEditBtn: modal.querySelector('#workspace-speaker-edit-btn'),
+                speakerRepairBtn: modal.querySelector('#workspace-speaker-repair-btn'),
+                speakerRepairPanel: modal.querySelector('#workspace-speaker-repair-panel'),
+                repairSpeakerCount: modal.querySelector('#workspace-repair-speaker-count'),
+                repairPlaybackBtn: modal.querySelector('#workspace-repair-playback-btn'),
+                repairBackBtn: modal.querySelector('#workspace-repair-back-btn'),
+                repairForwardBtn: modal.querySelector('#workspace-repair-forward-btn'),
+                repairTime: modal.querySelector('#workspace-repair-time'),
+                repairSeek: modal.querySelector('#workspace-repair-seek'),
+                repairRunBtn: modal.querySelector('#workspace-repair-run-btn'),
+                mergeSourceSelect: modal.querySelector('#workspace-merge-source-select'),
+                mergeTargetSelect: modal.querySelector('#workspace-merge-target-select'),
+                mergeRunBtn: modal.querySelector('#workspace-merge-run-btn'),
                 summaryMeta: modal.querySelector('#workspace-summary-meta'),
                 summaryVersionRow: modal.querySelector('#workspace-summary-version-row'),
                 summaryVersionSelect: modal.querySelector('#workspace-summary-version-select'),
@@ -489,6 +683,7 @@
                 transcriptVersionRow: modal.querySelector('#workspace-transcript-version-row'),
                 transcriptVersionSelect: modal.querySelector('#workspace-transcript-version-select'),
                 retranscribeBtn: modal.querySelector('#workspace-retranscribe-btn'),
+                transcriptCopy: modal.querySelector('#workspace-transcript-copy'),
                 transcriptRevisionHistory: modal.querySelector('#workspace-transcript-revision-history'),
                 summaryDisplay: modal.querySelector('#workspace-summary-display'),
                 summaryEditNotice: modal.querySelector('#workspace-summary-edit-notice'),
@@ -601,6 +796,41 @@
                 this._renderFooter();
             });
             this.elements.speakerEditBtn.addEventListener('click', () => this._toggleSpeakerEditMode());
+            this.elements.speakerRepairBtn.addEventListener('click', () => {
+                this.state.repairPanelOpen = !this.state.repairPanelOpen;
+                if (!this.state.repairPanelOpen) {
+                    this._stopRepairAudio();
+                }
+                this._renderSpeakers();
+            });
+            this.elements.repairSpeakerCount.addEventListener('input', () => {
+                this.state.repairExpectedSpeakerCount = this.elements.repairSpeakerCount.value;
+            });
+            this.elements.repairPlaybackBtn.addEventListener('click', () => {
+                void this._toggleRepairAudioPlayback();
+            });
+            this.elements.repairBackBtn.addEventListener('click', () => {
+                this._seekRepairAudio((this.state.repairAudioCurrentTime || 0) - 5);
+            });
+            this.elements.repairForwardBtn.addEventListener('click', () => {
+                this._seekRepairAudio((this.state.repairAudioCurrentTime || 0) + 5);
+            });
+            this.elements.repairSeek.addEventListener('input', () => {
+                this._seekRepairAudio(this.elements.repairSeek.value);
+            });
+            this.elements.repairRunBtn.addEventListener('click', () => {
+                void this._startSpeakerRepair();
+            });
+            this.elements.mergeSourceSelect.addEventListener('change', () => {
+                this.state.mergeSourceCluster = this.elements.mergeSourceSelect.value;
+                this._syncMergeTargetSelection();
+            });
+            this.elements.mergeTargetSelect.addEventListener('change', () => {
+                this.state.mergeTargetCluster = this.elements.mergeTargetSelect.value;
+            });
+            this.elements.mergeRunBtn.addEventListener('click', () => {
+                void this._mergeSpeakerClusters();
+            });
 
             this.elements.summaryVersionSelect.addEventListener('change', (event) => {
                 this.state.selectedSavedSummaryId = event.target.value;
@@ -1000,6 +1230,8 @@
                     : 'Transcription will start automatically once the recording is ready.';
                 this.elements.speakersList.innerHTML = '<div class="workspace-empty">No transcript yet.</div>';
                 this.elements.speakerActions.classList.add('hidden');
+                this.elements.speakerRepairPanel.classList.add('hidden');
+                this._stopRepairAudio();
                 return;
             }
 
@@ -1012,6 +1244,8 @@
             if (speakers.length === 0) {
                 this.elements.speakersList.innerHTML = '<div class="workspace-empty">No speaker clusters were detected.</div>';
                 this.elements.speakerActions.classList.add('hidden');
+                this.elements.speakerRepairPanel.classList.add('hidden');
+                this._stopRepairAudio();
                 return;
             }
 
@@ -1019,11 +1253,26 @@
                 .map((speaker, index) => {
                     const value = this.state.speakerAssignments[speaker.speaker_cluster] ?? speaker.display_name ?? '';
                     const disabledAttr = inputsLocked ? 'disabled' : '';
+                    const savingProfile = this.state.savingSpeakerProfileClusters.has(speaker.speaker_cluster);
+                    const queuedProfile = this.state.queuedSpeakerProfileClusters.has(speaker.speaker_cluster);
+                    const correctingMatch = this.state.correctingSpeakerProfileClusters.has(speaker.speaker_cluster);
+                    const profileSaved = Boolean(speaker.matched_profile_id);
+                    const exampleCount = Number(speaker.matched_profile_example_count || 0);
+                    const correctionOpen = this.state.matchCorrectionCluster === speaker.speaker_cluster;
+                    const selectedProfileId = this.state.matchCorrectionTargetProfileId || '';
+                    const selectingNewProfile = selectedProfileId === '__new__';
+                    const knownProfiles = Array.isArray(this.state.workspace?.speaker_review?.known_profiles)
+                        ? this.state.workspace.speaker_review.known_profiles
+                        : [];
+                    const canApplyMatch = correctionOpen && !correctingMatch && (
+                        (selectedProfileId && selectedProfileId !== '__new__')
+                        || (selectingNewProfile && String(this.state.matchCorrectionNewProfileName || '').trim())
+                    );
                     return `
                         <div class="speaker-card">
                             <div class="speaker-card-header">
                                 <div>
-                                    <div class="speaker-card-label">${this._escapeHtml(speaker.speaker_cluster)}</div>
+                                    <div class="speaker-card-label">${this._escapeHtml(speaker.speaker_cluster)}${speaker.matched_profile_name ? ` <span class="workspace-badge workspace-badge-success">Matched ${this._escapeHtml(speaker.matched_profile_name)}</span>` : ''}${speaker.matched_profile_name ? ` <span class="workspace-badge">${this._escapeHtml(`${exampleCount} example${exampleCount === 1 ? '' : 's'}`)}</span>` : ''}</div>
                                     <div class="speaker-card-preview">${this._escapeHtml(speaker.preview_text || '')}</div>
                                 </div>
                             </div>
@@ -1044,19 +1293,99 @@
                                     placeholder="Enter speaker name"
                                     ${disabledAttr}
                                 >
+                                <button
+                                    type="button"
+                                    class="btn btn-small speaker-profile-btn"
+                                    data-cluster="${this._escapeHtml(speaker.speaker_cluster)}"
+                                    ${(savingProfile || queuedProfile) ? 'disabled' : ''}
+                                >
+                                    ${savingProfile ? 'Saving...' : (queuedProfile ? 'Queued...' : (profileSaved ? 'Add Example' : 'Add to Profiles'))}
+                                </button>
+                                ${speaker.can_change_match ? `
+                                    <button
+                                        type="button"
+                                        class="btn btn-small speaker-profile-change-btn"
+                                        data-cluster="${this._escapeHtml(speaker.speaker_cluster)}"
+                                        ${correctingMatch ? 'disabled' : ''}
+                                    >
+                                        ${correctingMatch ? 'Applying...' : 'Change Match'}
+                                    </button>
+                                ` : ''}
+                                ${correctionOpen ? `
+                                    <div class="speaker-match-correction">
+                                        <select class="form-select speaker-match-select" data-cluster="${this._escapeHtml(speaker.speaker_cluster)}" ${correctingMatch ? 'disabled' : ''}>
+                                            <option value="">Select profile</option>
+                                            ${knownProfiles.map((profile) => `
+                                                <option value="${this._escapeHtml(profile.id)}"${profile.id === selectedProfileId ? ' selected' : ''}>
+                                                    ${this._escapeHtml(profile.display_name || 'Profile')}
+                                                </option>
+                                            `).join('')}
+                                            <option value="__new__"${selectingNewProfile ? ' selected' : ''}>Create New Profile</option>
+                                        </select>
+                                        ${selectingNewProfile ? `
+                                            <input
+                                                type="text"
+                                                class="form-input speaker-match-new-input"
+                                                data-cluster="${this._escapeHtml(speaker.speaker_cluster)}"
+                                                value="${this._escapeHtml(this.state.matchCorrectionNewProfileName || '')}"
+                                                placeholder="Enter new profile name"
+                                                ${correctingMatch ? 'disabled' : ''}
+                                            >
+                                        ` : ''}
+                                        <div class="speaker-match-actions">
+                                            <button
+                                                type="button"
+                                                class="btn btn-small speaker-match-apply-btn"
+                                                data-cluster="${this._escapeHtml(speaker.speaker_cluster)}"
+                                                ${canApplyMatch ? '' : 'disabled'}
+                                            >
+                                                Apply Match
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="btn btn-small speaker-match-cancel-btn"
+                                                data-cluster="${this._escapeHtml(speaker.speaker_cluster)}"
+                                                ${correctingMatch ? 'disabled' : ''}
+                                            >
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </div>
+                                ` : ''}
                             </div>
                         </div>
                     `;
                 })
                 .join('');
 
-            const showSpeakerActions = this._canLockSpeakerInputs() || this.state.speakerEditMode;
+            const repairEnabled = this._speakerRepairEnabled();
+            const showSpeakerActions = this._canLockSpeakerInputs() || this.state.speakerEditMode || repairEnabled;
             this.elements.speakerActions.classList.toggle('hidden', !showSpeakerActions);
             this.elements.speakerEditBtn.textContent = this.state.speakerEditMode ? 'Done Editing' : 'Edit';
+            this.elements.speakerRepairBtn.classList.toggle('hidden', !repairEnabled);
+            this.elements.speakerRepairBtn.textContent = this.state.repairPanelOpen ? 'Hide Speaker Tools' : 'Speaker Tools';
+
+            const mergeOptions = this._speakerClusterOptions();
+            if (!this.state.mergeSourceCluster || !mergeOptions.some((option) => option.value === this.state.mergeSourceCluster)) {
+                this.state.mergeSourceCluster = mergeOptions[0]?.value || '';
+            }
+            this._syncMergeTargetSelection();
+            this.elements.repairSpeakerCount.value = this.state.repairExpectedSpeakerCount;
+            this.elements.speakerRepairPanel.classList.toggle('hidden', !(repairEnabled && this.state.repairPanelOpen));
+            this._syncRepairAudioSource();
+            this._renderRepairScrubber();
+            this.elements.mergeSourceSelect.innerHTML = mergeOptions
+                .map((option) => `<option value="${this._escapeHtml(option.value)}"${option.value === this.state.mergeSourceCluster ? ' selected' : ''}>${this._escapeHtml(option.label)}</option>`)
+                .join('');
+            this.elements.mergeTargetSelect.innerHTML = mergeOptions
+                .filter((option) => option.value !== this.state.mergeSourceCluster)
+                .map((option) => `<option value="${this._escapeHtml(option.value)}"${option.value === this.state.mergeTargetCluster ? ' selected' : ''}>${this._escapeHtml(option.label)}</option>`)
+                .join('');
+            this.elements.mergeRunBtn.disabled = !this.state.mergeSourceCluster || !this.state.mergeTargetCluster;
 
             this.elements.speakersList.querySelectorAll('.speaker-audio-btn').forEach((button) => {
                 button.addEventListener('click', () => {
-                    const clipUrl = this._resolveApiMediaUrl(button.dataset.clipUrl || '');
+                    const clipUrl = button.dataset.clipUrl || '';
                     const isCurrent = this._speakerPlayback?.button === button
                         && this._speakerPlayback?.clipUrl === clipUrl;
                     if (isCurrent) {
@@ -1070,6 +1399,48 @@
                     });
                 });
             });
+            this.elements.speakersList.querySelectorAll('.speaker-profile-btn').forEach((button) => {
+                button.addEventListener('click', () => {
+                    void this._promoteSpeakerProfile(button.dataset.cluster || '');
+                });
+            });
+            this.elements.speakersList.querySelectorAll('.speaker-profile-change-btn').forEach((button) => {
+                button.addEventListener('click', () => {
+                    this.state.matchCorrectionCluster = button.dataset.cluster || null;
+                    this.state.matchCorrectionTargetProfileId = '';
+                    this.state.matchCorrectionNewProfileName = '';
+                    this._renderSpeakers();
+                });
+            });
+            this.elements.speakersList.querySelectorAll('.speaker-match-select').forEach((select) => {
+                select.addEventListener('change', () => {
+                    this.state.matchCorrectionTargetProfileId = select.value || '';
+                    if (this.state.matchCorrectionTargetProfileId !== '__new__') {
+                        this.state.matchCorrectionNewProfileName = '';
+                    }
+                    this._renderSpeakers();
+                });
+            });
+            this.elements.speakersList.querySelectorAll('.speaker-match-new-input').forEach((input) => {
+                input.addEventListener('input', () => {
+                    this.state.matchCorrectionNewProfileName = input.value || '';
+                });
+            });
+            this.elements.speakersList.querySelectorAll('.speaker-match-cancel-btn').forEach((button) => {
+                button.addEventListener('click', () => {
+                    if (this.state.matchCorrectionCluster === (button.dataset.cluster || null)) {
+                        this.state.matchCorrectionCluster = null;
+                        this.state.matchCorrectionTargetProfileId = '';
+                        this.state.matchCorrectionNewProfileName = '';
+                        this._renderSpeakers();
+                    }
+                });
+            });
+            this.elements.speakersList.querySelectorAll('.speaker-match-apply-btn').forEach((button) => {
+                button.addEventListener('click', () => {
+                    void this._correctSpeakerProfileMatch(button.dataset.cluster || '');
+                });
+            });
         }
 
         _speakerAssignmentsComplete() {
@@ -1080,12 +1451,67 @@
             });
         }
 
+        _isGenericSpeakerValue(value) {
+            return /^SPEAKER_\d+$/i.test(String(value || '').trim());
+        }
+
+        _speakerReviewStillRequiresInput() {
+            const speakers = this.state.workspace?.speaker_review?.speakers || [];
+            const unresolved = new Set();
+            speakers.forEach((speaker) => {
+                const value = String(
+                    this.state.speakerAssignments[speaker.speaker_cluster]
+                    ?? speaker.display_name
+                    ?? speaker.speaker_cluster
+                    ?? ''
+                ).trim();
+                if (!value || this._isGenericSpeakerValue(value)) {
+                    unresolved.add(String(speaker.speaker_cluster || value || ''));
+                }
+            });
+            return unresolved.size > 1;
+        }
+
         _canLockSpeakerInputs() {
-            return Boolean(this.state.workspace?.speaker_review?.completed) || this._speakerAssignmentsComplete();
+            return this._speakerAssignmentsComplete() || (
+                Boolean(this.state.workspace?.speaker_review?.completed)
+                && !this._speakerReviewStillRequiresInput()
+            );
         }
 
         _speakerInputsLocked() {
             return this._canLockSpeakerInputs() && !this.state.speakerEditMode;
+        }
+
+        _speakerRepairEnabled() {
+            return Boolean(this.state.workspace?.speaker_repair_enabled || this.state.workspace?.speaker_review?.repair_enabled);
+        }
+
+        _speakerClusterOptions() {
+            const speakers = this.state.workspace?.speaker_review?.speakers || [];
+            return speakers.map((speaker) => {
+                const value = String(speaker.speaker_cluster || '');
+                const enteredName = String(this.state.speakerAssignments[value] || '').trim();
+                const label = enteredName || speaker.display_name || speaker.speaker_cluster || 'Speaker';
+                return { value, label };
+            });
+        }
+
+        _syncMergeTargetSelection() {
+            const options = this._speakerClusterOptions();
+            if (!options.length) {
+                this.state.mergeTargetCluster = '';
+                return;
+            }
+            if (
+                this.state.mergeTargetCluster
+                && this.state.mergeTargetCluster !== this.state.mergeSourceCluster
+                && options.some((option) => option.value === this.state.mergeTargetCluster)
+            ) {
+                return;
+            }
+            const fallback = options.find((option) => option.value !== this.state.mergeSourceCluster);
+            this.state.mergeTargetCluster = fallback?.value || '';
         }
 
         async _toggleSpeakerEditMode() {
@@ -1114,7 +1540,8 @@
         }
 
         async _playSpeakerClip({ button, clipUrl, speakerCluster }) {
-            if (!clipUrl) {
+            const clipCandidates = this._apiMediaCandidates(clipUrl);
+            if (!clipCandidates.length) {
                 this._showBanner('Unable to play speaker clip.', 'error');
                 return;
             }
@@ -1125,10 +1552,28 @@
                 this._stopSpeakerPlayback();
             };
             const handleError = () => {
+                const playbackState = this._speakerPlayback;
+                if (!playbackState) {
+                    return;
+                }
+                const currentUrl = playbackState.candidates[playbackState.candidateIndex] || clipUrl;
+                const nextIndex = playbackState.candidateIndex + 1;
+                if (!playbackState.retrying && nextIndex < playbackState.candidates.length) {
+                    playbackState.retrying = true;
+                    console.warn('[speaker_clip:play:retry]', {
+                        sessionId: this.state.sessionId,
+                        speakerCluster,
+                        from: currentUrl,
+                        to: playbackState.candidates[nextIndex],
+                        mediaError: audio.error?.message || audio.error?.code || 'unknown',
+                    });
+                    void attemptPlayback(nextIndex);
+                    return;
+                }
                 console.warn('[speaker_clip:play:fail]', {
                     sessionId: this.state.sessionId,
                     speakerCluster,
-                    url: clipUrl,
+                    url: currentUrl,
                     mediaError: audio.error?.message || audio.error?.code || 'unknown',
                 });
                 this._stopSpeakerPlayback();
@@ -1138,8 +1583,11 @@
             this._speakerPlayback = {
                 audio,
                 button,
-                clipUrl,
+                clipUrl: clipCandidates[0],
                 speakerCluster,
+                candidates: clipCandidates,
+                candidateIndex: 0,
+                retrying: false,
                 handleEnded,
                 handleError,
             };
@@ -1148,41 +1596,69 @@
             audio.addEventListener('ended', handleEnded);
             audio.addEventListener('error', handleError);
 
-            try {
+            const attemptPlayback = async (candidateIndex) => {
+                const playbackState = this._speakerPlayback;
+                if (!playbackState || playbackState.button !== button) {
+                    return;
+                }
+                playbackState.candidateIndex = candidateIndex;
+                playbackState.retrying = false;
+                const candidateUrl = playbackState.candidates[candidateIndex] || clipCandidates[0];
                 console.info('[speaker_clip:play:start]', {
                     sessionId: this.state.sessionId,
                     speakerCluster,
-                    url: clipUrl,
+                    url: candidateUrl,
+                    attempt: candidateIndex + 1,
                 });
                 audio.pause();
-                if (audio.src !== clipUrl) {
-                    audio.src = clipUrl;
+                if (audio.src !== candidateUrl) {
+                    audio.src = candidateUrl;
                 }
                 audio.currentTime = 0;
                 audio.load();
-                await audio.play();
-                if (this._speakerPlayback?.button === button) {
-                    button.disabled = false;
-                    button.textContent = 'Stop Clip';
-                }
-                console.info('[speaker_clip:play:ok]', {
-                    sessionId: this.state.sessionId,
-                    speakerCluster,
-                    url: clipUrl,
-                });
-            } catch (error) {
-                const aborted = error?.name === 'AbortError';
-                this._stopSpeakerPlayback();
-                if (!aborted) {
+                try {
+                    await audio.play();
+                    if (this._speakerPlayback?.button === button) {
+                        button.disabled = false;
+                        button.textContent = 'Stop Clip';
+                    }
+                    console.info('[speaker_clip:play:ok]', {
+                        sessionId: this.state.sessionId,
+                        speakerCluster,
+                        url: candidateUrl,
+                        attempt: candidateIndex + 1,
+                    });
+                } catch (error) {
+                    const aborted = error?.name === 'AbortError';
+                    if (aborted) {
+                        this._stopSpeakerPlayback();
+                        return;
+                    }
+                    const nextIndex = candidateIndex + 1;
+                    if (!playbackState.retrying && nextIndex < playbackState.candidates.length) {
+                        playbackState.retrying = true;
+                        console.warn('[speaker_clip:play:retry]', {
+                            sessionId: this.state.sessionId,
+                            speakerCluster,
+                            from: candidateUrl,
+                            to: playbackState.candidates[nextIndex],
+                            message: error?.message || 'Unable to play clip',
+                        });
+                        await attemptPlayback(nextIndex);
+                        return;
+                    }
                     console.warn('[speaker_clip:play:fail]', {
                         sessionId: this.state.sessionId,
                         speakerCluster,
-                        url: clipUrl,
+                        url: candidateUrl,
                         message: error?.message || 'Unable to play clip',
                     });
+                    this._stopSpeakerPlayback();
                     this._showBanner('Unable to play speaker clip.', 'error');
                 }
-            }
+            };
+
+            await attemptPlayback(0);
         }
 
         _stopSpeakerPlayback() {
@@ -1201,6 +1677,120 @@
                 button.textContent = 'Play Clip';
             }
             this._speakerPlayback = null;
+        }
+
+        _repairAudioEffectiveDuration() {
+            const metadataDuration = Number(this.state.repairAudioDuration || 0);
+            if (metadataDuration > 0) {
+                return metadataDuration;
+            }
+            return Math.max(0, Number(this.state.workspace?.recording?.duration_seconds || 0));
+        }
+
+        _repairAudioAvailable() {
+            return Boolean(this.state.workspace?.recording?.audio_url);
+        }
+
+        _syncRepairAudioSource() {
+            if (!(this._speakerRepairEnabled() && this.state.repairPanelOpen)) {
+                return;
+            }
+            const relativeUrl = this.state.workspace?.recording?.audio_url || '';
+            const audioCandidates = this._apiMediaCandidates(relativeUrl);
+            if (!audioCandidates.length) {
+                return;
+            }
+            const audio = this._ensureRepairAudio();
+            if (
+                this._repairAudioSource === audioCandidates[0]
+                && this._repairAudioCandidateIndex === 0
+                && audio.src === audioCandidates[0]
+            ) {
+                return;
+            }
+            this._repairAudioCandidates = audioCandidates;
+            this._repairAudioCandidateIndex = 0;
+            this._repairAudioRetrying = false;
+            this._setRepairAudioSourceCandidate(0);
+        }
+
+        async _toggleRepairAudioPlayback() {
+            if (!this._speakerRepairEnabled()) {
+                return;
+            }
+            this._syncRepairAudioSource();
+            const audio = this._ensureRepairAudio();
+            if (!audio.src) {
+                this._showBanner('No recording audio is available for speaker repair.', 'error');
+                return;
+            }
+            try {
+                if (!audio.paused) {
+                    this._repairAudioShouldResume = false;
+                    audio.pause();
+                    return;
+                }
+                this._repairAudioShouldResume = true;
+                await audio.play();
+            } catch (error) {
+                this.state.repairAudioPlaying = false;
+                this._repairAudioShouldResume = false;
+                this._renderRepairScrubber();
+                this._showBanner(error?.message || 'Unable to play recording audio.', 'error');
+            }
+        }
+
+        _seekRepairAudio(nextTime) {
+            const numericTime = Number.parseFloat(nextTime);
+            const duration = this._repairAudioEffectiveDuration();
+            const clampedTime = Math.max(0, duration > 0 ? Math.min(duration, numericTime) : numericTime);
+            const audio = this._ensureRepairAudio();
+            if (audio.src) {
+                audio.currentTime = Number.isFinite(clampedTime) ? clampedTime : 0;
+            }
+            this.state.repairAudioCurrentTime = Number.isFinite(clampedTime) ? clampedTime : 0;
+            this._renderRepairScrubber();
+        }
+
+        _stopRepairAudio({ resetPosition = false } = {}) {
+            if (!this._repairAudio) {
+                if (resetPosition) {
+                    this.state.repairAudioCurrentTime = 0;
+                    this.state.repairAudioPlaying = false;
+                }
+                return;
+            }
+            if (!this._repairAudio.paused) {
+                this._repairAudio.pause();
+            }
+            if (resetPosition) {
+                this._repairAudio.currentTime = 0;
+                this.state.repairAudioCurrentTime = 0;
+                this.state.repairAudioDuration = 0;
+                this._repairAudioSource = '';
+                this._repairAudioCandidates = [];
+                this._repairAudioCandidateIndex = 0;
+                this._repairAudioRetrying = false;
+            }
+            this._repairAudioShouldResume = false;
+            this.state.repairAudioPlaying = false;
+        }
+
+        _renderRepairScrubber() {
+            if (!this.elements?.repairSeek) {
+                return;
+            }
+            const duration = this._repairAudioEffectiveDuration();
+            const currentTime = Math.max(0, Number(this.state.repairAudioCurrentTime || 0));
+            const audioAvailable = this._repairAudioAvailable();
+            this.elements.repairPlaybackBtn.textContent = this.state.repairAudioPlaying ? 'Pause Audio' : 'Play Audio';
+            this.elements.repairSeek.max = duration > 0 ? String(duration) : '0';
+            this.elements.repairSeek.value = duration > 0 ? String(Math.min(currentTime, duration)) : '0';
+            this.elements.repairPlaybackBtn.disabled = !audioAvailable;
+            this.elements.repairSeek.disabled = !audioAvailable || duration <= 0;
+            this.elements.repairBackBtn.disabled = !audioAvailable || duration <= 0;
+            this.elements.repairForwardBtn.disabled = !audioAvailable || duration <= 0;
+            this.elements.repairTime.textContent = `${this._formatDuration(Math.floor(currentTime))} / ${this._formatDuration(Math.floor(duration))}`;
         }
 
         _renderSummary() {
@@ -1443,9 +2033,14 @@
                 return entry.transcript_version_id === this.state.selectedTranscriptVersionId;
             });
             const showTranscriptControls = Boolean(
-                workspace?.debug_retranscribe_enabled
+                (workspace?.debug_retranscribe_enabled || this._speakerRepairEnabled())
                 && transcriptVersions.length > 0
             );
+            if (this.elements.transcriptCopy) {
+                this.elements.transcriptCopy.textContent = this._speakerRepairEnabled()
+                    ? 'Re-run Transcript rebuilds the transcript from audio. For missing or late-arriving speakers, use Re-run Speaker Detection in the Speakers tab.'
+                    : 'The transcript stays available while you review speakers and summary changes.';
+            }
 
             this.elements.transcriptVersionRow.classList.toggle('hidden', !showTranscriptControls);
             if (showTranscriptControls) {
@@ -1520,7 +2115,7 @@
         }
 
         async _startRetranscription() {
-            if (!this.state.sessionId || !this.state.workspace?.debug_retranscribe_enabled || this.state.jobStatus) {
+            if (!this.state.sessionId || !(this.state.workspace?.debug_retranscribe_enabled || this._speakerRepairEnabled()) || this.state.jobStatus) {
                 return;
             }
             const confirmed = window.confirm(
@@ -1533,6 +2128,364 @@
                 mode: 'retranscribe',
                 sourceTranscriptVersionId: this.state.selectedTranscriptVersionId,
             });
+        }
+
+        async _startSpeakerRepair() {
+            if (!this.state.sessionId || this.state.jobStatus || !this._speakerRepairEnabled()) {
+                return;
+            }
+            const expectedSpeakerCount = Number.parseInt(this.state.repairExpectedSpeakerCount, 10);
+            if (!Number.isInteger(expectedSpeakerCount) || expectedSpeakerCount < 2 || expectedSpeakerCount > 10) {
+                this._showBanner('Enter an expected speaker count between 2 and 10.', 'error');
+                return;
+            }
+            const confirmed = window.confirm(
+                'Create a new transcript version that re-runs speaker detection from the audio? Older transcript and summary versions will be preserved.'
+            );
+            if (!confirmed) {
+                return;
+            }
+            await this._startSpeakerDetectionJob({
+                sourceTranscriptVersionId: this.state.selectedTranscriptVersionId,
+                expectedSpeakerCount,
+            });
+        }
+
+        async _mergeSpeakerClusters() {
+            if (!this.state.sessionId || this.state.jobStatus || !this._speakerRepairEnabled()) {
+                return;
+            }
+            if (!this.state.selectedTranscriptVersionId || !this.state.mergeSourceCluster || !this.state.mergeTargetCluster) {
+                this._showBanner('Select two different speaker clusters to merge.', 'error');
+                return;
+            }
+
+            try {
+                const saved = await this._flushSettingsSave();
+                if (saved === false) {
+                    return;
+                }
+                if (this.state.speakerDirty) {
+                    await this._saveSpeakerAssignments();
+                }
+            } catch (error) {
+                this._showBanner(error?.message || 'Failed to save workspace changes.', 'error');
+                return;
+            }
+
+            const confirmed = window.confirm(
+                'Create a new transcript version that merges these speaker clusters? Older transcript and summary versions will be preserved.'
+            );
+            if (!confirmed) {
+                return;
+            }
+
+            try {
+                const payload = await this._jsonRequest(
+                    `/api/recordings/${this.state.sessionId}/transcript-versions/${this.state.selectedTranscriptVersionId}/speaker-clusters/merge`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            source_speaker_cluster: this.state.mergeSourceCluster,
+                            target_speaker_cluster: this.state.mergeTargetCluster,
+                        }),
+                    },
+                    {
+                        timeoutMs: 12000,
+                        retries: 0,
+                        retryOnNetworkError: false,
+                        networkErrorMessage: 'Workspace network request failed',
+                        httpErrorMessage: 'Failed to merge speaker clusters.',
+                        logLabel: 'workspace_merge_speaker_clusters',
+                    }
+                );
+                this.state.selectedTranscriptVersionId = payload?.transcript_version?.id || this.state.selectedTranscriptVersionId;
+                await this._loadWorkspace({ keepTab: false });
+                this.state.activeTab = 'speakers';
+                this._render();
+                this._showBanner('Merged speaker transcript version ready. Future speaker detection still starts from the audio.', 'success');
+            } catch (error) {
+                this._showBanner(error?.message || 'Failed to merge speaker clusters.', 'error');
+            }
+        }
+
+        async _startSpeakerDetectionJob(options = {}) {
+            if (!this.state.sessionId || this.state.jobStatus?.kind === 'speaker_detection') {
+                return;
+            }
+            const expectedSpeakerCount = Number.isInteger(options.expectedSpeakerCount)
+                ? options.expectedSpeakerCount
+                : null;
+            const saved = await this._flushSettingsSave();
+            if (saved === false) {
+                return;
+            }
+            if (this.state.speakerDirty) {
+                await this._saveSpeakerAssignments();
+            }
+            this.state.jobStatus = {
+                kind: 'speaker_detection',
+                status: 'queued',
+                stage: 'queued',
+                message: 'Queued',
+                overall_progress: 0,
+            };
+            this._renderProgress();
+            this._renderFooter();
+
+            try {
+                const payload = await window.SidekickNetwork.json(
+                    `/api/recordings/${this.state.sessionId}/speaker-detection-job`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            source_transcript_version_id: options.sourceTranscriptVersionId || null,
+                            expected_speaker_count: expectedSpeakerCount,
+                        }),
+                    },
+                    {
+                        timeoutMs: 10000,
+                        retries: 0,
+                        retryOnNetworkError: false,
+                        networkErrorMessage: 'Workspace network request failed',
+                        httpErrorMessage: 'Failed to start speaker detection.',
+                        logLabel: 'workspace_start_speaker_detection',
+                    }
+                );
+                this.state.jobStatus = {
+                    ...this.state.jobStatus,
+                    job_id: payload.job_id,
+                    transcript_version_id: payload.transcript_version_id || null,
+                    transcript_version_number: payload.transcript_version_number || null,
+                };
+                this._renderProgress();
+                this._renderFooter();
+                await this._pollJob('speaker_detection', payload.job_id, `/api/speaker-detection-jobs/${payload.job_id}`);
+            } catch (error) {
+                this.state.jobStatus = null;
+                this._render();
+                this._showBanner(error?.message || 'Failed to start speaker detection.', 'error');
+            }
+        }
+
+        async _promoteSpeakerProfile(cluster) {
+            const speakerCluster = String(cluster || '').trim();
+            if (!speakerCluster || !this.state.sessionId || !this.state.selectedTranscriptVersionId) {
+                return;
+            }
+            const displayName = String(this.state.speakerAssignments[speakerCluster] || '').trim();
+            if (!displayName) {
+                this._showBanner('Enter a speaker name before adding a profile.', 'error');
+                return;
+            }
+            if (this.state.savingSpeakerProfileClusters.has(speakerCluster) || this.state.queuedSpeakerProfileClusters.has(speakerCluster)) {
+                return;
+            }
+            this.state.queuedSpeakerProfileClusters.add(speakerCluster);
+            this._render();
+            const queueRun = async () => {
+                this.state.queuedSpeakerProfileClusters.delete(speakerCluster);
+                this.state.savingSpeakerProfileClusters.add(speakerCluster);
+                this._render();
+                try {
+                    const saved = await this._flushSettingsSave();
+                    if (saved === false) {
+                        return;
+                    }
+                    if (this.state.speakerDirty) {
+                        await this._saveSpeakerAssignments();
+                    }
+                    const payload = await this._jsonRequest(
+                        `/api/recordings/${this.state.sessionId}/transcript-versions/${this.state.selectedTranscriptVersionId}/speaker-profiles/promote`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                speaker_cluster: speakerCluster,
+                                display_name: displayName,
+                            }),
+                        },
+                        {
+                            timeoutMs: 90000,
+                            retries: 0,
+                            retryOnNetworkError: false,
+                            networkErrorMessage: 'Workspace network request failed',
+                            httpErrorMessage: 'Failed to save speaker profile.',
+                            logLabel: 'workspace_promote_speaker_profile',
+                        }
+                    );
+                    this._applySpeakerProfileSaveResult(speakerCluster, payload);
+                    this.state.activeTab = 'speakers';
+                    this._render();
+                    const totalExamples = Number(payload?.profile?.example_count || 0);
+                    this._showBanner(
+                        `Saved ${displayName} to local speaker profiles${totalExamples ? ` (${totalExamples} example${totalExamples === 1 ? '' : 's'})` : ''}.`,
+                        'success'
+                    );
+                } catch (error) {
+                    this._showBanner(error?.message || 'Failed to save speaker profile.', 'error');
+                } finally {
+                    this.state.savingSpeakerProfileClusters.delete(speakerCluster);
+                    this._render();
+                }
+            };
+            this._speakerProfileSaveQueue = this._speakerProfileSaveQueue
+                .catch(() => {})
+                .then(queueRun);
+            await this._speakerProfileSaveQueue;
+        }
+
+        async _correctSpeakerProfileMatch(cluster) {
+            const speakerCluster = String(cluster || '').trim();
+            if (!speakerCluster || !this.state.sessionId || !this.state.selectedTranscriptVersionId) {
+                return;
+            }
+            if (this.state.correctingSpeakerProfileClusters.has(speakerCluster)) {
+                return;
+            }
+
+            const acceptedProfileId = String(this.state.matchCorrectionTargetProfileId || '').trim() || null;
+            const acceptedDisplayName = acceptedProfileId === '__new__'
+                ? String(this.state.matchCorrectionNewProfileName || '').trim()
+                : '';
+            if (!acceptedProfileId || (acceptedProfileId === '__new__' && !acceptedDisplayName)) {
+                this._showBanner('Choose a profile or enter a new profile name.', 'error');
+                return;
+            }
+
+            this.state.correctingSpeakerProfileClusters.add(speakerCluster);
+            this._renderSpeakers();
+            try {
+                const saved = await this._flushSettingsSave();
+                if (saved === false) {
+                    return;
+                }
+                if (this.state.speakerDirty) {
+                    await this._saveSpeakerAssignments();
+                }
+                const payload = await this._jsonRequest(
+                    `/api/recordings/${this.state.sessionId}/transcript-versions/${this.state.selectedTranscriptVersionId}/speaker-profiles/correct-match`,
+                    {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            speaker_cluster: speakerCluster,
+                            accepted_profile_id: acceptedProfileId && acceptedProfileId !== '__new__' ? acceptedProfileId : null,
+                            accepted_display_name: acceptedProfileId === '__new__' ? acceptedDisplayName : null,
+                        }),
+                    },
+                    {
+                        timeoutMs: 90000,
+                        retries: 0,
+                        retryOnNetworkError: false,
+                        networkErrorMessage: 'Workspace network request failed',
+                        httpErrorMessage: 'Failed to change matched speaker profile.',
+                        logLabel: 'workspace_correct_speaker_profile_match',
+                    }
+                );
+                this._applySpeakerMatchCorrectionResult(speakerCluster, payload);
+                this._render();
+                this._showBanner(
+                    payload?.warning
+                        || (payload?.example_saved
+                            ? `Changed match to ${payload?.override?.speaker_profile_name || 'the selected profile'} and saved a new voice example.`
+                            : `Changed match to ${payload?.override?.speaker_profile_name || 'the selected profile'}.`),
+                    'success'
+                );
+            } catch (error) {
+                this._showBanner(error?.message || 'Failed to change matched speaker profile.', 'error');
+            } finally {
+                this.state.correctingSpeakerProfileClusters.delete(speakerCluster);
+                this._renderSpeakers();
+            }
+        }
+
+        _applySpeakerProfileSaveResult(cluster, payload) {
+            const profile = payload?.profile;
+            if (!profile || !this.state.workspace?.speaker_review) {
+                return;
+            }
+            const speakers = Array.isArray(this.state.workspace.speaker_review.speakers)
+                ? this.state.workspace.speaker_review.speakers
+                : [];
+            const updatedSpeakers = speakers.map((speaker) => {
+                if (speaker.speaker_cluster !== cluster) {
+                    return speaker;
+                }
+                return {
+                    ...speaker,
+                    matched_profile_id: profile.id,
+                    matched_profile_name: profile.display_name,
+                    matched_profile_example_count: Number(profile.example_count || 0),
+                    profile_suggestion_state: 'matched',
+                };
+            });
+            this.state.workspace.speaker_review.speakers = updatedSpeakers;
+
+            const knownProfiles = Array.isArray(this.state.workspace.speaker_review.known_profiles)
+                ? this.state.workspace.speaker_review.known_profiles.slice()
+                : [];
+            const existingIndex = knownProfiles.findIndex((item) => item.id === profile.id);
+            if (existingIndex >= 0) {
+                knownProfiles[existingIndex] = profile;
+            } else {
+                knownProfiles.push(profile);
+                knownProfiles.sort((left, right) => String(left.display_name || '').localeCompare(String(right.display_name || '')));
+            }
+            this.state.workspace.speaker_review.known_profiles = knownProfiles;
+        }
+
+        _applySpeakerMatchCorrectionResult(cluster, payload) {
+            const profile = payload?.profile;
+            const speakerCard = payload?.speaker_card;
+            if (!profile || !this.state.workspace?.speaker_review) {
+                return;
+            }
+            const knownProfiles = Array.isArray(this.state.workspace.speaker_review.known_profiles)
+                ? this.state.workspace.speaker_review.known_profiles.slice()
+                : [];
+            const existingIndex = knownProfiles.findIndex((item) => item.id === profile.id);
+            if (existingIndex >= 0) {
+                knownProfiles[existingIndex] = profile;
+            } else {
+                knownProfiles.push(profile);
+                knownProfiles.sort((left, right) => String(left.display_name || '').localeCompare(String(right.display_name || '')));
+            }
+            this.state.workspace.speaker_review.known_profiles = knownProfiles;
+
+            if (speakerCard) {
+                const speakers = Array.isArray(this.state.workspace.speaker_review.speakers)
+                    ? this.state.workspace.speaker_review.speakers
+                    : [];
+                this.state.workspace.speaker_review.speakers = speakers.map((speaker) => (
+                    speaker.speaker_cluster === cluster ? { ...speaker, ...speakerCard } : speaker
+                ));
+            } else {
+                this._applySpeakerProfileSaveResult(cluster, payload);
+            }
+
+            const correctedName = String(payload?.override?.speaker_profile_name || profile.display_name || '').trim();
+            if (correctedName) {
+                this.state.speakerAssignments[cluster] = correctedName;
+                if (this.state.workspace?.transcript) {
+                    this.state.workspace.transcript = this.state.workspace.transcript.map((segment) => (
+                        segment.speaker_cluster === cluster
+                            ? { ...segment, speaker: correctedName }
+                            : segment
+                    ));
+                }
+            }
+            this.state.matchCorrectionCluster = null;
+            this.state.matchCorrectionTargetProfileId = '';
+            this.state.matchCorrectionNewProfileName = '';
+            this.state.speakerDirty = false;
+            if (this.state.workspace?.speaker_review) {
+                const requiresInput = this._speakerReviewStillRequiresInput();
+                this.state.workspace.speaker_review.required = requiresInput;
+                this.state.workspace.speaker_review.completed = !requiresInput;
+            }
         }
 
         _applySearchFocus() {
@@ -1692,7 +2645,9 @@
             }
             if (this.state.jobStatus) {
                 return {
-                    label: this.state.jobStatus.stage === 'transcribing' ? 'Transcribing...' : 'Working...',
+                    label: this.state.jobStatus.kind === 'speaker_detection'
+                        ? 'Detecting Speakers...'
+                        : (this.state.jobStatus.stage === 'transcribing' ? 'Transcribing...' : 'Working...'),
                     disabled: true,
                     action: 'none',
                 };
@@ -1911,6 +2866,13 @@
             }
             const mode = options.mode || 'initial';
             const sourceTranscriptVersionId = options.sourceTranscriptVersionId || null;
+            const expectedSpeakerCount = Number.isInteger(options.expectedSpeakerCount)
+                ? options.expectedSpeakerCount
+                : null;
+            const lateJoinOffsetSeconds = Number.isFinite(options.lateJoinOffsetSeconds)
+                ? options.lateJoinOffsetSeconds
+                : null;
+            const repairReason = options.repairReason || null;
             this.state.jobStatus = {
                 kind: 'transcription',
                 status: 'queued',
@@ -1919,6 +2881,7 @@
                 transcription_progress: 0,
                 summarization_progress: 0,
                 overall_progress: 0,
+                requested_repair_reason: repairReason,
             };
             this._renderProgress();
             this._renderFooter();
@@ -1930,6 +2893,9 @@
                     this._render();
                     return;
                 }
+                if (this.state.speakerDirty) {
+                    await this._saveSpeakerAssignments();
+                }
 
                 console.info('[workspace_open:auto_transcription:start]', { sessionId: this.state.sessionId });
                 const response = await window.SidekickNetwork.request(`/api/recordings/${this.state.sessionId}/transcription-job`, {
@@ -1938,6 +2904,9 @@
                     body: JSON.stringify({
                         mode,
                         source_transcript_version_id: sourceTranscriptVersionId,
+                        expected_speaker_count: expectedSpeakerCount,
+                        late_join_offset_seconds: lateJoinOffsetSeconds,
+                        repair_reason: repairReason,
                     }),
                 }, {
                     timeoutMs: 10000,
@@ -2052,21 +3021,41 @@
                     this._renderFooter();
 
                     if (job.status === 'completed') {
+                        const requestedRepairReason = this.state.jobStatus?.requested_repair_reason || null;
                         this.state.jobStatus = null;
-                        if (kind === 'transcription' && job.transcript_version_id) {
+                        if ((kind === 'transcription' || kind === 'speaker_detection') && job.transcript_version_id) {
                             this.state.selectedTranscriptVersionId = job.transcript_version_id;
+                            if (requestedRepairReason || kind === 'speaker_detection') {
+                                this.state.repairPanelOpen = false;
+                                this.state.repairAudioCurrentTime = 0;
+                                this.state.repairAudioPlaying = false;
+                                this._stopRepairAudio({ resetPosition: true });
+                            }
                         }
                         await this._loadWorkspace({ keepTab: false });
                         if (kind === 'summary' && this.state.workspace?.draft_summary?.id) {
                             this.state.selectedSavedSummaryId = this.state.workspace.draft_summary.id;
                             this._resetSettingsEditSession();
                         }
-                        this.state.activeTab = kind === 'transcription'
+                        this.state.activeTab = (kind === 'transcription' || kind === 'speaker_detection')
                             ? (this.state.workspace?.state?.requires_speaker_review ? 'speakers' : 'summary')
                             : 'summary';
                         this._render();
+                        const activeTranscriptVersion = this.state.workspace?.active_transcript_version || null;
+                        const repairStrategy = activeTranscriptVersion?.repair_strategy || null;
+                        const actualSpeakerCount = activeTranscriptVersion?.diarization_actual_speaker_count ?? null;
                         this._showBanner(
-                            kind === 'transcription' ? 'Transcript ready.' : 'Summary draft ready.',
+                            (kind === 'transcription' || kind === 'speaker_detection')
+                                ? (
+                                    (requestedRepairReason || kind === 'speaker_detection')
+                                        ? (
+                                            repairStrategy === 'full_file_exact_count'
+                                                ? `Speaker detection reran using the current transcript timing${actualSpeakerCount != null ? ` and returned ${actualSpeakerCount} speakers` : ''}. Review the new transcript version.`
+                                                : `Speaker detection reran from the audio. Review the new transcript version.`
+                                        )
+                                        : 'Transcript ready.'
+                                )
+                                : 'Summary draft ready.',
                             'success'
                         );
                         return;
@@ -2835,11 +3824,39 @@
             return window.SidekickNetwork.json(url, options, config);
         }
 
+        _workspaceLoadTimeoutMs() {
+            return window.__SIDEKICK_API_BASE ? 15000 : 8000;
+        }
+
+        _apiMediaCandidates(url) {
+            return window.SidekickNetwork.mediaCandidates(url);
+        }
+
         _resolveApiMediaUrl(url) {
             if (!url) {
                 return '';
             }
             return window.SidekickNetwork.resolveUrl(url);
+        }
+
+        _setRepairAudioSourceCandidate(candidateIndex) {
+            const audio = this._ensureRepairAudio();
+            const candidateUrl = this._repairAudioCandidates[candidateIndex] || '';
+            if (!candidateUrl) {
+                return;
+            }
+            this._repairAudioCandidateIndex = candidateIndex;
+            this._repairAudioRetrying = false;
+            this._repairAudioSource = candidateUrl;
+            audio.pause();
+            if (audio.src !== candidateUrl) {
+                audio.src = candidateUrl;
+            }
+            audio.load();
+            this.state.repairAudioPlaying = false;
+            this.state.repairAudioCurrentTime = 0;
+            this.state.repairAudioDuration = this._repairAudioEffectiveDuration();
+            this._renderRepairScrubber();
         }
 
         _revertOpenState() {

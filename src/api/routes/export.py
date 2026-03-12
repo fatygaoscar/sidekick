@@ -56,6 +56,8 @@ from src.summarization.prompts import (
     normalize_template_key,
 )
 from src.transcription.manager import TranscriptionManager
+from src.transcription.audio_decode import media_duration_seconds
+from src.transcription.speaker_profiles import apply_profile_matches_to_segments, match_segments_to_profiles
 from src.workspace_chat.service import WorkspaceChatService
 
 
@@ -331,6 +333,9 @@ class CreateDraftRequest(BaseModel):
 class StartTranscriptionJobRequest(BaseModel):
     mode: str = "initial"
     source_transcript_version_id: Optional[str] = None
+    expected_speaker_count: Optional[int] = None
+    late_join_offset_seconds: Optional[float] = None
+    repair_reason: Optional[str] = None
 
 
 class StartSummaryJobRequest(BaseModel):
@@ -670,7 +675,10 @@ async def _transcribe_and_persist_session(
     primary_meeting_id: str,
     transcript_version_id: str,
     progress_callback: Optional[TranscriptionProgressCallback] = None,
-) -> tuple[str, float]:
+    expected_speaker_count: int | None = None,
+    late_join_offset_seconds: float | None = None,
+    repair_reason: str | None = None,
+) -> tuple[str, float, dict[str, object]]:
     audio_path = get_session_audio_path(session_id)
     if not audio_path and session.ended_at:
         audio_path = ensure_session_audio_path(session_id)
@@ -690,13 +698,37 @@ async def _transcribe_and_persist_session(
         transcription_result = await transcription_manager.transcribe_file(
             audio_path,
             progress_callback=on_transcription_progress,
+            expected_speaker_count=expected_speaker_count,
+            late_join_offset_seconds=late_join_offset_seconds,
+            repair_reason=repair_reason,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to transcribe recording audio: {str(e)}")
+        message = str(e)
+        if message.startswith("Speaker detection could not confidently separate"):
+            raise HTTPException(status_code=422, detail=message)
+        raise HTTPException(status_code=500, detail=f"Failed to transcribe recording audio: {message}")
 
     full_text = transcription_result.text.strip()
     if not full_text:
         raise HTTPException(status_code=400, detail="No speech detected in recording audio")
+
+    try:
+        list_profiles = getattr(repository, "list_speaker_profiles", None)
+        profiles = await list_profiles() if callable(list_profiles) else []
+        if profiles and transcription_result.segments:
+            profile_matches = match_segments_to_profiles(
+                audio_path=str(audio_path),
+                segments=transcription_result.segments,
+                hf_token=get_settings().hf_token,
+                profiles=profiles,
+            )
+            if profile_matches:
+                apply_profile_matches_to_segments(
+                    segments=transcription_result.segments,
+                    matches=profile_matches,
+                )
+    except Exception as exc:
+        logger.warning("Speaker profile matching skipped during transcription: %s", exc)
 
     segment_count = 0
     with pipeline_step(logger, "segment_building", segments=len(transcription_result.segments)) as step:
@@ -747,7 +779,34 @@ async def _transcribe_and_persist_session(
         if asyncio.iscoroutine(maybe_awaitable):
             await maybe_awaitable
 
-    return transcript, transcription_result.duration_seconds
+    return transcript, transcription_result.duration_seconds, {
+        "diarization_backend": transcription_result.diarization_backend,
+        "diarization_model": transcription_result.diarization_model,
+        "repair_strategy": transcription_result.repair_strategy,
+        "diarization_actual_speaker_count": transcription_result.diarization_actual_speaker_count,
+        "diarization_unassigned_segment_count": transcription_result.diarization_unassigned_segment_count,
+        "diarization_unassigned_segment_ratio": transcription_result.diarization_unassigned_segment_ratio,
+        "repair_quality_gate_passed": transcription_result.repair_quality_gate_passed,
+    }
+
+
+def _normalize_transcription_persist_result(result) -> tuple[str, float, dict[str, object]]:
+    if isinstance(result, tuple):
+        if len(result) == 3:
+            transcript, duration_seconds, metadata = result
+            return str(transcript), float(duration_seconds), dict(metadata or {})
+        if len(result) == 2:
+            transcript, duration_seconds = result
+            return str(transcript), float(duration_seconds), {
+                "diarization_backend": None,
+                "diarization_model": None,
+                "repair_strategy": None,
+                "diarization_actual_speaker_count": None,
+                "diarization_unassigned_segment_count": None,
+                "diarization_unassigned_segment_ratio": None,
+                "repair_quality_gate_passed": None,
+            }
+    raise ValueError("Unexpected transcription persist result shape")
 
 
 def _build_transcript_from_segments(segments: list) -> tuple[str, float]:
@@ -928,24 +987,28 @@ async def _run_export_pipeline(
                 custom_prompt=request_payload.custom_prompt,
             )
         with pipeline_step(logger, "transcription") as step:
-            full_transcript, audio_duration_seconds = await _transcribe_and_persist_session(
-                session_id=session_id,
-                session=session,
-                repository=repository,
-                transcription_manager=transcription_manager,
-                primary_meeting_id=primary_meeting_id,
-                transcript_version_id=str(transcript_version.id),
-                progress_callback=(
-                    lambda stage, message, progress: (
-                        progress_callback(stage, message, progress, 0.0) if progress_callback else None
-                    )
-                ),
+            full_transcript, audio_duration_seconds, transcription_meta = _normalize_transcription_persist_result(
+                await _transcribe_and_persist_session(
+                    session_id=session_id,
+                    session=session,
+                    repository=repository,
+                    transcription_manager=transcription_manager,
+                    primary_meeting_id=primary_meeting_id,
+                    transcript_version_id=str(transcript_version.id),
+                    progress_callback=(
+                        lambda stage, message, progress: (
+                            progress_callback(stage, message, progress, 0.0) if progress_callback else None
+                        )
+                    ),
+                )
             )
             await repository.update_transcript_version(
                 str(transcript_version.id),
                 status="ready",
                 transcription_backend=str(get_settings().transcription_backend),
                 transcription_model=getattr(transcription_manager.active_engine, "name", None),
+                diarization_backend=transcription_meta.get("diarization_backend"),
+                diarization_model=transcription_meta.get("diarization_model"),
             )
             step["chars"] = len(full_transcript)
 
@@ -1190,6 +1253,9 @@ async def _run_transcription_job(
     transcription_manager: TranscriptionManager,
     mode: str = "initial",
     source_transcript_version_id: str | None = None,
+    expected_speaker_count: int | None = None,
+    late_join_offset_seconds: float | None = None,
+    repair_reason: str | None = None,
 ) -> None:
     def update_progress(stage: str, message: str, transcription_progress: Optional[float]) -> None:
         updates = {
@@ -1239,11 +1305,16 @@ async def _run_transcription_job(
                 version_number=next_version_number,
                 parent_version_id=source_version.id if source_version else None,
                 status="processing",
-                source_type="retranscription",
+                source_type="retranscription_repair" if repair_reason else "retranscription",
                 template_key=normalize_template_key(
                     source_version.template_key if source_version and source_version.template_key else DEFAULT_TEMPLATE_KEY
                 ),
                 custom_prompt=source_version.custom_prompt if source_version else None,
+                diarization_expected_speaker_count=expected_speaker_count,
+                diarization_late_join_offset_seconds=late_join_offset_seconds,
+                diarization_repair_source_version_id=source_version.id if source_version else None,
+                repair_strategy=None,
+                repair_reason=repair_reason,
             )
             transcript_version = created_version
             created_version_id = created_version.id
@@ -1274,14 +1345,19 @@ async def _run_transcription_job(
             transcript_version_number=int(transcript_version.version_number),
         )
 
-        await _transcribe_and_persist_session(
-            session_id=session_id,
-            session=session,
-            repository=repository,
-            transcription_manager=transcription_manager,
-            primary_meeting_id=primary_meeting_id,
-            transcript_version_id=str(transcript_version.id),
-            progress_callback=update_progress,
+        _, _, transcription_meta = _normalize_transcription_persist_result(
+            await _transcribe_and_persist_session(
+                session_id=session_id,
+                session=session,
+                repository=repository,
+                transcription_manager=transcription_manager,
+                primary_meeting_id=primary_meeting_id,
+                transcript_version_id=str(transcript_version.id),
+                progress_callback=update_progress,
+                expected_speaker_count=expected_speaker_count,
+                late_join_offset_seconds=late_join_offset_seconds,
+                repair_reason=repair_reason,
+            )
         )
 
         await repository.update_transcript_version(
@@ -1289,10 +1365,13 @@ async def _run_transcription_job(
             status="ready",
             transcription_backend=str(get_settings().transcription_backend),
             transcription_model=getattr(transcription_manager.active_engine, "name", None),
-            diarization_backend="whisperx" if get_settings().diarization_enabled else None,
-            diarization_model="pyannote/speaker-diarization-community-1"
-            if get_settings().diarization_enabled
-            else None,
+            diarization_backend=transcription_meta.get("diarization_backend"),
+            diarization_model=transcription_meta.get("diarization_model"),
+            repair_strategy=transcription_meta.get("repair_strategy"),
+            diarization_actual_speaker_count=transcription_meta.get("diarization_actual_speaker_count"),
+            diarization_unassigned_segment_count=transcription_meta.get("diarization_unassigned_segment_count"),
+            diarization_unassigned_segment_ratio=transcription_meta.get("diarization_unassigned_segment_ratio"),
+            repair_quality_gate_passed=transcription_meta.get("repair_quality_gate_passed"),
         )
 
         _update_transcription_job(
@@ -1681,6 +1760,41 @@ async def start_transcription_job(
         )
 
     request = request or StartTranscriptionJobRequest()
+    normalized_mode = str(request.mode or "initial").strip().lower()
+    if normalized_mode not in {"initial", "retranscribe"}:
+        raise HTTPException(status_code=422, detail="Unsupported transcription mode")
+
+    if normalized_mode != "retranscribe":
+        if request.expected_speaker_count is not None or request.late_join_offset_seconds is not None or request.repair_reason:
+            raise HTTPException(status_code=422, detail="Repair options are only supported for retranscribe mode")
+    else:
+        if request.repair_reason and request.expected_speaker_count is None:
+            raise HTTPException(status_code=422, detail="expected_speaker_count is required for repair runs")
+        if request.expected_speaker_count is not None:
+            if int(request.expected_speaker_count) < 2 or int(request.expected_speaker_count) > 10:
+                raise HTTPException(status_code=422, detail="expected_speaker_count must be between 2 and 10")
+        if request.repair_reason is not None:
+            normalized_reason = str(request.repair_reason).strip().lower()
+            if normalized_reason not in {"missing_speaker", "split_speaker"}:
+                raise HTTPException(status_code=422, detail="Unsupported repair reason")
+            request.repair_reason = normalized_reason
+        if request.late_join_offset_seconds is not None and float(request.late_join_offset_seconds) < 0:
+            raise HTTPException(status_code=422, detail="late_join_offset_seconds must be non-negative")
+        if request.late_join_offset_seconds is not None:
+            duration_seconds = None
+            audio_path = get_session_audio_path(session_id)
+            if not audio_path and session.ended_at:
+                audio_path = ensure_session_audio_path(session_id)
+            if audio_path:
+                try:
+                    duration_seconds = media_duration_seconds(audio_path)
+                except Exception as exc:
+                    logger.warning("Unable to read audio duration for speaker repair validation: %s", exc)
+            if duration_seconds is None and session.ended_at:
+                duration_seconds = max(0.0, float((session.ended_at - session.started_at).total_seconds()))
+            if duration_seconds is not None and float(request.late_join_offset_seconds) > duration_seconds:
+                raise HTTPException(status_code=422, detail="late_join_offset_seconds exceeds recording duration")
+
     job = _create_transcription_job(session_id)
     job_id = str(job["job_id"])
     _update_transcription_job(job_id, message="Starting transcription")
@@ -1691,8 +1805,11 @@ async def start_transcription_job(
             session_id=session_id,
             repository=repository,
             transcription_manager=transcription_manager,
-            mode=request.mode,
+            mode=normalized_mode,
             source_transcript_version_id=request.source_transcript_version_id,
+            expected_speaker_count=request.expected_speaker_count,
+            late_join_offset_seconds=request.late_join_offset_seconds,
+            repair_reason=request.repair_reason,
         )
     )
     _TRANSCRIPTION_TASKS[job_id] = task

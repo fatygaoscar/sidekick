@@ -126,6 +126,9 @@ class WhisperAPIEngine(TranscriptionEngine):
         file_path: str | Path,
         language: str | None = None,
         progress_callback: Optional[ProgressCallback] = None,
+        expected_speaker_count: int | None = None,
+        late_join_offset_seconds: float | None = None,
+        repair_reason: str | None = None,
     ) -> FileTranscriptionResult:
         """Transcribe an audio file and normalize it into authoritative segment form."""
         from faster_whisper.audio import decode_audio

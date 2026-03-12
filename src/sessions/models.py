@@ -47,6 +47,12 @@ class Session(Base):
     important_markers: Mapped[list["ImportantMarker"]] = relationship(
         "ImportantMarker", back_populates="session", cascade="all, delete-orphan"
     )
+    speaker_profile_overrides: Mapped[list["TranscriptSpeakerProfileOverride"]] = relationship(
+        "TranscriptSpeakerProfileOverride", back_populates="session", cascade="all, delete-orphan"
+    )
+    speaker_profile_examples: Mapped[list["SpeakerProfileExample"]] = relationship(
+        "SpeakerProfileExample", back_populates="session", cascade="all, delete-orphan"
+    )
 
 
 class Meeting(Base):
@@ -94,6 +100,15 @@ class TranscriptVersion(Base):
     transcription_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     diarization_backend: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     diarization_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    diarization_expected_speaker_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    diarization_late_join_offset_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    diarization_repair_source_version_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    repair_strategy: Mapped[Optional[str]] = mapped_column(String(48), nullable=True)
+    diarization_actual_speaker_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    diarization_unassigned_segment_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    diarization_unassigned_segment_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    repair_quality_gate_passed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    repair_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     template_key: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     custom_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     speaker_review_required: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -110,6 +125,12 @@ class TranscriptVersion(Base):
     )
     summaries: Mapped[list["Summary"]] = relationship(
         "Summary", back_populates="transcript_version"
+    )
+    speaker_profile_overrides: Mapped[list["TranscriptSpeakerProfileOverride"]] = relationship(
+        "TranscriptSpeakerProfileOverride", back_populates="transcript_version", cascade="all, delete-orphan"
+    )
+    speaker_profile_examples: Mapped[list["SpeakerProfileExample"]] = relationship(
+        "SpeakerProfileExample", back_populates="transcript_version"
     )
 
 
@@ -139,6 +160,88 @@ class TranscriptSegment(Base):
     session: Mapped["Session"] = relationship("Session", back_populates="segments")
     transcript_version: Mapped[Optional["TranscriptVersion"]] = relationship(
         "TranscriptVersion", back_populates="segments"
+    )
+
+
+class SpeakerProfile(Base):
+    """Local speaker identity profile backed by one or more embedding examples."""
+
+    __tablename__ = "speaker_profiles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    normalized_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    examples: Mapped[list["SpeakerProfileExample"]] = relationship(
+        "SpeakerProfileExample", back_populates="speaker_profile", cascade="all, delete-orphan"
+    )
+    transcript_overrides: Mapped[list["TranscriptSpeakerProfileOverride"]] = relationship(
+        "TranscriptSpeakerProfileOverride", back_populates="speaker_profile", cascade="all, delete-orphan"
+    )
+
+
+class TranscriptSpeakerProfileOverride(Base):
+    """Explicit profile correction for one speaker cluster in one transcript version."""
+
+    __tablename__ = "transcript_speaker_profile_overrides"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), nullable=False)
+    transcript_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("transcript_versions.id"), nullable=False
+    )
+    speaker_cluster: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    speaker_profile_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("speaker_profiles.id"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    session: Mapped["Session"] = relationship("Session", back_populates="speaker_profile_overrides")
+    transcript_version: Mapped["TranscriptVersion"] = relationship(
+        "TranscriptVersion", back_populates="speaker_profile_overrides"
+    )
+    speaker_profile: Mapped["SpeakerProfile"] = relationship(
+        "SpeakerProfile", back_populates="transcript_overrides"
+    )
+
+
+class SpeakerProfileExample(Base):
+    """Confirmed speaker-example clip and embedding for a local speaker profile."""
+
+    __tablename__ = "speaker_profile_examples"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    speaker_profile_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("speaker_profiles.id"), nullable=False
+    )
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), nullable=False)
+    transcript_version_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("transcript_versions.id"), nullable=True
+    )
+    speaker_cluster: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    clip_start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    clip_end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="manual_assignment")
+    embedding_model: Mapped[str] = mapped_column(String(128), nullable=False)
+    embedding_vector_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    speaker_profile: Mapped["SpeakerProfile"] = relationship(
+        "SpeakerProfile", back_populates="examples"
+    )
+    session: Mapped["Session"] = relationship("Session", back_populates="speaker_profile_examples")
+    transcript_version: Mapped[Optional["TranscriptVersion"]] = relationship(
+        "TranscriptVersion", back_populates="speaker_profile_examples"
     )
 
 
@@ -262,6 +365,7 @@ class AppSettings(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     workspace_chat_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    speaker_repair_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     summarization_backend: Mapped[str] = mapped_column(String(32), default="ollama", nullable=False)
     recording_capture_mode: Mapped[str] = mapped_column(
         String(32), default="whole_room", nullable=False

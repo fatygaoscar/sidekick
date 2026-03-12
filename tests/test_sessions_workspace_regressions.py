@@ -28,6 +28,13 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
         self.assertTrue(hasattr(self.sessions, "UpdateRecordingSettingsRequest"))
         self.assertTrue(hasattr(self.sessions, "UpdateSpeakerAssignmentsRequest"))
 
+    def _request_with_diarization(self, diarization_runtime=None):
+        return SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(diarization_runtime=diarization_runtime or {})
+            )
+        )
+
     def test_summary_not_stale_when_review_was_never_required(self):
         meeting = SimpleNamespace(
             speaker_review_required=False,
@@ -250,11 +257,648 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
 
         self.assertIsNone(normalized_custom_prompt)
 
+    def test_promote_speaker_profile_does_not_create_orphan_profile_when_embedding_fails(self):
+        session = SimpleNamespace(id="session-1", ended_at=datetime.now(UTC))
+        transcript_version = SimpleNamespace(id="tv-1")
+        segment = SimpleNamespace(
+            speaker_cluster="SPEAKER_00",
+            speaker="SPEAKER_00",
+            start_time=1.0,
+            end_time=5.0,
+        )
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            get_transcript_version_for_session=AsyncMock(return_value=transcript_version),
+            get_speaker_profile_by_name=AsyncMock(return_value=None),
+            create_speaker_profile=AsyncMock(),
+            list_speaker_profile_examples=AsyncMock(return_value=[]),
+            get_segments=AsyncMock(return_value=[segment]),
+            add_speaker_profile_example=AsyncMock(),
+        )
+        request = self.sessions.PromoteSpeakerProfileRequest(
+            speaker_cluster="SPEAKER_00",
+            display_name="Greg",
+        )
+
+        with patch.object(self.sessions, "get_session_audio_path", return_value="/tmp/test.wav"), patch.object(
+            self.sessions,
+            "build_profile_example",
+            side_effect=RuntimeError("embedding failed"),
+        ):
+            with self.assertRaises(HTTPException) as error_context:
+                asyncio.run(
+                    self.sessions.promote_speaker_profile_example(
+                        session_id="session-1",
+                        transcript_version_id="tv-1",
+                        request=request,
+                        repository=repository,
+                    )
+                )
+
+        self.assertEqual(error_context.exception.status_code, 500)
+        repository.create_speaker_profile.assert_not_awaited()
+        repository.add_speaker_profile_example.assert_not_awaited()
+
+    def test_build_speaker_cards_prefers_transcript_override_over_name_inferred_match(self):
+        segment = SimpleNamespace(
+            speaker_cluster="SPEAKER_00",
+            speaker="Oscar",
+            start_time=1.0,
+            end_time=5.0,
+            text="Let me hand it over to Greg.",
+        )
+        name_inferred_profile = SimpleNamespace(
+            id="profile-oscar",
+            display_name="Oscar",
+            examples=[],
+        )
+        override_profile = SimpleNamespace(
+            id="profile-greg",
+            display_name="Greg",
+            examples=[SimpleNamespace(id="example-1")],
+        )
+        override = SimpleNamespace(
+            speaker_cluster="SPEAKER_00",
+            speaker_profile=override_profile,
+        )
+
+        cards = self.sessions._build_speaker_cards(
+            [segment],
+            "session-1",
+            "tv-1",
+            speaker_profiles=[name_inferred_profile, override_profile],
+            speaker_profile_overrides=[override],
+        )
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["matched_profile_id"], "profile-greg")
+        self.assertEqual(cards[0]["matched_profile_name"], "Greg")
+        self.assertEqual(cards[0]["matched_profile_example_count"], 1)
+        self.assertEqual(cards[0]["match_source"], "override")
+        self.assertTrue(cards[0]["can_change_match"])
+
+    def test_build_legacy_speaker_cluster_updates_assigns_stable_first_seen_clusters(self):
+        segments = [
+            SimpleNamespace(id="seg-1", speaker="Greg", speaker_cluster=None),
+            SimpleNamespace(id="seg-2", speaker="Ashlee", speaker_cluster=None),
+            SimpleNamespace(id="seg-3", speaker="Greg", speaker_cluster=None),
+        ]
+
+        updates = self.sessions._build_legacy_speaker_cluster_updates(segments)
+
+        self.assertEqual(
+            updates,
+            {
+                "seg-1": {"speaker_cluster": "LEGACY_SPEAKER_00"},
+                "seg-2": {"speaker_cluster": "LEGACY_SPEAKER_01"},
+                "seg-3": {"speaker_cluster": "LEGACY_SPEAKER_00"},
+            },
+        )
+
+    def test_build_legacy_speaker_cluster_updates_reuses_existing_named_cluster(self):
+        segments = [
+            SimpleNamespace(id="seg-1", speaker="Greg", speaker_cluster="SPEAKER_07"),
+            SimpleNamespace(id="seg-2", speaker="Greg", speaker_cluster=None),
+            SimpleNamespace(id="seg-3", speaker="Ashlee", speaker_cluster=None),
+        ]
+
+        updates = self.sessions._build_legacy_speaker_cluster_updates(segments)
+
+        self.assertEqual(
+            updates,
+            {
+                "seg-2": {"speaker_cluster": "SPEAKER_07"},
+                "seg-3": {"speaker_cluster": "LEGACY_SPEAKER_00"},
+            },
+        )
+
+    def test_update_recording_speakers_keeps_review_incomplete_when_multiple_generic_speakers_remain(self):
+        session = SimpleNamespace(id="session-1")
+        active_version = SimpleNamespace(id="tv-1")
+        segments = [
+            SimpleNamespace(id="seg-1", speaker_cluster="SPEAKER_00", speaker="SPEAKER_00"),
+            SimpleNamespace(id="seg-2", speaker_cluster="SPEAKER_01", speaker="SPEAKER_01"),
+            SimpleNamespace(id="seg-3", speaker_cluster="SPEAKER_02", speaker="SPEAKER_02"),
+        ]
+        refreshed_segments = [
+            SimpleNamespace(id="seg-1", speaker_cluster="SPEAKER_00", speaker="Greg"),
+            SimpleNamespace(id="seg-2", speaker_cluster="SPEAKER_01", speaker="SPEAKER_01"),
+            SimpleNamespace(id="seg-3", speaker_cluster="SPEAKER_02", speaker="SPEAKER_02"),
+        ]
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            ensure_transcript_versions=AsyncMock(return_value=[active_version]),
+            get_latest_transcript_version=AsyncMock(return_value=active_version),
+            get_transcript_version_for_session=AsyncMock(return_value=active_version),
+            get_segments=AsyncMock(side_effect=[segments, refreshed_segments]),
+            update_segments_speakers=AsyncMock(),
+            list_speaker_profiles=AsyncMock(return_value=[]),
+            delete_transcript_speaker_profile_override=AsyncMock(return_value=False),
+            update_transcript_version=AsyncMock(),
+        )
+
+        payload = asyncio.run(
+            self.sessions.update_recording_speakers(
+                session_id="session-1",
+                request=self.sessions.UpdateSpeakerAssignmentsRequest(
+                    assignments={"SPEAKER_00": "Greg"},
+                    transcript_version_id="tv-1",
+                ),
+                repository=repository,
+            )
+        )
+
+        self.assertEqual(payload, {"success": True, "updated": 1})
+        update_kwargs = repository.update_transcript_version.await_args.kwargs
+        self.assertTrue(update_kwargs["speaker_review_required"])
+        self.assertIsNone(update_kwargs["speaker_review_completed_at"])
+
+    def test_update_recording_speakers_marks_review_complete_when_only_one_generic_speaker_remains(self):
+        session = SimpleNamespace(id="session-1")
+        active_version = SimpleNamespace(id="tv-1")
+        segments = [
+            SimpleNamespace(id="seg-1", speaker_cluster="SPEAKER_00", speaker="SPEAKER_00"),
+            SimpleNamespace(id="seg-2", speaker_cluster="SPEAKER_01", speaker="SPEAKER_01"),
+        ]
+        refreshed_segments = [
+            SimpleNamespace(id="seg-1", speaker_cluster="SPEAKER_00", speaker="Greg"),
+            SimpleNamespace(id="seg-2", speaker_cluster="SPEAKER_01", speaker="SPEAKER_01"),
+        ]
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            ensure_transcript_versions=AsyncMock(return_value=[active_version]),
+            get_latest_transcript_version=AsyncMock(return_value=active_version),
+            get_transcript_version_for_session=AsyncMock(return_value=active_version),
+            get_segments=AsyncMock(side_effect=[segments, refreshed_segments]),
+            update_segments_speakers=AsyncMock(),
+            list_speaker_profiles=AsyncMock(return_value=[]),
+            delete_transcript_speaker_profile_override=AsyncMock(return_value=False),
+            update_transcript_version=AsyncMock(),
+        )
+
+        payload = asyncio.run(
+            self.sessions.update_recording_speakers(
+                session_id="session-1",
+                request=self.sessions.UpdateSpeakerAssignmentsRequest(
+                    assignments={"SPEAKER_00": "Greg"},
+                    transcript_version_id="tv-1",
+                ),
+                repository=repository,
+            )
+        )
+
+        self.assertEqual(payload, {"success": True, "updated": 1})
+        update_kwargs = repository.update_transcript_version.await_args.kwargs
+        self.assertFalse(update_kwargs["speaker_review_required"])
+        self.assertIsNotNone(update_kwargs["speaker_review_completed_at"])
+
+    def test_workspace_load_normalizes_legacy_clusters_and_stale_lifecycle(self):
+        now = datetime.now(UTC)
+        session = SimpleNamespace(
+            id="session-1",
+            started_at=now - timedelta(minutes=30),
+            ended_at=now,
+            timezone_name=None,
+            timezone_offset_minutes=None,
+            has_transcription=True,
+            recording_status="starting",
+            audio_status="none",
+            audio_error=None,
+            finalized_at=None,
+        )
+        meeting = SimpleNamespace(
+            id="meeting-1",
+            title="Power BI Refinement",
+            template_key="meeting",
+            custom_prompt=None,
+        )
+        transcript_version = SimpleNamespace(
+            id="tv-1",
+            version_number=1,
+            status="ready",
+            source_type="initial_transcription",
+            repair_reason=None,
+            parent_version_id=None,
+            diarization_repair_source_version_id=None,
+            diarization_expected_speaker_count=None,
+            diarization_late_join_offset_seconds=None,
+            repair_strategy=None,
+            diarization_actual_speaker_count=None,
+            diarization_unassigned_segment_count=None,
+            diarization_unassigned_segment_ratio=None,
+            repair_quality_gate_passed=None,
+            created_at=now - timedelta(minutes=10),
+            template_key="meeting",
+            custom_prompt=None,
+            speaker_review_required=False,
+            speaker_review_completed_at=now - timedelta(minutes=5),
+        )
+        legacy_segments = [
+            SimpleNamespace(
+                id="seg-1",
+                speaker_cluster=None,
+                speaker="Greg",
+                start_time=1.0,
+                end_time=4.0,
+                text="Greg starts the discussion.",
+                is_important=False,
+            ),
+            SimpleNamespace(
+                id="seg-2",
+                speaker_cluster=None,
+                speaker="Ashlee",
+                start_time=5.0,
+                end_time=9.0,
+                text="Ashlee responds.",
+                is_important=False,
+            ),
+            SimpleNamespace(
+                id="seg-3",
+                speaker_cluster=None,
+                speaker="Greg",
+                start_time=10.0,
+                end_time=13.0,
+                text="Greg follows up.",
+                is_important=False,
+            ),
+        ]
+        normalized_segments = [
+            SimpleNamespace(
+                id="seg-1",
+                speaker_cluster="LEGACY_SPEAKER_00",
+                speaker="Greg",
+                start_time=1.0,
+                end_time=4.0,
+                text="Greg starts the discussion.",
+                is_important=False,
+            ),
+            SimpleNamespace(
+                id="seg-2",
+                speaker_cluster="LEGACY_SPEAKER_01",
+                speaker="Ashlee",
+                start_time=5.0,
+                end_time=9.0,
+                text="Ashlee responds.",
+                is_important=False,
+            ),
+            SimpleNamespace(
+                id="seg-3",
+                speaker_cluster="LEGACY_SPEAKER_00",
+                speaker="Greg",
+                start_time=10.0,
+                end_time=13.0,
+                text="Greg follows up.",
+                is_important=False,
+            ),
+        ]
+        chat_thread = SimpleNamespace(id="thread-1")
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            get_primary_meeting=AsyncMock(return_value=meeting),
+            ensure_transcript_versions=AsyncMock(return_value=[transcript_version]),
+            get_transcript_version_for_session=AsyncMock(return_value=transcript_version),
+            get_latest_transcript_version=AsyncMock(side_effect=[transcript_version, transcript_version]),
+            get_segments=AsyncMock(side_effect=[legacy_segments, normalized_segments]),
+            update_segments_speaker_metadata=AsyncMock(),
+            update_session_recording_state=AsyncMock(
+                return_value=SimpleNamespace(**{**session.__dict__, "recording_status": "ready", "audio_status": "finalized"})
+            ),
+            get_summaries=AsyncMock(return_value=[]),
+            get_draft_summary=AsyncMock(return_value=None),
+            get_app_settings=AsyncMock(
+                return_value=SimpleNamespace(
+                    workspace_chat_enabled=True,
+                    speaker_repair_enabled=False,
+                )
+            ),
+            list_speaker_profiles=AsyncMock(return_value=[]),
+            list_transcript_speaker_profile_overrides=AsyncMock(return_value=[]),
+        )
+
+        with patch.object(
+            self.sessions,
+            "get_settings",
+            return_value=SimpleNamespace(
+                obsidian_vault_path="",
+                enable_debug_retranscribe=False,
+            ),
+        ), patch.object(
+            self.sessions,
+            "get_session_audio_path",
+            return_value=Path("/tmp/session-1.webm"),
+        ), patch.object(
+            self.sessions.WorkspaceChatService,
+            "list_messages",
+            AsyncMock(return_value=(chat_thread, [])),
+        ):
+            payload = asyncio.run(
+                self.sessions.get_recording_workspace(
+                    "session-1",
+                    repository=repository,
+                )
+            )
+
+        repository.update_session_recording_state.assert_awaited_once()
+        lifecycle_kwargs = repository.update_session_recording_state.await_args.kwargs
+        self.assertEqual(lifecycle_kwargs["recording_status"], "ready")
+        self.assertEqual(lifecycle_kwargs["audio_status"], "finalized")
+        repository.update_segments_speaker_metadata.assert_awaited_once_with(
+            {
+                "seg-1": {"speaker_cluster": "LEGACY_SPEAKER_00"},
+                "seg-2": {"speaker_cluster": "LEGACY_SPEAKER_01"},
+                "seg-3": {"speaker_cluster": "LEGACY_SPEAKER_00"},
+            }
+        )
+        self.assertEqual(payload["recording"]["recording_status"], "ready")
+        self.assertEqual(payload["recording"]["audio_status"], "finalized")
+        self.assertEqual(payload["recording"]["segment_count"], 3)
+        self.assertEqual(payload["speaker_review"]["speakers"][0]["speaker_cluster"], "LEGACY_SPEAKER_00")
+        self.assertEqual(payload["transcript"][0]["speaker_cluster"], "LEGACY_SPEAKER_00")
+        self.assertTrue(payload["chat"]["enabled"])
+        self.assertEqual(payload["chat"]["messages"], [])
+
+    def test_correct_speaker_profile_match_updates_override_even_without_audio_example(self):
+        session = SimpleNamespace(id="session-1", ended_at=None)
+        transcript_version = SimpleNamespace(id="tv-1")
+        profile = SimpleNamespace(id="profile-greg", display_name="Greg", examples=[])
+        source_segments = [
+            SimpleNamespace(
+                speaker_cluster="SPEAKER_00",
+                speaker="Oscar",
+                start_time=1.0,
+                end_time=5.0,
+                text="Greg joined the call.",
+            ),
+            SimpleNamespace(
+                speaker_cluster="SPEAKER_01",
+                speaker="SPEAKER_01",
+                start_time=6.0,
+                end_time=8.0,
+                text="Second unresolved speaker.",
+            ),
+            SimpleNamespace(
+                speaker_cluster="SPEAKER_02",
+                speaker="SPEAKER_02",
+                start_time=9.0,
+                end_time=11.0,
+                text="Third unresolved speaker.",
+            ),
+        ]
+        refreshed_segments = [
+            SimpleNamespace(
+                speaker_cluster="SPEAKER_00",
+                speaker="Greg",
+                start_time=1.0,
+                end_time=5.0,
+                text="Greg joined the call.",
+            ),
+            SimpleNamespace(
+                speaker_cluster="SPEAKER_01",
+                speaker="SPEAKER_01",
+                start_time=6.0,
+                end_time=8.0,
+                text="Second unresolved speaker.",
+            ),
+            SimpleNamespace(
+                speaker_cluster="SPEAKER_02",
+                speaker="SPEAKER_02",
+                start_time=9.0,
+                end_time=11.0,
+                text="Third unresolved speaker.",
+            ),
+        ]
+        override = SimpleNamespace(
+            speaker_cluster="SPEAKER_00",
+            speaker_profile=profile,
+        )
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            get_transcript_version_for_session=AsyncMock(return_value=transcript_version),
+            get_speaker_profile=AsyncMock(return_value=profile),
+            get_segments=AsyncMock(side_effect=[source_segments, refreshed_segments]),
+            set_transcript_speaker_profile_override=AsyncMock(),
+            update_transcript_version_cluster_speaker_name=AsyncMock(),
+            list_speaker_profile_examples=AsyncMock(return_value=[]),
+            add_speaker_profile_example=AsyncMock(),
+            list_speaker_profiles=AsyncMock(return_value=[profile]),
+            list_transcript_speaker_profile_overrides=AsyncMock(return_value=[override]),
+            update_transcript_version=AsyncMock(),
+        )
+
+        with patch.object(self.sessions, "get_session_audio_path", return_value=None):
+            payload = asyncio.run(
+                self.sessions.correct_speaker_profile_match(
+                    session_id="session-1",
+                    transcript_version_id="tv-1",
+                    request=self.sessions.CorrectSpeakerProfileMatchRequest(
+                        speaker_cluster="SPEAKER_00",
+                        accepted_profile_id="profile-greg",
+                    ),
+                    repository=repository,
+                )
+            )
+
+        self.assertTrue(payload["success"])
+        self.assertFalse(payload["example_saved"])
+        self.assertIn("audio was unavailable", payload["warning"])
+        self.assertEqual(payload["override"]["speaker_profile_name"], "Greg")
+        self.assertEqual(payload["speaker_card"]["matched_profile_name"], "Greg")
+        self.assertEqual(payload["speaker_card"]["match_source"], "override")
+        repository.set_transcript_speaker_profile_override.assert_awaited_once()
+        repository.update_transcript_version_cluster_speaker_name.assert_awaited_once_with(
+            transcript_version_id="tv-1",
+            speaker_cluster="SPEAKER_00",
+            speaker_name="Greg",
+        )
+        update_kwargs = repository.update_transcript_version.await_args.kwargs
+        self.assertTrue(update_kwargs["speaker_review_required"])
+        self.assertIsNone(update_kwargs["speaker_review_completed_at"])
+        repository.add_speaker_profile_example.assert_not_awaited()
+
+    def test_correct_speaker_profile_match_adds_positive_example_when_available(self):
+        session = SimpleNamespace(id="session-1", ended_at=datetime.now(UTC))
+        transcript_version = SimpleNamespace(id="tv-1")
+        profile = SimpleNamespace(id="profile-greg", display_name="Greg", examples=[])
+        updated_profile = SimpleNamespace(
+            id="profile-greg",
+            display_name="Greg",
+            examples=[SimpleNamespace(id="example-1")],
+        )
+        segment = SimpleNamespace(
+            speaker_cluster="SPEAKER_00",
+            speaker="SPEAKER_00",
+            start_time=3.0,
+            end_time=7.5,
+            text="This is Greg speaking.",
+        )
+        refreshed_segment = SimpleNamespace(
+            speaker_cluster="SPEAKER_00",
+            speaker="Greg",
+            start_time=3.0,
+            end_time=7.5,
+            text="This is Greg speaking.",
+        )
+        override = SimpleNamespace(
+            speaker_cluster="SPEAKER_00",
+            speaker_profile=updated_profile,
+        )
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            get_transcript_version_for_session=AsyncMock(return_value=transcript_version),
+            get_speaker_profile_by_name=AsyncMock(return_value=profile),
+            get_segments=AsyncMock(side_effect=[[segment], [refreshed_segment]]),
+            set_transcript_speaker_profile_override=AsyncMock(),
+            update_transcript_version_cluster_speaker_name=AsyncMock(),
+            list_speaker_profile_examples=AsyncMock(return_value=[]),
+            add_speaker_profile_example=AsyncMock(return_value=SimpleNamespace(id="example-1")),
+            get_speaker_profile=AsyncMock(return_value=updated_profile),
+            list_speaker_profiles=AsyncMock(return_value=[updated_profile]),
+            list_transcript_speaker_profile_overrides=AsyncMock(return_value=[override]),
+            update_transcript_version=AsyncMock(),
+        )
+
+        with patch.object(self.sessions, "get_session_audio_path", return_value="/tmp/test.wav"), patch.object(
+            self.sessions,
+            "build_profile_example",
+            return_value={"embedding": [0.1, 0.2], "segment": segment},
+        ), patch.object(
+            self.sessions,
+            "get_embedding_model_name",
+            return_value="embedding-model",
+        ):
+            payload = asyncio.run(
+                self.sessions.correct_speaker_profile_match(
+                    session_id="session-1",
+                    transcript_version_id="tv-1",
+                    request=self.sessions.CorrectSpeakerProfileMatchRequest(
+                        speaker_cluster="SPEAKER_00",
+                        accepted_display_name="Greg",
+                    ),
+                    repository=repository,
+                )
+            )
+
+        self.assertTrue(payload["success"])
+        self.assertTrue(payload["example_saved"])
+        self.assertEqual(payload["example_id"], "example-1")
+        self.assertIsNone(payload["warning"])
+        repository.add_speaker_profile_example.assert_awaited_once()
+        add_call = repository.add_speaker_profile_example.await_args.kwargs
+        self.assertEqual(add_call["speaker_profile_id"], "profile-greg")
+        self.assertEqual(add_call["source_type"], "manual_match_correction")
+        self.assertEqual(add_call["clip_start_seconds"], 3.0)
+        self.assertEqual(add_call["clip_end_seconds"], 7.5)
+        update_kwargs = repository.update_transcript_version.await_args.kwargs
+        self.assertFalse(update_kwargs["speaker_review_required"])
+        self.assertIsNotNone(update_kwargs["speaker_review_completed_at"])
+
+    def test_speaker_profile_example_routes_serialize_and_delete_examples(self):
+        profile = SimpleNamespace(id="profile-1", display_name="Greg", examples=[SimpleNamespace(id="example-1")])
+        example = SimpleNamespace(
+            id="example-1",
+            session_id="session-1",
+            transcript_version_id="tv-1",
+            speaker_cluster="SPEAKER_00",
+            clip_start_seconds=2.5,
+            clip_end_seconds=6.0,
+            duration_seconds=3.5,
+            source_type="manual_match_correction",
+            created_at=datetime.now(UTC),
+        )
+        repository = SimpleNamespace(
+            get_speaker_profile=AsyncMock(return_value=profile),
+            list_speaker_profile_examples=AsyncMock(return_value=[example]),
+            get_primary_meeting=AsyncMock(return_value=SimpleNamespace(title="Goals Touchbase")),
+            get_speaker_profile_example=AsyncMock(return_value=example),
+            delete_speaker_profile_example=AsyncMock(return_value=True),
+        )
+
+        payload = asyncio.run(
+            self.sessions.get_speaker_profile_examples(
+                profile_id="profile-1",
+                repository=repository,
+            )
+        )
+
+        self.assertEqual(payload["profile"]["display_name"], "Greg")
+        self.assertEqual(len(payload["examples"]), 1)
+        self.assertEqual(payload["examples"][0]["recording_title"], "Goals Touchbase")
+        self.assertTrue(payload["examples"][0]["clip_url"].endswith("/audio"))
+
+        delete_payload = asyncio.run(
+            self.sessions.delete_speaker_profile_example(
+                example_id="example-1",
+                repository=repository,
+            )
+        )
+        self.assertEqual(delete_payload, {"success": True})
+        repository.delete_speaker_profile_example.assert_awaited_once_with("example-1")
+
+    def test_promote_speaker_profile_rejects_when_profile_has_max_examples(self):
+        session = SimpleNamespace(id="session-1", ended_at=datetime.now(UTC))
+        transcript_version = SimpleNamespace(id="tv-1")
+        profile = SimpleNamespace(id="profile-1")
+        segment = SimpleNamespace(
+            speaker_cluster="SPEAKER_00",
+            speaker="SPEAKER_00",
+            start_time=1.0,
+            end_time=5.0,
+        )
+        examples = [
+            SimpleNamespace(clip_start_seconds=float(index), clip_end_seconds=float(index) + 3.0)
+            for index in range(self.sessions.MAX_PROFILE_EXAMPLES)
+        ]
+        repository = SimpleNamespace(
+            get_session=AsyncMock(return_value=session),
+            get_transcript_version_for_session=AsyncMock(return_value=transcript_version),
+            get_speaker_profile_by_name=AsyncMock(return_value=profile),
+            list_speaker_profile_examples=AsyncMock(return_value=examples),
+            get_segments=AsyncMock(return_value=[segment]),
+            add_speaker_profile_example=AsyncMock(),
+        )
+        request = self.sessions.PromoteSpeakerProfileRequest(
+            speaker_cluster="SPEAKER_00",
+            display_name="Greg",
+        )
+
+        with patch.object(self.sessions, "get_session_audio_path", return_value="/tmp/test.wav"):
+            with self.assertRaises(HTTPException) as error_context:
+                asyncio.run(
+                    self.sessions.promote_speaker_profile_example(
+                        session_id="session-1",
+                        transcript_version_id="tv-1",
+                        request=request,
+                        repository=repository,
+                    )
+                )
+
+        self.assertEqual(error_context.exception.status_code, 409)
+        repository.add_speaker_profile_example.assert_not_awaited()
+
+    def test_delete_speaker_profile_rejects_non_empty_profile(self):
+        profile = SimpleNamespace(id="profile-1", examples=[SimpleNamespace(id="example-1")])
+        repository = SimpleNamespace(
+            get_speaker_profile=AsyncMock(return_value=profile),
+            delete_empty_speaker_profile=AsyncMock(),
+        )
+
+        with self.assertRaises(HTTPException) as error_context:
+            asyncio.run(
+                self.sessions.delete_speaker_profile(
+                    profile_id="profile-1",
+                    repository=repository,
+                )
+            )
+
+        self.assertEqual(error_context.exception.status_code, 409)
+        repository.delete_empty_speaker_profile.assert_not_awaited()
+
     def test_get_app_settings_returns_serialized_flags(self):
         repository = SimpleNamespace(
             get_app_settings=AsyncMock(
                 return_value=SimpleNamespace(
                     workspace_chat_enabled=True,
+                    speaker_repair_enabled=True,
                     summarization_backend="openai",
                     recording_capture_mode="whole_room",
                 )
@@ -271,6 +915,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
 
         payload = asyncio.run(
             self.sessions.get_app_settings(
+                request=self._request_with_diarization(),
                 repository=repository,
                 summarization_manager=summarization_manager,
             )
@@ -281,6 +926,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             {
                 "settings": {
                     "workspace_chat_enabled": True,
+                    "speaker_repair_enabled": True,
                     "summarization_backend": "openai",
                     "recording_capture_mode": "whole_room",
                 },
@@ -290,6 +936,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
                     "applies_to": "new_requests_only",
                     "providers": {},
                 },
+                "diarization": {},
             },
         )
 
@@ -298,6 +945,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             asyncio.run(
                 self.sessions.update_app_settings(
                     self.sessions.UpdateAppSettingsRequest(),
+                    request_http=self._request_with_diarization(),
                     repository=SimpleNamespace(update_app_settings=AsyncMock()),
                     summarization_manager=SimpleNamespace(
                         active_backend_type=self.sessions.SumBackendEnum.OLLAMA
@@ -312,6 +960,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             update_app_settings=AsyncMock(
                 return_value=SimpleNamespace(
                     workspace_chat_enabled=True,
+                    speaker_repair_enabled=True,
                     summarization_backend="ollama",
                     recording_capture_mode="whole_room",
                 )
@@ -329,7 +978,11 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
 
         payload = asyncio.run(
             self.sessions.update_app_settings(
-                self.sessions.UpdateAppSettingsRequest(workspace_chat_enabled=True),
+                self.sessions.UpdateAppSettingsRequest(
+                    workspace_chat_enabled=True,
+                    speaker_repair_enabled=True,
+                ),
+                request_http=self._request_with_diarization(),
                 repository=repository,
                 summarization_manager=summarization_manager,
             )
@@ -340,6 +993,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             {
                 "settings": {
                     "workspace_chat_enabled": True,
+                    "speaker_repair_enabled": True,
                     "summarization_backend": "ollama",
                     "recording_capture_mode": "whole_room",
                 },
@@ -349,6 +1003,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
                     "applies_to": "new_requests_only",
                     "providers": {},
                 },
+                "diarization": {},
             },
         )
         repository.update_app_settings.assert_awaited_once()
@@ -358,6 +1013,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             update_app_settings=AsyncMock(
                 return_value=SimpleNamespace(
                     workspace_chat_enabled=False,
+                    speaker_repair_enabled=False,
                     summarization_backend="openai",
                     recording_capture_mode="whole_room",
                 )
@@ -379,6 +1035,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
         payload = asyncio.run(
             self.sessions.update_app_settings(
                 self.sessions.UpdateAppSettingsRequest(summarization_backend="openai"),
+                request_http=self._request_with_diarization(),
                 repository=repository,
                 summarization_manager=summarization_manager,
             )
@@ -393,6 +1050,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             update_app_settings=AsyncMock(
                 return_value=SimpleNamespace(
                     workspace_chat_enabled=False,
+                    speaker_repair_enabled=False,
                     summarization_backend="ollama",
                     recording_capture_mode="single_speaker",
                 )
@@ -411,6 +1069,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
         payload = asyncio.run(
             self.sessions.update_app_settings(
                 self.sessions.UpdateAppSettingsRequest(recording_capture_mode="single_speaker"),
+                request_http=self._request_with_diarization(),
                 repository=repository,
                 summarization_manager=summarization_manager,
             )
@@ -429,6 +1088,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             asyncio.run(
                 self.sessions.update_app_settings(
                     self.sessions.UpdateAppSettingsRequest(recording_capture_mode="unsupported"),
+                    request_http=self._request_with_diarization(),
                     repository=repository,
                     summarization_manager=summarization_manager,
                 )
@@ -450,6 +1110,7 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             asyncio.run(
                 self.sessions.update_app_settings(
                     self.sessions.UpdateAppSettingsRequest(summarization_backend="openai"),
+                    request_http=self._request_with_diarization(),
                     repository=repository,
                     summarization_manager=summarization_manager,
                 )
@@ -800,6 +1461,57 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             self.assertEqual(response.job_id, active_job["job_id"])
             self.assertEqual(response.status, "running")
             self.assertEqual(len(self.export._TRANSCRIPTION_JOBS), 1)
+        finally:
+            self.export._TRANSCRIPTION_JOBS.clear()
+            self.export._TRANSCRIPTION_JOBS.update(original_jobs)
+
+    def test_start_transcription_job_validates_late_join_against_audio_duration(self):
+        original_jobs = dict(self.export._TRANSCRIPTION_JOBS)
+        try:
+            self.export._TRANSCRIPTION_JOBS.clear()
+            session = SimpleNamespace(
+                id="session-1",
+                meetings=[],
+                started_at=datetime.now(UTC),
+                ended_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+            repository = SimpleNamespace(get_session=AsyncMock(return_value=session))
+            scheduled_coroutines = []
+
+            class _TaskDouble:
+                def add_done_callback(self, _callback):
+                    return None
+
+            def fake_create_task(coro):
+                scheduled_coroutines.append(coro)
+                coro.close()
+                return _TaskDouble()
+
+            with patch.object(self.export, "get_session_audio_path", return_value=Path("/tmp/session-1.webm")), patch.object(
+                self.export,
+                "media_duration_seconds",
+                return_value=1500.0,
+            ), patch.object(
+                self.export.asyncio,
+                "create_task",
+                side_effect=fake_create_task,
+            ):
+                response = asyncio.run(
+                    self.export.start_transcription_job(
+                        "session-1",
+                        request=self.export.StartTranscriptionJobRequest(
+                            mode="retranscribe",
+                            expected_speaker_count=3,
+                            late_join_offset_seconds=1100.0,
+                            repair_reason="missing_speaker",
+                        ),
+                        repository=repository,
+                        transcription_manager=SimpleNamespace(),
+                    )
+                )
+
+            self.assertEqual(response.status, "queued")
+            self.assertEqual(len(scheduled_coroutines), 1)
         finally:
             self.export._TRANSCRIPTION_JOBS.clear()
             self.export._TRANSCRIPTION_JOBS.update(original_jobs)
@@ -1583,6 +2295,83 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
             cards[0]["clip_url"],
             "/api/recordings/session-1/speaker-clips/SPEAKER_00/audio?transcript_version_id=tv-1",
         )
+
+    def test_speaker_cards_prefer_representative_segment_over_short_greeting(self):
+        segments = [
+            SimpleNamespace(
+                id="seg-1",
+                start_time=10.0,
+                end_time=10.3,
+                text="Hi.",
+                speaker="SPEAKER_00",
+                speaker_cluster="SPEAKER_00",
+                is_important=False,
+            ),
+            SimpleNamespace(
+                id="seg-2",
+                start_time=12.0,
+                end_time=16.5,
+                text="Let's walk through the targets and open questions.",
+                speaker="SPEAKER_00",
+                speaker_cluster="SPEAKER_00",
+                is_important=False,
+            ),
+        ]
+
+        cards = self.sessions._build_speaker_cards(segments, "session-1", "tv-1")
+
+        self.assertEqual(cards[0]["preview_text"], "Let's walk through the targets and open questions.")
+        self.assertAlmostEqual(cards[0]["clip_start"], 11.75)
+        self.assertAlmostEqual(cards[0]["clip_end"], 16.5)
+
+    def test_serialize_transcript_version_includes_repair_metadata_and_labels(self):
+        version = SimpleNamespace(
+            id="tv-2",
+            version_number=2,
+            source_type="retranscription_repair",
+            repair_reason="missing_speaker",
+            diarization_repair_source_version_id="tv-1",
+            diarization_expected_speaker_count=3,
+            diarization_late_join_offset_seconds=120.0,
+            repair_strategy="full_file_exact_count",
+            diarization_actual_speaker_count=3,
+            diarization_unassigned_segment_count=2,
+            diarization_unassigned_segment_ratio=0.01,
+            repair_quality_gate_passed=True,
+            parent_version_id="tv-1",
+            status="ready",
+            created_at=datetime.now(UTC),
+        )
+
+        payload = self.sessions._serialize_transcript_version(version, "tv-2")
+
+        self.assertEqual(payload["label"], "v2 (Repaired)")
+        self.assertTrue(payload["is_repaired_version"])
+        self.assertEqual(payload["derived_from_transcript_version_id"], "tv-1")
+        self.assertEqual(payload["diarization_expected_speaker_count"], 3)
+        self.assertEqual(payload["repair_strategy"], "full_file_exact_count")
+        self.assertEqual(payload["diarization_actual_speaker_count"], 3)
+        self.assertEqual(payload["diarization_unassigned_segment_count"], 2)
+        self.assertAlmostEqual(payload["diarization_unassigned_segment_ratio"], 0.01)
+        self.assertTrue(payload["repair_quality_gate_passed"])
+
+    def test_serialize_settings_payload_includes_diarization_runtime(self):
+        settings = SimpleNamespace(
+            workspace_chat_enabled=False,
+            speaker_repair_enabled=True,
+            summarization_backend="ollama",
+            recording_capture_mode="whole_room",
+        )
+        summarization_manager = SimpleNamespace(runtime_state=lambda: {"selected_backend": "ollama"})
+
+        payload = self.sessions._serialize_settings_payload(
+            settings,
+            summarization_manager,
+            {"enabled": True, "ready": True, "model": "pyannote/speaker-diarization-community-1", "device": "cuda", "error": None},
+        )
+
+        self.assertEqual(payload["diarization"]["model"], "pyannote/speaker-diarization-community-1")
+        self.assertTrue(payload["diarization"]["ready"])
 
     def test_ensure_speaker_clip_generates_cached_wav(self):
         session_id = "clip-test-session"

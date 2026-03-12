@@ -19,6 +19,18 @@
         return `${apiBase}${url}`;
     }
 
+    function mediaCandidates(url) {
+        if (typeof url !== 'string' || !url) {
+            return [];
+        }
+        const candidates = [url];
+        const resolvedUrl = resolveUrl(url);
+        if (resolvedUrl && resolvedUrl !== url) {
+            candidates.push(resolvedUrl);
+        }
+        return candidates.filter((candidate, index) => candidate && candidates.indexOf(candidate) === index);
+    }
+
     function normalizeErrorMessage(error, fallbackMessage = 'Network request failed') {
         if (error?.name === 'AbortError') {
             return 'Network request timed out';
@@ -127,5 +139,6 @@
         sleep,
         normalizeErrorMessage,
         resolveUrl,
+        mediaCandidates,
     };
 })();

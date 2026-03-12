@@ -5,6 +5,7 @@
     --bg: #0a0a0a;
     --bg-elevated: #141414;
     --bg-card: #1a1a1a;
+    --bg-subtle: #101010;
     --text: #e0e0e0;
     --text-dim: #707070;
     --text-muted: #505050;
@@ -1119,6 +1120,48 @@ textarea.form-input {
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--text-muted);
+}
+
+.settings-example-review {
+    margin-top: 12px;
+}
+
+.settings-example-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.settings-example-item {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg-subtle);
+}
+
+.settings-example-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: var(--text-dim);
+}
+
+.settings-example-item audio {
+    width: 100%;
+    max-width: 100%;
+}
+
+.settings-example-actions {
+    display: flex;
+    justify-content: flex-start;
+}
+
+.settings-example-empty {
+    color: var(--text-dim);
+    font-size: 13px;
 }
 
 .settings-toggle {
@@ -2614,11 +2657,126 @@ textarea.form-input {
     gap: 10px;
 }
 
+.speaker-match-correction {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg-subtle);
+}
+
+.speaker-match-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
 .workspace-summary-actions {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
     margin-top: 16px;
+}
+
+.workspace-repair-panel {
+    margin-top: 16px;
+    border: 1px solid var(--border);
+    background: var(--bg-subtle);
+    padding: 16px;
+}
+
+.workspace-repair-copy {
+    margin-bottom: 8px;
+}
+
+.workspace-repair-guidance {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.workspace-repair-guidance-item {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    padding: 12px;
+    min-height: 100%;
+}
+
+.workspace-repair-guidance-title {
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 6px;
+}
+
+.workspace-repair-guidance-text {
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.55;
+}
+
+.workspace-repair-section + .workspace-repair-section {
+    margin-top: 16px;
+}
+
+.workspace-repair-section-header {
+    margin-bottom: 12px;
+}
+
+.workspace-repair-section-header h5 {
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text);
+    margin-bottom: 6px;
+}
+
+.workspace-repair-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.workspace-repair-actions {
+    margin-top: 12px;
+}
+
+.workspace-repair-scrubber {
+    border: 1px solid var(--border);
+    background: var(--bg);
+    padding: 12px;
+    margin-top: 12px;
+}
+
+.workspace-repair-scrubber-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.workspace-repair-seek {
+    width: 100%;
+    margin: 12px 0;
+}
+
+.workspace-repair-time,
+.workspace-repair-scrubber-copy {
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.workspace-repair-scrubber-copy {
+    margin-top: 8px;
+}
+
+.workspace-repair-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 16px 0;
 }
 
 .workspace-settings-reset-actions {
@@ -2817,6 +2975,11 @@ textarea.form-input {
     .speaker-card-list {
         grid-template-columns: 1fr;
     }
+
+    .workspace-repair-guidance,
+    .workspace-repair-grid {
+        grid-template-columns: 1fr;
+    }
 }
 
 @media (max-width: 700px) {
@@ -2963,6 +3126,12 @@ textarea.form-input {
         overflow: hidden;
         -webkit-box-orient: vertical;
         -webkit-line-clamp: 4;
+    }
+
+    .workspace-repair-guidance-text,
+    .workspace-repair-time,
+    .workspace-repair-scrubber-copy {
+        font-size: 12px;
     }
 
     .summary-body,

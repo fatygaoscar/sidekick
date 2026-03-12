@@ -6,8 +6,10 @@ import logging
 import os
 import re
 import urllib.parse
+import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -52,11 +54,23 @@ from src.sessions.manager import SessionManager
 from src.sessions.repository import Repository, UNSET
 from src.summarization.manager import SummarizationManager
 from src.summarization.prompts import DEFAULT_TEMPLATE_KEY, normalize_template_key
+from src.transcription.diarize import assign_speaker, diarize
+from src.transcription.speaker_profiles import (
+    apply_profile_matches_to_segments,
+    build_profile_example,
+    embedding_to_json,
+    get_embedding_model_name,
+    MAX_PROFILE_EXAMPLES,
+    match_segments_to_profiles,
+)
 from src.workspace_chat.service import WorkspaceChatService
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+_SPEAKER_DETECTION_JOBS: dict[str, dict] = {}
+_SPEAKER_DETECTION_TASKS: dict[str, asyncio.Task] = {}
+_SPEAKER_PROFILE_SAVE_SEMAPHORE = asyncio.Semaphore(1)
 
 
 async def _workspace_chat_enabled(repository: Repository) -> bool:
@@ -69,9 +83,39 @@ async def _require_workspace_chat_enabled(repository: Repository) -> None:
         raise HTTPException(status_code=404, detail="Meeting Assistant is disabled")
 
 
+async def _speaker_repair_enabled(repository: Repository) -> bool:
+    settings = await repository.get_app_settings(create_if_missing=True)
+    return bool(getattr(settings, "speaker_repair_enabled", False)) if settings else False
+
+
+async def _require_speaker_repair_enabled(repository: Repository) -> None:
+    if not await _speaker_repair_enabled(repository):
+        raise HTTPException(status_code=404, detail="Speaker repair is disabled")
+
+
+async def _list_speaker_profiles_safe(repository) -> list:
+    list_profiles = getattr(repository, "list_speaker_profiles", None)
+    if not callable(list_profiles):
+        return []
+    return await list_profiles()
+
+
+async def _list_transcript_speaker_profile_overrides_safe(
+    repository,
+    transcript_version_id: str | None,
+) -> list:
+    if not transcript_version_id:
+        return []
+    list_overrides = getattr(repository, "list_transcript_speaker_profile_overrides", None)
+    if not callable(list_overrides):
+        return []
+    return await list_overrides(transcript_version_id)
+
+
 def _serialize_app_settings(settings) -> dict:
     return {
         "workspace_chat_enabled": bool(getattr(settings, "workspace_chat_enabled", False)),
+        "speaker_repair_enabled": bool(getattr(settings, "speaker_repair_enabled", False)),
         "summarization_backend": str(
             getattr(settings, "summarization_backend", get_settings().summarization_backend.value)
         ),
@@ -84,6 +128,7 @@ def _serialize_app_settings(settings) -> dict:
 def _serialize_settings_payload(
     settings,
     summarization_manager: SummarizationManager,
+    diarization_runtime: dict[str, object] | None = None,
     diagnostics: dict[str, dict[str, object]] | None = None,
 ) -> dict:
     runtime = summarization_manager.runtime_state()
@@ -92,7 +137,204 @@ def _serialize_settings_payload(
     return {
         "settings": _serialize_app_settings(settings),
         "summarization": runtime,
+        "diarization": diarization_runtime or {},
     }
+
+
+def _utc_now_iso() -> str:
+    return to_utc_iso(datetime.now(timezone.utc)) or ""
+
+
+def _create_speaker_detection_job(
+    session_id: str,
+    *,
+    transcript_version_id: str | None = None,
+    transcript_version_number: int | None = None,
+) -> dict:
+    job_id = str(uuid.uuid4())
+    payload = {
+        "job_id": job_id,
+        "session_id": session_id,
+        "status": "queued",
+        "stage": "queued",
+        "message": "Queued",
+        "overall_progress": 0.0,
+        "error": None,
+        "transcript_version_id": transcript_version_id,
+        "transcript_version_number": transcript_version_number,
+        "created_at": _utc_now_iso(),
+        "updated_at": _utc_now_iso(),
+    }
+    _SPEAKER_DETECTION_JOBS[job_id] = payload
+    return payload
+
+
+def _update_speaker_detection_job(job_id: str, **fields) -> None:
+    job = _SPEAKER_DETECTION_JOBS.get(job_id)
+    if not job:
+        return
+    job.update(fields)
+    stage = str(job.get("stage", "queued"))
+    stage_progress = {
+        "queued": 0.0,
+        "diarizing": 0.3,
+        "matching_profiles": 0.7,
+        "writing": 0.95,
+        "completed": 1.0,
+    }
+    job["overall_progress"] = stage_progress.get(stage, float(job.get("overall_progress", 0.0)))
+    job["updated_at"] = _utc_now_iso()
+
+
+def _normalize_profile_name(value: str | None) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+async def _run_speaker_detection_job(
+    *,
+    job_id: str,
+    session_id: str,
+    source_transcript_version_id: str,
+    target_transcript_version_id: str,
+    expected_speaker_count: int | None,
+    repository: Repository,
+) -> None:
+    """Re-run diarization against stored transcript segment timing."""
+    try:
+        session = await repository.get_session(session_id)
+        if not session:
+            raise RuntimeError("Recording not found")
+
+        source_version = await repository.get_transcript_version_for_session(
+            session_id,
+            source_transcript_version_id,
+        )
+        if source_version is None:
+            raise RuntimeError("Transcript version not found")
+
+        source_segments = await repository.get_segments(
+            session_id=session_id,
+            transcript_version_id=source_version.id,
+        )
+        if not source_segments:
+            raise RuntimeError("No transcript segments are available for speaker detection.")
+
+        audio_path = get_session_audio_path(session_id)
+        if not audio_path and session.ended_at:
+            audio_path = ensure_session_audio_path(session_id)
+        if not audio_path:
+            raise RuntimeError("Recording audio is not available.")
+
+        _update_speaker_detection_job(
+            job_id,
+            status="running",
+            stage="diarizing",
+            message="Re-running speaker detection",
+        )
+        spans = await asyncio.to_thread(
+            diarize,
+            str(audio_path),
+            get_settings().hf_token,
+            None,
+            int(expected_speaker_count) if expected_speaker_count is not None else None,
+            int(expected_speaker_count) if expected_speaker_count is not None else None,
+        )
+        reassigned_segments = _assign_segments_from_spans(source_segments, spans)
+
+        _update_speaker_detection_job(
+            job_id,
+            stage="matching_profiles",
+            message="Matching known speaker profiles",
+        )
+        profiles = await _list_speaker_profiles_safe(repository)
+        profile_matches = {}
+        if profiles:
+            profile_matches = await asyncio.to_thread(
+                match_segments_to_profiles,
+                audio_path=str(audio_path),
+                segments=reassigned_segments,
+                hf_token=get_settings().hf_token,
+                profiles=profiles,
+            )
+            if profile_matches:
+                apply_profile_matches_to_segments(
+                    segments=reassigned_segments,
+                    matches=profile_matches,
+                )
+
+        _update_speaker_detection_job(
+            job_id,
+            stage="writing",
+            message="Saving new transcript version",
+        )
+        await repository.delete_segments_for_transcript_version(target_transcript_version_id)
+        for segment in reassigned_segments:
+            await repository.add_segment(
+                session_id=session_id,
+                meeting_id=source_version.meeting_id,
+                transcript_version_id=target_transcript_version_id,
+                text=str(segment["text"]).strip(),
+                start_time=float(segment["start"]),
+                end_time=float(segment["end"]),
+                speaker=segment.get("speaker"),
+                speaker_cluster=segment.get("speaker_cluster"),
+                confidence=None,
+            )
+        await repository.set_session_has_transcription(session_id, True)
+        await repository.reindex_session_transcript_search(session_id)
+
+        persisted_segments = await repository.get_segments(
+            session_id=session_id,
+            transcript_version_id=target_transcript_version_id,
+        )
+        metrics = _transcript_speaker_metrics(persisted_segments)
+        if (
+            expected_speaker_count is not None
+            and (
+                int(metrics["actual_speaker_count"]) != int(expected_speaker_count)
+                or float(metrics["unassigned_segment_ratio"]) > 0.05
+            )
+        ):
+            await repository.update_transcript_version(
+                target_transcript_version_id,
+                status="failed",
+                diarization_actual_speaker_count=metrics["actual_speaker_count"],
+                diarization_unassigned_segment_count=metrics["unassigned_segment_count"],
+                diarization_unassigned_segment_ratio=metrics["unassigned_segment_ratio"],
+                repair_quality_gate_passed=False,
+            )
+            raise RuntimeError(
+                f"Speaker detection could not confidently separate {int(expected_speaker_count)} speakers."
+            )
+
+        updated_version = await repository.update_transcript_version(
+            target_transcript_version_id,
+            status="ready",
+            speaker_review_required=_transcript_requires_speaker_review(persisted_segments),
+            speaker_review_completed_at=None,
+            diarization_actual_speaker_count=metrics["actual_speaker_count"],
+            diarization_unassigned_segment_count=metrics["unassigned_segment_count"],
+            diarization_unassigned_segment_ratio=metrics["unassigned_segment_ratio"],
+            repair_quality_gate_passed=True if expected_speaker_count is not None else None,
+        )
+        _update_speaker_detection_job(
+            job_id,
+            status="completed",
+            stage="completed",
+            message="Speaker detection complete",
+            transcript_version_id=str(updated_version.id) if updated_version else target_transcript_version_id,
+            transcript_version_number=int(updated_version.version_number) if updated_version else None,
+        )
+    except Exception as exc:
+        logger.warning("Speaker detection job failed: %s", exc)
+        await repository.update_transcript_version(target_transcript_version_id, status="failed")
+        _update_speaker_detection_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            message="Speaker detection failed",
+            error=str(exc),
+        )
 
 
 def _sanitize_title_for_filename(title: str) -> str:
@@ -201,22 +443,278 @@ def _normalize_optional_text(value: str | None) -> str:
 
 
 def _transcript_requires_speaker_review(segments: list) -> bool:
-    raw_speakers = {
+    unresolved = set()
+    for segment in segments:
+        speaker_name = getattr(segment, "speaker", None)
+        speaker_cluster = getattr(segment, "speaker_cluster", None)
+        if speaker_name and not is_generic_speaker(speaker_name):
+            continue
+        speaker_key = speaker_name or speaker_cluster
+        if is_generic_speaker(speaker_key):
+            unresolved.add(speaker_key)
+    return len(unresolved) > 1
+
+
+async def _sync_transcript_speaker_review_state(
+    repository: Repository,
+    transcript_version_id: str,
+    segments: list,
+):
+    requires_review = _transcript_requires_speaker_review(segments)
+    completed_at = datetime.now(timezone.utc) if not requires_review else None
+    return await repository.update_transcript_version(
+        transcript_version_id,
+        speaker_review_required=requires_review,
+        speaker_review_completed_at=completed_at,
+    )
+
+
+def _build_legacy_speaker_cluster_updates(segments: list) -> dict[str, dict[str, str | None]]:
+    """Backfill stable speaker_cluster ids for legacy transcript versions."""
+    existing_name_to_cluster: dict[str, str] = {}
+    assigned_name_to_cluster: dict[str, str] = {}
+    used_clusters: set[str] = set()
+    updates: dict[str, dict[str, str | None]] = {}
+
+    for segment in segments:
+        speaker_cluster = str(getattr(segment, "speaker_cluster", "") or "").strip()
+        speaker_name = str(getattr(segment, "speaker", "") or "").strip()
+        if speaker_cluster:
+            used_clusters.add(speaker_cluster)
+            if speaker_name and not is_generic_speaker(speaker_name):
+                existing_name_to_cluster.setdefault(
+                    _normalize_profile_name(speaker_name),
+                    speaker_cluster,
+                )
+
+    next_index = 0
+
+    def next_legacy_cluster() -> str:
+        nonlocal next_index
+        while True:
+            candidate = f"LEGACY_SPEAKER_{next_index:02d}"
+            next_index += 1
+            if candidate not in used_clusters:
+                used_clusters.add(candidate)
+                return candidate
+
+    for segment in segments:
+        speaker_cluster = str(getattr(segment, "speaker_cluster", "") or "").strip()
+        if speaker_cluster:
+            continue
+
+        speaker_name = str(getattr(segment, "speaker", "") or "").strip()
+        speaker_key = (
+            _normalize_profile_name(speaker_name)
+            if speaker_name and not is_generic_speaker(speaker_name)
+            else "__legacy_unknown__"
+        )
+        assigned_cluster = (
+            existing_name_to_cluster.get(speaker_key)
+            or assigned_name_to_cluster.get(speaker_key)
+        )
+        if not assigned_cluster:
+            assigned_cluster = next_legacy_cluster()
+            assigned_name_to_cluster[speaker_key] = assigned_cluster
+        updates[str(segment.id)] = {"speaker_cluster": assigned_cluster}
+
+    return updates
+
+
+async def _normalize_legacy_transcript_speaker_clusters(
+    repository: Repository,
+    *,
+    session_id: str,
+    transcript_version_id: str,
+    segments: list,
+) -> tuple[list, int]:
+    updates = _build_legacy_speaker_cluster_updates(segments)
+    if not updates:
+        return segments, 0
+
+    await repository.update_segments_speaker_metadata(updates)
+    refreshed_segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=transcript_version_id,
+    )
+    return refreshed_segments, len(updates)
+
+
+async def _normalize_legacy_session_lifecycle(
+    repository: Repository,
+    *,
+    session,
+    latest_ready_version,
+    audio_path: Path | None,
+):
+    if (
+        audio_path is None
+        or latest_ready_version is None
+        or getattr(session, "ended_at", None) is None
+    ):
+        return session, False
+
+    current_recording_status = str(getattr(session, "recording_status", "") or "").strip().lower()
+    current_audio_status = str(getattr(session, "audio_status", "") or "").strip().lower()
+    if current_recording_status == "ready" and current_audio_status == "finalized":
+        return session, False
+
+    updated_session = await repository.update_session_recording_state(
+        str(session.id),
+        recording_status="ready",
+        audio_status="finalized",
+        audio_error=None,
+        finalized_at=getattr(session, "finalized_at", None) or getattr(session, "ended_at", None),
+    )
+    return updated_session or session, True
+
+
+def _transcript_speaker_metrics(segments: list) -> dict[str, float | int]:
+    total_segments = len(segments)
+    raw_speakers = [
         getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
         for segment in segments
+    ]
+    assigned = [speaker for speaker in raw_speakers if speaker]
+    unassigned_count = sum(1 for speaker in raw_speakers if not speaker)
+    return {
+        "actual_speaker_count": len({speaker for speaker in assigned}),
+        "unassigned_segment_count": unassigned_count,
+        "unassigned_segment_ratio": (
+            float(unassigned_count) / float(total_segments)
+            if total_segments
+            else 0.0
+        ),
     }
-    unresolved = {speaker for speaker in raw_speakers if is_generic_speaker(speaker)}
-    return len(unresolved) > 1
+
+
+def _serialize_speaker_profile(profile) -> dict:
+    examples = getattr(profile, "examples", []) or []
+    return {
+        "id": str(profile.id),
+        "display_name": str(profile.display_name),
+        "example_count": len(examples),
+        "created_at": to_utc_iso(getattr(profile, "created_at", None)),
+    }
+
+
+def _serialize_speaker_profile_example(
+    example,
+    *,
+    recording_title: str | None = None,
+) -> dict:
+    session_id = str(getattr(example, "session_id", ""))
+    return {
+        "id": str(example.id),
+        "session_id": session_id,
+        "transcript_version_id": (
+            str(getattr(example, "transcript_version_id", None))
+            if getattr(example, "transcript_version_id", None)
+            else None
+        ),
+        "speaker_cluster": getattr(example, "speaker_cluster", None),
+        "clip_start_seconds": float(getattr(example, "clip_start_seconds", 0.0) or 0.0),
+        "clip_end_seconds": float(getattr(example, "clip_end_seconds", 0.0) or 0.0),
+        "duration_seconds": float(getattr(example, "duration_seconds", 0.0) or 0.0),
+        "source_type": str(getattr(example, "source_type", "") or ""),
+        "created_at": to_utc_iso(getattr(example, "created_at", None)),
+        "recording_title": recording_title,
+        "clip_url": f"/api/speaker-profile-examples/{urllib.parse.quote(str(example.id), safe='')}/audio",
+    }
+
+
+def _speaker_profiles_by_name(profiles: list) -> dict[str, object]:
+    return {
+        _normalize_profile_name(getattr(profile, "display_name", None)): profile
+        for profile in profiles
+        if _normalize_profile_name(getattr(profile, "display_name", None))
+    }
+
+
+def _speaker_profile_overrides_by_cluster(overrides: list | None) -> dict[str, object]:
+    return {
+        str(getattr(override, "speaker_cluster", "")): override
+        for override in (overrides or [])
+        if str(getattr(override, "speaker_cluster", "")).strip()
+    }
+
+
+def _build_segment_dicts_for_rerun(segments: list, *, match_name_map: dict[str, str] | None = None) -> list[dict]:
+    match_name_map = match_name_map or {}
+    rebuilt: list[dict] = []
+    for segment in segments:
+        cluster = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+        assigned_name = match_name_map.get(str(cluster)) if cluster else None
+        rebuilt.append(
+            {
+                "text": segment.text,
+                "start": float(segment.start_time),
+                "end": float(segment.end_time),
+                "speaker_cluster": str(cluster) if cluster else None,
+                "speaker": assigned_name or (str(cluster) if cluster else None),
+            }
+        )
+    return rebuilt
+
+
+def _assign_segments_from_spans(segments: list, spans: list[tuple[float, float, str]]) -> list[dict]:
+    reassigned: list[dict] = []
+    for segment in segments:
+        speaker_cluster = assign_speaker(
+            float(segment.start_time),
+            float(segment.end_time),
+            spans,
+            min_overlap=0.05,
+            min_overlap_ratio=0.15,
+        )
+        reassigned.append(
+            {
+                "text": segment.text,
+                "start": float(segment.start_time),
+                "end": float(segment.end_time),
+                "speaker_cluster": str(speaker_cluster) if speaker_cluster is not None else None,
+                "speaker": str(speaker_cluster) if speaker_cluster is not None else None,
+            }
+        )
+    return reassigned
+
+
+def _transcript_version_label(version) -> str:
+    base = f"v{int(getattr(version, 'version_number', 1) or 1)}"
+    source_type = str(getattr(version, "source_type", "") or "").strip().lower()
+    if source_type == "speaker_cluster_merge":
+        return f"{base} (Merged Speakers)"
+    if source_type in {"retranscription_repair", "retranscription", "speaker_detection_rerun"} and getattr(version, "repair_reason", None):
+        return f"{base} (Repaired)"
+    return base
 
 
 def _serialize_transcript_version(version, latest_version_id: str | None) -> dict:
     return {
         "id": str(version.id),
         "version_number": int(version.version_number),
-        "label": f"v{version.version_number}",
+        "label": _transcript_version_label(version),
         "is_latest": str(version.id) == str(latest_version_id) if latest_version_id else False,
         "status": version.status,
         "source_type": version.source_type,
+        "repair_reason": getattr(version, "repair_reason", None),
+        "is_repaired_version": bool(getattr(version, "repair_reason", None)),
+        "derived_from_transcript_version_id": (
+            str(getattr(version, "diarization_repair_source_version_id", None))
+            if getattr(version, "diarization_repair_source_version_id", None)
+            else (
+                str(getattr(version, "parent_version_id", None))
+                if getattr(version, "parent_version_id", None)
+                else None
+            )
+        ),
+        "diarization_expected_speaker_count": getattr(version, "diarization_expected_speaker_count", None),
+        "diarization_late_join_offset_seconds": getattr(version, "diarization_late_join_offset_seconds", None),
+        "repair_strategy": getattr(version, "repair_strategy", None),
+        "diarization_actual_speaker_count": getattr(version, "diarization_actual_speaker_count", None),
+        "diarization_unassigned_segment_count": getattr(version, "diarization_unassigned_segment_count", None),
+        "diarization_unassigned_segment_ratio": getattr(version, "diarization_unassigned_segment_ratio", None),
+        "repair_quality_gate_passed": getattr(version, "repair_quality_gate_passed", None),
         "created_at": to_utc_iso(version.created_at),
     }
 
@@ -389,8 +887,42 @@ def _build_speaker_cards(
     segments: list,
     session_id: str,
     transcript_version_id: str | None = None,
+    speaker_profiles: list | None = None,
+    speaker_profile_overrides: list | None = None,
 ) -> list[dict]:
+    def segment_duration(segment) -> float:
+        return max(0.0, float(segment.end_time) - float(segment.start_time))
+
+    def choose_representative_segment(speaker_segments: list):
+        preferred = [
+            segment for segment in speaker_segments
+            if 3.0 <= segment_duration(segment) <= 8.0
+        ]
+        if preferred:
+            return preferred[0]
+
+        bounded = [
+            segment for segment in speaker_segments
+            if segment_duration(segment) <= 10.0
+        ]
+        if bounded:
+            return max(
+                bounded,
+                key=lambda segment: (segment_duration(segment), -float(segment.start_time)),
+            )
+
+        long_enough = [
+            segment for segment in speaker_segments
+            if segment_duration(segment) >= 1.5
+        ]
+        if long_enough:
+            return long_enough[0]
+
+        return speaker_segments[0]
+
     grouped: dict[str, list] = {}
+    profiles_by_name = _speaker_profiles_by_name(speaker_profiles or [])
+    overrides_by_cluster = _speaker_profile_overrides_by_cluster(speaker_profile_overrides)
     for segment in segments:
         speaker_cluster = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
         if not speaker_cluster:
@@ -400,17 +932,34 @@ def _build_speaker_cards(
     cards: list[dict] = []
     for speaker_cluster, speaker_segments in sorted(grouped.items(), key=lambda item: item[0]):
         speaker_segments.sort(key=lambda segment: segment.start_time)
-        first = speaker_segments[0]
-        display_name = getattr(first, "speaker", None)
-        clip_duration = min(5.0, max(0.5, float(first.end_time) - float(first.start_time)))
+        representative = choose_representative_segment(speaker_segments)
+        display_name = getattr(representative, "speaker", None)
+        clip_start = max(0.0, float(representative.start_time) - 0.25)
+        clip_end = min(float(representative.end_time), clip_start + 5.0)
+        if clip_end <= clip_start:
+            clip_end = max(clip_start + 0.5, float(representative.end_time))
+        override = overrides_by_cluster.get(str(speaker_cluster))
+        matched_profile = getattr(override, "speaker_profile", None) if override is not None else None
+        match_source = "override" if matched_profile is not None else "none"
+        if matched_profile is None:
+            matched_profile = profiles_by_name.get(_normalize_profile_name(display_name))
+            if matched_profile is not None:
+                match_source = "name_inferred"
         cards.append(
             {
                 "speaker_cluster": speaker_cluster,
                 "display_name": None if display_name == speaker_cluster else display_name,
+                "matched_profile_id": str(matched_profile.id) if matched_profile else None,
+                "matched_profile_name": getattr(matched_profile, "display_name", None) if matched_profile else None,
+                "matched_profile_example_count": len(getattr(matched_profile, "examples", []) or []) if matched_profile else 0,
+                "match_confidence": None,
+                "profile_suggestion_state": "matched" if matched_profile else "none",
+                "match_source": match_source,
+                "can_change_match": bool(matched_profile),
                 "raw_label": speaker_cluster,
-                "preview_text": first.text[:160],
-                "clip_start": float(first.start_time),
-                "clip_end": float(first.start_time) + clip_duration,
+                "preview_text": representative.text[:160],
+                "clip_start": clip_start,
+                "clip_end": clip_end,
                 "clip_url": (
                     f"/api/recordings/{session_id}/speaker-clips/"
                     f"{urllib.parse.quote(str(speaker_cluster), safe='')}/audio"
@@ -1036,6 +1585,54 @@ class UpdateSpeakerAssignmentsRequest(BaseModel):
     transcript_version_id: Optional[str] = None
 
 
+class MergeSpeakerClustersRequest(BaseModel):
+    source_speaker_cluster: str
+    target_speaker_cluster: str
+
+
+class SpeakerProfileCreateRequest(BaseModel):
+    display_name: str
+
+
+class PromoteSpeakerProfileRequest(BaseModel):
+    speaker_cluster: str
+    display_name: Optional[str] = None
+    speaker_profile_id: Optional[str] = None
+
+
+class CorrectSpeakerProfileMatchRequest(BaseModel):
+    speaker_cluster: str
+    accepted_profile_id: Optional[str] = None
+    accepted_display_name: Optional[str] = None
+
+
+class StartSpeakerDetectionJobRequest(BaseModel):
+    source_transcript_version_id: Optional[str] = None
+    expected_speaker_count: Optional[int] = None
+
+
+class SpeakerDetectionJobCreateResponse(BaseModel):
+    job_id: str
+    status: str
+    poll_url: str
+    transcript_version_id: Optional[str] = None
+    transcript_version_number: Optional[int] = None
+
+
+class SpeakerDetectionJobStatus(BaseModel):
+    job_id: str
+    session_id: str
+    status: str
+    stage: str
+    message: str
+    overall_progress: float
+    created_at: str
+    updated_at: str
+    error: Optional[str] = None
+    transcript_version_id: Optional[str] = None
+    transcript_version_number: Optional[int] = None
+
+
 class WorkspaceChatMessageRequest(BaseModel):
     content: str
     transcript_version_id: Optional[str] = None
@@ -1049,6 +1646,7 @@ class WorkspaceChatApplyRequest(BaseModel):
 
 class UpdateAppSettingsRequest(BaseModel):
     workspace_chat_enabled: Optional[bool] = None
+    speaker_repair_enabled: Optional[bool] = None
     summarization_backend: Optional[str] = None
     recording_capture_mode: Optional[str] = None
 
@@ -1149,14 +1747,30 @@ async def get_recording_workspace(
     repository: Repository = Depends(get_repository),
 ):
     """Return the unified recording workspace state for new and past recordings."""
+    started_at = perf_counter()
+
+    def log_step(step: str, step_started_at: float, **extra) -> None:
+        logger.info(
+            "workspace_load: %s | session=%s elapsed_ms=%.1f%s",
+            step,
+            session_id,
+            (perf_counter() - step_started_at) * 1000.0,
+            f" extra={extra}" if extra else "",
+        )
+
+    step_started_at = perf_counter()
     session = await repository.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Recording not found")
+    log_step("get_session", step_started_at, has_transcription=bool(session.has_transcription))
 
+    step_started_at = perf_counter()
     meeting = await repository.get_primary_meeting(session_id, create_if_missing=True)
     if not meeting:
         raise HTTPException(status_code=400, detail="No meeting found for this recording")
+    log_step("get_primary_meeting", step_started_at, meeting_id=str(meeting.id))
 
+    step_started_at = perf_counter()
     versions = await repository.ensure_transcript_versions(session_id)
     active_version = None
     if transcript_version_id:
@@ -1164,19 +1778,73 @@ async def get_recording_workspace(
     if active_version is None:
         active_version = await repository.get_latest_transcript_version(session_id)
     latest_version = await repository.get_latest_transcript_version(session_id, include_processing=True)
+    log_step(
+        "load_transcript_versions",
+        step_started_at,
+        version_count=len(versions),
+        active_version_id=str(active_version.id) if active_version else None,
+        latest_version_id=str(latest_version.id) if latest_version else None,
+    )
+    latest_ready_version = next(
+        (version for version in versions if str(getattr(version, "status", "") or "").lower() == "ready"),
+        None,
+    )
 
+    audio_path = get_session_audio_path(session.id)
+    if not audio_path and session.ended_at:
+        audio_path = ensure_session_audio_path(session.id)
+
+    step_started_at = perf_counter()
+    session, lifecycle_normalized = await _normalize_legacy_session_lifecycle(
+        repository,
+        session=session,
+        latest_ready_version=latest_ready_version,
+        audio_path=audio_path,
+    )
+    log_step(
+        "normalize_legacy_lifecycle",
+        step_started_at,
+        normalized=lifecycle_normalized,
+        recording_status=getattr(session, "recording_status", None),
+        audio_status=getattr(session, "audio_status", None),
+    )
+
+    step_started_at = perf_counter()
     segments = await repository.get_segments(
         session_id=session_id,
         transcript_version_id=active_version.id if active_version else None,
     )
+    legacy_segment_updates = 0
+    if active_version and segments:
+        segments, legacy_segment_updates = await _normalize_legacy_transcript_speaker_clusters(
+            repository,
+            session_id=session_id,
+            transcript_version_id=active_version.id,
+            segments=segments,
+        )
+    log_step(
+        "normalize_legacy_speaker_clusters",
+        step_started_at,
+        updated_segments=legacy_segment_updates,
+    )
+
+    step_started_at = perf_counter()
     if active_version and session.has_transcription and segments:
         inferred_requires_review = _transcript_requires_speaker_review(segments)
-        if inferred_requires_review != bool(active_version.speaker_review_required):
-            active_version = await repository.update_transcript_version(
-                active_version.id,
-                speaker_review_required=inferred_requires_review,
+        is_completed = getattr(active_version, "speaker_review_completed_at", None) is not None
+        should_be_completed = not inferred_requires_review
+        if (
+            inferred_requires_review != bool(active_version.speaker_review_required)
+            or is_completed != should_be_completed
+        ):
+            active_version = await _sync_transcript_speaker_review_state(
+                repository,
+                str(active_version.id),
+                segments,
             )
+    log_step("get_segments", step_started_at, segment_count=len(segments))
 
+    step_started_at = perf_counter()
     saved_summaries = await repository.get_summaries(
         meeting.id,
         status="saved",
@@ -1195,6 +1863,12 @@ async def get_recording_workspace(
         ),
         None,
     )
+    log_step(
+        "load_summaries",
+        step_started_at,
+        saved_summary_count=len(saved_summaries),
+        has_draft=bool(draft_summary),
+    )
 
     duration_seconds = 0
     if segments:
@@ -1212,9 +1886,6 @@ async def get_recording_workspace(
     else:
         date_label, time_label, tz_label = None, None, None
 
-    audio_path = get_session_audio_path(session.id)
-    if not audio_path and session.ended_at:
-        audio_path = ensure_session_audio_path(session.id)
     lifecycle = _serialize_recording_lifecycle(session, audio_path=audio_path)
 
     settings = get_settings()
@@ -1257,22 +1928,55 @@ async def get_recording_workspace(
                 f"query={urllib.parse.quote(search_query)}"
             )
 
+    step_started_at = perf_counter()
+    speaker_profiles = await _list_speaker_profiles_safe(repository)
+    speaker_profile_overrides = await _list_transcript_speaker_profile_overrides_safe(
+        repository,
+        active_version.id if active_version else None,
+    )
     speaker_cards = _build_speaker_cards(
         segments,
         session_id,
         active_version.id if active_version else None,
+        speaker_profiles=speaker_profiles,
+        speaker_profile_overrides=speaker_profile_overrides,
     ) if session.has_transcription else []
+    log_step(
+        "build_speaker_review",
+        step_started_at,
+        profile_count=len(speaker_profiles),
+        override_count=len(speaker_profile_overrides),
+        speaker_card_count=len(speaker_cards),
+    )
     chat_service = WorkspaceChatService(repository)
     chat_thread = None
     chat_messages = []
     app_settings = await repository.get_app_settings(create_if_missing=True)
-    chat_enabled = bool(app_settings.workspace_chat_enabled) if app_settings else False
+    chat_enabled = bool(getattr(app_settings, "workspace_chat_enabled", False)) if app_settings else False
+    speaker_repair_enabled = bool(getattr(app_settings, "speaker_repair_enabled", False)) if app_settings else False
+    step_started_at = perf_counter()
     if chat_enabled and active_version and session.has_transcription:
         chat_thread, raw_chat_messages = await chat_service.list_messages(session.id, meeting.id)
         chat_messages = [
             _serialize_chat_message(message, saved_summaries)
             for message in raw_chat_messages
         ]
+    log_step(
+        "load_chat",
+        step_started_at,
+        enabled=chat_enabled,
+        has_thread=bool(chat_thread),
+        message_count=len(chat_messages),
+    )
+
+    logger.info(
+        "workspace_load: completed | session=%s elapsed_ms=%.1f transcript_versions=%d segments=%d summaries=%d",
+        session_id,
+        (perf_counter() - started_at) * 1000.0,
+        len(versions),
+        len(segments),
+        len(saved_summaries),
+    )
 
     return {
         "recording": {
@@ -1306,6 +2010,7 @@ async def get_recording_workspace(
             **lifecycle,
         },
         "debug_retranscribe_enabled": bool(get_settings().enable_debug_retranscribe),
+        "speaker_repair_enabled": speaker_repair_enabled,
         "transcript_versions": [
             _serialize_transcript_version(version, latest_version.id if latest_version else None)
             for version in versions
@@ -1329,6 +2034,7 @@ async def get_recording_workspace(
         },
         "speaker_review": {
             "required": bool(active_version.speaker_review_required) if active_version else False,
+            "repair_enabled": speaker_repair_enabled,
             "completed": (
                 True
                 if not active_version
@@ -1336,11 +2042,8 @@ async def get_recording_workspace(
                 or active_version.speaker_review_completed_at is not None
             ),
             "completed_at": to_utc_iso(active_version.speaker_review_completed_at) if active_version else None,
-            "speakers": _build_speaker_cards(
-                segments,
-                session_id,
-                active_version.id if active_version else None,
-            ) if active_version and session.has_transcription else [],
+            "speakers": speaker_cards if active_version and session.has_transcription else [],
+            "known_profiles": [_serialize_speaker_profile(profile) for profile in speaker_profiles],
         },
         "transcript": _serialize_transcript_segments(segments) if active_version and session.has_transcription else [],
         "draft_summary": _serialize_summary(draft_summary, active_version) if draft_summary else None,
@@ -1381,17 +2084,20 @@ async def get_recording_workspace(
 
 @router.get("/settings")
 async def get_app_settings(
+    request: Request,
     repository: Repository = Depends(get_repository),
     summarization_manager: SummarizationManager = Depends(get_summarization_manager),
 ):
     """Return global app settings."""
     settings = await repository.get_app_settings(create_if_missing=True)
-    return _serialize_settings_payload(settings, summarization_manager)
+    diarization_runtime = getattr(request.app.state, "diarization_runtime", None) or {}
+    return _serialize_settings_payload(settings, summarization_manager, diarization_runtime)
 
 
 @router.patch("/settings")
 async def update_app_settings(
     request: UpdateAppSettingsRequest,
+    request_http: Request,
     repository: Repository = Depends(get_repository),
     summarization_manager: SummarizationManager = Depends(get_summarization_manager),
 ):
@@ -1438,6 +2144,11 @@ async def update_app_settings(
                 if "workspace_chat_enabled" in provided_fields
                 else UNSET
             ),
+            speaker_repair_enabled=(
+                request.speaker_repair_enabled
+                if "speaker_repair_enabled" in provided_fields
+                else UNSET
+            ),
             summarization_backend=(
                 target_backend.value
                 if "summarization_backend" in provided_fields
@@ -1450,11 +2161,13 @@ async def update_app_settings(
             await summarization_manager.switch_backend(current_backend)
         raise
 
-    return _serialize_settings_payload(settings, summarization_manager)
+    diarization_runtime = getattr(request_http.app.state, "diarization_runtime", None) or {}
+    return _serialize_settings_payload(settings, summarization_manager, diarization_runtime)
 
 
 @router.post("/settings/summarization/diagnostics")
 async def run_summarization_diagnostics(
+    request: Request,
     repository: Repository = Depends(get_repository),
     summarization_manager: SummarizationManager = Depends(get_summarization_manager),
 ):
@@ -1463,7 +2176,475 @@ async def run_summarization_diagnostics(
     diagnostics = await summarization_manager.diagnose_backends(
         [SumBackendEnum.OLLAMA, SumBackendEnum.OPENAI]
     )
-    return _serialize_settings_payload(settings, summarization_manager, diagnostics=diagnostics)
+    diarization_runtime = getattr(request.app.state, "diarization_runtime", None) or {}
+    return _serialize_settings_payload(
+        settings,
+        summarization_manager,
+        diarization_runtime,
+        diagnostics=diagnostics,
+    )
+
+
+@router.get("/speaker-profiles")
+async def get_speaker_profiles(
+    repository: Repository = Depends(get_repository),
+):
+    """Return locally stored speaker profiles."""
+    profiles = await _list_speaker_profiles_safe(repository)
+    return {
+        "profiles": [_serialize_speaker_profile(profile) for profile in profiles],
+    }
+
+
+@router.post("/speaker-profiles")
+async def create_speaker_profile(
+    request: SpeakerProfileCreateRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Create or reuse a local speaker profile."""
+    display_name = " ".join(str(request.display_name or "").strip().split())
+    if not display_name:
+        raise HTTPException(status_code=422, detail="display_name is required")
+    profile = await repository.create_speaker_profile(display_name=display_name)
+    return {"profile": _serialize_speaker_profile(profile)}
+
+
+@router.delete("/speaker-profiles/{profile_id}")
+async def delete_speaker_profile(
+    profile_id: str,
+    repository: Repository = Depends(get_repository),
+):
+    """Delete an empty local speaker profile."""
+    profile = await repository.get_speaker_profile(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Speaker profile not found")
+    if getattr(profile, "examples", None):
+        raise HTTPException(status_code=409, detail="Speaker profile has saved voice examples")
+    deleted = await repository.delete_empty_speaker_profile(profile_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Speaker profile not found")
+    return {"success": True}
+
+
+@router.post("/recordings/{session_id}/transcript-versions/{transcript_version_id}/speaker-profiles/promote")
+async def promote_speaker_profile_example(
+    session_id: str,
+    transcript_version_id: str,
+    request: PromoteSpeakerProfileRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Promote a confirmed speaker cluster into a local speaker profile example."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    transcript_version = await repository.get_transcript_version_for_session(session_id, transcript_version_id)
+    if transcript_version is None:
+        raise HTTPException(status_code=404, detail="Transcript version not found")
+
+    cluster = str(request.speaker_cluster or "").strip()
+    if not cluster:
+        raise HTTPException(status_code=422, detail="speaker_cluster is required")
+
+    requested_profile_id = str(request.speaker_profile_id or "").strip() or None
+    requested_display_name = " ".join(str(request.display_name or "").strip().split()) or None
+    if requested_profile_id:
+        profile = await repository.get_speaker_profile(requested_profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Speaker profile not found")
+    elif not requested_display_name:
+        raise HTTPException(status_code=422, detail="display_name or speaker_profile_id is required")
+    else:
+        profile = await repository.get_speaker_profile_by_name(requested_display_name)
+
+    audio_path = get_session_audio_path(session_id)
+    if not audio_path and session.ended_at:
+        audio_path = ensure_session_audio_path(session_id)
+    if not audio_path:
+        raise HTTPException(status_code=404, detail="Recording audio not found")
+
+    segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=transcript_version_id,
+    )
+    cluster_segments = [
+        segment
+        for segment in segments
+        if (getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)) == cluster
+    ]
+    if not cluster_segments:
+        raise HTTPException(status_code=404, detail="Speaker cluster not found")
+
+    existing_examples = []
+    if profile is not None:
+        existing_examples = await repository.list_speaker_profile_examples(profile.id)
+        if len(existing_examples) >= MAX_PROFILE_EXAMPLES:
+            raise HTTPException(
+                status_code=409,
+                detail=f"This profile already has the maximum of {MAX_PROFILE_EXAMPLES} saved examples.",
+            )
+
+    try:
+        async with _SPEAKER_PROFILE_SAVE_SEMAPHORE:
+            payload = await asyncio.to_thread(
+                build_profile_example,
+                audio_path=str(audio_path),
+                segments=cluster_segments,
+                hf_token=get_settings().hf_token,
+                existing_examples=existing_examples,
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to build speaker profile example: {exc}") from exc
+
+    if not payload or not payload.get("embedding") or payload.get("segment") is None:
+        raise HTTPException(status_code=409, detail="No new usable voice example was found for this speaker.")
+
+    if profile is None:
+        profile = await repository.create_speaker_profile(display_name=requested_display_name or "")
+        existing_examples = []
+
+    if len(existing_examples) >= MAX_PROFILE_EXAMPLES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This profile already has the maximum of {MAX_PROFILE_EXAMPLES} saved examples.",
+        )
+
+    chosen_segment = payload["segment"]
+    start_time = float(getattr(chosen_segment, "start_time", 0.0))
+    end_time = float(getattr(chosen_segment, "end_time", 0.0))
+    example = await repository.add_speaker_profile_example(
+        speaker_profile_id=profile.id,
+        session_id=session_id,
+        transcript_version_id=transcript_version_id,
+        speaker_cluster=cluster,
+        clip_start_seconds=start_time,
+        clip_end_seconds=end_time,
+        duration_seconds=max(0.0, end_time - start_time),
+        source_type="manual_promoted_example",
+        embedding_model=get_embedding_model_name(),
+        embedding_vector_json=embedding_to_json(payload["embedding"]),
+    )
+    return {
+        "success": True,
+        "profile": _serialize_speaker_profile(await repository.get_speaker_profile(profile.id)),
+        "example_id": str(example.id),
+        "saved_segment": {
+            "start_time": start_time,
+            "end_time": end_time,
+        },
+    }
+
+
+@router.post("/recordings/{session_id}/transcript-versions/{transcript_version_id}/speaker-profiles/correct-match")
+async def correct_speaker_profile_match(
+    session_id: str,
+    transcript_version_id: str,
+    request: CorrectSpeakerProfileMatchRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Correct a matched speaker profile for the current transcript version."""
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    transcript_version = await repository.get_transcript_version_for_session(session_id, transcript_version_id)
+    if transcript_version is None:
+        raise HTTPException(status_code=404, detail="Transcript version not found")
+
+    speaker_cluster = str(request.speaker_cluster or "").strip()
+    if not speaker_cluster:
+        raise HTTPException(status_code=422, detail="speaker_cluster is required")
+
+    accepted_profile_id = str(request.accepted_profile_id or "").strip() or None
+    accepted_display_name = " ".join(str(request.accepted_display_name or "").strip().split()) or None
+    if bool(accepted_profile_id) == bool(accepted_display_name):
+        raise HTTPException(status_code=422, detail="Provide exactly one accepted profile target")
+
+    if accepted_profile_id:
+        profile = await repository.get_speaker_profile(accepted_profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Speaker profile not found")
+    else:
+        profile = await repository.get_speaker_profile_by_name(accepted_display_name or "")
+        if profile is None:
+            profile = await repository.create_speaker_profile(display_name=accepted_display_name or "")
+
+    segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=transcript_version_id,
+    )
+    cluster_segments = [
+        segment
+        for segment in segments
+        if (getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)) == speaker_cluster
+    ]
+    if not cluster_segments:
+        raise HTTPException(status_code=404, detail="Speaker cluster not found")
+
+    await repository.set_transcript_speaker_profile_override(
+        session_id=session_id,
+        transcript_version_id=transcript_version_id,
+        speaker_cluster=speaker_cluster,
+        speaker_profile_id=str(profile.id),
+    )
+    await repository.update_transcript_version_cluster_speaker_name(
+        transcript_version_id=transcript_version_id,
+        speaker_cluster=speaker_cluster,
+        speaker_name=str(profile.display_name),
+    )
+
+    warning = None
+    example_saved = False
+    example = None
+    saved_segment = None
+
+    audio_path = get_session_audio_path(session_id)
+    if not audio_path and session.ended_at:
+        audio_path = ensure_session_audio_path(session_id)
+
+    if not audio_path:
+        warning = "Changed match, but recording audio was unavailable so no new voice example was saved."
+    else:
+        existing_examples = await repository.list_speaker_profile_examples(str(profile.id))
+        if len(existing_examples) >= MAX_PROFILE_EXAMPLES:
+            warning = f"Changed match, but {profile.display_name} already has the maximum of {MAX_PROFILE_EXAMPLES} saved examples."
+        else:
+            try:
+                async with _SPEAKER_PROFILE_SAVE_SEMAPHORE:
+                    payload = await asyncio.to_thread(
+                        build_profile_example,
+                        audio_path=str(audio_path),
+                        segments=cluster_segments,
+                        hf_token=get_settings().hf_token,
+                        existing_examples=existing_examples,
+                    )
+            except Exception as exc:
+                payload = None
+                warning = f"Changed match, but Sidekick could not save a new voice example: {exc}"
+            if payload and payload.get("embedding") and payload.get("segment") is not None:
+                chosen_segment = payload["segment"]
+                start_time = float(getattr(chosen_segment, "start_time", 0.0))
+                end_time = float(getattr(chosen_segment, "end_time", 0.0))
+                example = await repository.add_speaker_profile_example(
+                    speaker_profile_id=str(profile.id),
+                    session_id=session_id,
+                    transcript_version_id=transcript_version_id,
+                    speaker_cluster=speaker_cluster,
+                    clip_start_seconds=start_time,
+                    clip_end_seconds=end_time,
+                    duration_seconds=max(0.0, end_time - start_time),
+                    source_type="manual_match_correction",
+                    embedding_model=get_embedding_model_name(),
+                    embedding_vector_json=embedding_to_json(payload["embedding"]),
+                )
+                example_saved = True
+                saved_segment = {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                }
+            elif warning is None:
+                warning = "Changed match, but no new usable voice example was available to improve future matching."
+
+    updated_profile = await repository.get_speaker_profile(str(profile.id))
+    speaker_profiles = await _list_speaker_profiles_safe(repository)
+    speaker_profile_overrides = await _list_transcript_speaker_profile_overrides_safe(
+        repository,
+        transcript_version_id,
+    )
+    refreshed_segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=transcript_version_id,
+    )
+    await _sync_transcript_speaker_review_state(
+        repository,
+        transcript_version_id,
+        refreshed_segments,
+    )
+    speaker_card = next(
+        (
+            card
+            for card in _build_speaker_cards(
+                refreshed_segments,
+                session_id,
+                transcript_version_id,
+                speaker_profiles=speaker_profiles,
+                speaker_profile_overrides=speaker_profile_overrides,
+            )
+            if card["speaker_cluster"] == speaker_cluster
+        ),
+        None,
+    )
+    return {
+        "success": True,
+        "profile": _serialize_speaker_profile(updated_profile),
+        "override": {
+            "speaker_cluster": speaker_cluster,
+            "speaker_profile_id": str(updated_profile.id),
+            "speaker_profile_name": str(updated_profile.display_name),
+        },
+        "example_saved": example_saved,
+        "example_id": str(example.id) if example else None,
+        "saved_segment": saved_segment,
+        "warning": warning,
+        "speaker_card": speaker_card,
+    }
+
+
+@router.get("/speaker-profiles/{profile_id}/examples")
+async def get_speaker_profile_examples(
+    profile_id: str,
+    repository: Repository = Depends(get_repository),
+):
+    """List saved speaker examples for one profile."""
+    profile = await repository.get_speaker_profile(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Speaker profile not found")
+
+    examples = await repository.list_speaker_profile_examples(profile_id)
+    serialized_examples = []
+    for example in examples:
+        meeting = await repository.get_primary_meeting(str(example.session_id), create_if_missing=False)
+        serialized_examples.append(
+            _serialize_speaker_profile_example(
+                example,
+                recording_title=getattr(meeting, "title", None),
+            )
+        )
+
+    return {
+        "profile": _serialize_speaker_profile(profile),
+        "examples": serialized_examples,
+    }
+
+
+@router.delete("/speaker-profile-examples/{example_id}")
+async def delete_speaker_profile_example(
+    example_id: str,
+    repository: Repository = Depends(get_repository),
+):
+    """Delete one saved speaker profile example."""
+    example = await repository.get_speaker_profile_example(example_id)
+    if example is None:
+        raise HTTPException(status_code=404, detail="Speaker profile example not found")
+    deleted = await repository.delete_speaker_profile_example(example_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Speaker profile example not found")
+    return {"success": True}
+
+
+@router.get("/speaker-profile-examples/{example_id}/audio")
+async def get_speaker_profile_example_audio(
+    example_id: str,
+    repository: Repository = Depends(get_repository),
+):
+    """Play one saved speaker profile example clip."""
+    example = await repository.get_speaker_profile_example(example_id)
+    if example is None:
+        raise HTTPException(status_code=404, detail="Speaker profile example not found")
+
+    session = await repository.get_session(str(example.session_id))
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    audio_path = get_session_audio_path(str(example.session_id))
+    if not audio_path and session.ended_at:
+        audio_path = ensure_session_audio_path(str(example.session_id))
+    if not audio_path:
+        raise HTTPException(status_code=404, detail="Recording audio not found")
+
+    try:
+        clip_path = ensure_speaker_clip(
+            audio_path=audio_path,
+            session_id=str(example.session_id),
+            transcript_version_id=str(getattr(example, "transcript_version_id", None) or "profile-examples"),
+            speaker_key=f"profile-example-{example.id}",
+            start_time=float(getattr(example, "clip_start_seconds", 0.0) or 0.0),
+            end_time=float(getattr(example, "clip_end_seconds", 0.0) or 0.0),
+        )
+    except Exception as exc:
+        logger.warning("speaker_profile_example_clip: generation failed | example=%s error=%s", example_id, exc)
+        raise HTTPException(status_code=500, detail="Failed to generate voice example clip")
+
+    return FileResponse(path=clip_path, media_type="audio/wav")
+
+
+@router.post("/recordings/{session_id}/speaker-detection-job", response_model=SpeakerDetectionJobCreateResponse)
+async def start_speaker_detection_job(
+    session_id: str,
+    request: StartSpeakerDetectionJobRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Start a diarization-only speaker-detection rerun using stored transcript timing."""
+    await _require_speaker_repair_enabled(repository)
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    source_version = None
+    if request.source_transcript_version_id:
+        source_version = await repository.get_transcript_version_for_session(session_id, request.source_transcript_version_id)
+    if source_version is None:
+        source_version = await repository.get_latest_transcript_version(session_id)
+    if source_version is None:
+        raise HTTPException(status_code=404, detail="Transcript version not found")
+
+    expected_speaker_count = request.expected_speaker_count
+    if expected_speaker_count is not None and (expected_speaker_count < 2 or expected_speaker_count > 10):
+        raise HTTPException(status_code=422, detail="expected_speaker_count must be between 2 and 10")
+
+    versions = await repository.ensure_transcript_versions(session_id)
+    next_version_number = max((int(version.version_number) for version in versions), default=0) + 1
+    target_version = await repository.create_transcript_version(
+        session_id=session_id,
+        meeting_id=source_version.meeting_id,
+        version_number=next_version_number,
+        parent_version_id=source_version.id,
+        status="processing",
+        source_type="speaker_detection_rerun",
+        transcription_backend=source_version.transcription_backend,
+        transcription_model=source_version.transcription_model,
+        diarization_backend="pyannote",
+        diarization_model=get_settings().hf_token and "pyannote/speaker-diarization-community-1" or None,
+        diarization_expected_speaker_count=expected_speaker_count,
+        diarization_repair_source_version_id=source_version.id,
+        repair_strategy="full_file_exact_count" if expected_speaker_count is not None else "full_file_unconstrained",
+        repair_reason="missing_speaker" if expected_speaker_count is not None else None,
+        template_key=source_version.template_key,
+        custom_prompt=source_version.custom_prompt,
+        speaker_review_required=True,
+        speaker_review_completed_at=None,
+    )
+    job = _create_speaker_detection_job(
+        session_id,
+        transcript_version_id=str(target_version.id),
+        transcript_version_number=next_version_number,
+    )
+    _SPEAKER_DETECTION_TASKS[job["job_id"]] = asyncio.create_task(
+        _run_speaker_detection_job(
+            job_id=job["job_id"],
+            session_id=session_id,
+            source_transcript_version_id=str(source_version.id),
+            target_transcript_version_id=str(target_version.id),
+            expected_speaker_count=expected_speaker_count,
+            repository=repository,
+        )
+    )
+    return SpeakerDetectionJobCreateResponse(
+        job_id=job["job_id"],
+        status=job["status"],
+        poll_url=f"/api/speaker-detection-jobs/{job['job_id']}",
+        transcript_version_id=str(target_version.id),
+        transcript_version_number=next_version_number,
+    )
+
+
+@router.get("/speaker-detection-jobs/{job_id}", response_model=SpeakerDetectionJobStatus)
+async def get_speaker_detection_job(job_id: str):
+    """Return speaker-detection job status."""
+    job = _SPEAKER_DETECTION_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Speaker detection job not found")
+    return SpeakerDetectionJobStatus(**job)
 
 
 @router.post("/recordings/{session_id}/chat/messages")
@@ -1682,13 +2863,21 @@ async def get_recording_speakers(
         session_id=session_id,
         transcript_version_id=active_version.id if active_version else None,
     )
+    speaker_profiles = await _list_speaker_profiles_safe(repository)
+    speaker_profile_overrides = await _list_transcript_speaker_profile_overrides_safe(
+        repository,
+        active_version.id if active_version else None,
+    )
     return {
         "audio_url": f"/api/recordings/{session_id}/audio",
         "speakers": _build_speaker_cards(
             segments,
             session_id,
             active_version.id if active_version else None,
+            speaker_profiles=speaker_profiles,
+            speaker_profile_overrides=speaker_profile_overrides,
         ),
+        "known_profiles": [_serialize_speaker_profile(profile) for profile in speaker_profiles],
     }
 
 
@@ -1716,24 +2905,142 @@ async def update_recording_speakers(
         session_id=session_id,
         transcript_version_id=active_version.id,
     )
+    speaker_profiles = await _list_speaker_profiles_safe(repository)
+    profiles_by_name = _speaker_profiles_by_name(speaker_profiles)
     updates: dict[str, str | None] = {}
+    cluster_assignments: dict[str, str] = {}
     for segment in segments:
         speaker_cluster = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
         if not speaker_cluster:
             continue
         mapped_name = request.assignments.get(speaker_cluster)
         if mapped_name and mapped_name.strip():
-            updates[segment.id] = mapped_name.strip()
+            cleaned_name = mapped_name.strip()
+            updates[segment.id] = cleaned_name
+            cluster_assignments[speaker_cluster] = cleaned_name
 
     if updates:
         await repository.update_segments_speakers(updates)
+        for speaker_cluster, speaker_name in cluster_assignments.items():
+            matched_profile = profiles_by_name.get(_normalize_profile_name(speaker_name))
+            if matched_profile is not None:
+                await repository.set_transcript_speaker_profile_override(
+                    session_id=session_id,
+                    transcript_version_id=active_version.id,
+                    speaker_cluster=speaker_cluster,
+                    speaker_profile_id=str(matched_profile.id),
+                )
+            else:
+                await repository.delete_transcript_speaker_profile_override(
+                    active_version.id,
+                    speaker_cluster,
+                )
 
-    await repository.update_transcript_version(
+    refreshed_segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=active_version.id,
+    )
+    await _sync_transcript_speaker_review_state(
+        repository,
         active_version.id,
-        speaker_review_required=_transcript_requires_speaker_review(segments),
-        speaker_review_completed_at=datetime.utcnow(),
+        refreshed_segments,
     )
     return {"success": True, "updated": len(updates)}
+
+
+@router.post("/recordings/{session_id}/transcript-versions/{transcript_version_id}/speaker-clusters/merge")
+async def merge_speaker_clusters(
+    session_id: str,
+    transcript_version_id: str,
+    request: MergeSpeakerClustersRequest,
+    repository: Repository = Depends(get_repository),
+):
+    """Create a new transcript version that merges one speaker cluster into another."""
+    await _require_speaker_repair_enabled(repository)
+
+    session = await repository.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    active_version = await repository.get_transcript_version_for_session(session_id, transcript_version_id)
+    if active_version is None:
+        raise HTTPException(status_code=404, detail="Transcript version not found")
+
+    source_cluster = str(request.source_speaker_cluster or "").strip()
+    target_cluster = str(request.target_speaker_cluster or "").strip()
+    if not source_cluster or not target_cluster:
+        raise HTTPException(status_code=422, detail="Both source and target speaker clusters are required")
+    if source_cluster == target_cluster:
+        raise HTTPException(status_code=422, detail="Source and target speaker clusters must be different")
+
+    segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=active_version.id,
+    )
+    available_clusters = {
+        getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+        for segment in segments
+        if getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+    }
+    if source_cluster not in available_clusters or target_cluster not in available_clusters:
+        raise HTTPException(status_code=404, detail="Speaker cluster not found")
+
+    versions = await repository.ensure_transcript_versions(session_id)
+    next_version_number = (max((int(version.version_number) for version in versions), default=0) + 1)
+    merged_version = await repository.create_transcript_version(
+        session_id=session_id,
+        meeting_id=active_version.meeting_id,
+        version_number=next_version_number,
+        parent_version_id=active_version.id,
+        status="processing",
+        source_type="speaker_cluster_merge",
+        transcription_backend=active_version.transcription_backend,
+        transcription_model=active_version.transcription_model,
+        diarization_backend=active_version.diarization_backend,
+        diarization_model=active_version.diarization_model,
+        diarization_expected_speaker_count=active_version.diarization_expected_speaker_count,
+        diarization_late_join_offset_seconds=active_version.diarization_late_join_offset_seconds,
+        diarization_repair_source_version_id=active_version.id,
+        repair_strategy="manual_cluster_merge",
+        repair_reason="split_speaker",
+        template_key=active_version.template_key,
+        custom_prompt=active_version.custom_prompt,
+        speaker_review_required=True,
+        speaker_review_completed_at=None,
+    )
+
+    cloned_count = await repository.clone_transcript_version_segments(
+        source_transcript_version_id=active_version.id,
+        target_transcript_version_id=merged_version.id,
+        speaker_cluster_rewrites={source_cluster: target_cluster},
+    )
+    if cloned_count == 0:
+        await repository.update_transcript_version(merged_version.id, status="failed")
+        raise HTTPException(status_code=400, detail="No transcript segments found to merge")
+
+    merged_segments = await repository.get_segments(
+        session_id=session_id,
+        transcript_version_id=merged_version.id,
+    )
+    merged_metrics = _transcript_speaker_metrics(merged_segments)
+    merged_version = await repository.update_transcript_version(
+        merged_version.id,
+        status="ready",
+        speaker_review_required=_transcript_requires_speaker_review(merged_segments),
+        speaker_review_completed_at=None,
+        repair_strategy="manual_cluster_merge",
+        diarization_actual_speaker_count=merged_metrics["actual_speaker_count"],
+        diarization_unassigned_segment_count=merged_metrics["unassigned_segment_count"],
+        diarization_unassigned_segment_ratio=merged_metrics["unassigned_segment_ratio"],
+        repair_quality_gate_passed=True,
+    )
+    return {
+        "success": True,
+        "transcript_version": _serialize_transcript_version(
+            merged_version,
+            latest_version_id=str(merged_version.id),
+        ),
+    }
 
 
 class SaveSummaryRequest(BaseModel):
@@ -2488,10 +3795,17 @@ async def get_speaker_clips(
     if not segments:
         raise HTTPException(status_code=404, detail="No transcript segments found")
 
+    speaker_profiles = await _list_speaker_profiles_safe(repository)
+    speaker_profile_overrides = await _list_transcript_speaker_profile_overrides_safe(
+        repository,
+        active_version.id if active_version else None,
+    )
     speaker_cards = _build_speaker_cards(
         segments,
         session_id,
         active_version.id if active_version else None,
+        speaker_profiles=speaker_profiles,
+        speaker_profile_overrides=speaker_profile_overrides,
     )
     if not speaker_cards:
         raise HTTPException(status_code=400, detail="No speakers found in transcript. Run diarization first.")
@@ -2521,6 +3835,7 @@ async def get_speaker_clip_audio(
     repository: Repository = Depends(get_repository),
 ):
     """Return a cached standalone clip for one detected speaker."""
+    started_at = perf_counter()
     session = await repository.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Recording not found")
@@ -2546,6 +3861,11 @@ async def get_speaker_clip_audio(
     if not segments:
         raise HTTPException(status_code=404, detail="No transcript segments found")
 
+    speaker_profiles = await _list_speaker_profiles_safe(repository)
+    speaker_profile_overrides = await _list_transcript_speaker_profile_overrides_safe(
+        repository,
+        active_version.id if active_version else None,
+    )
     speaker_card = next(
         (
             card
@@ -2553,6 +3873,8 @@ async def get_speaker_clip_audio(
                 segments,
                 session_id,
                 active_version.id if active_version else None,
+                speaker_profiles=speaker_profiles,
+                speaker_profile_overrides=speaker_profile_overrides,
             )
             if card["speaker_cluster"] == speaker_key
         ),
@@ -2579,6 +3901,15 @@ async def get_speaker_clip_audio(
         )
         raise HTTPException(status_code=500, detail="Failed to generate speaker clip")
 
+    logger.info(
+        "speaker_clip: ready | session=%s speaker=%s transcript_version=%s start=%.2f end=%.2f elapsed_ms=%.1f",
+        session_id,
+        speaker_key,
+        str(active_version.id) if active_version else None,
+        float(speaker_card["clip_start"]),
+        float(speaker_card["clip_end"]),
+        (perf_counter() - started_at) * 1000.0,
+    )
     return FileResponse(path=clip_path, media_type="audio/wav")
 
 

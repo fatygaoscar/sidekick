@@ -85,16 +85,29 @@ class _RepositoryDouble:
 
 
 class _TranscriptionManagerDouble:
-    async def transcribe_file(self, _file_path, progress_callback=None):
+    async def transcribe_file(
+        self,
+        _file_path,
+        progress_callback=None,
+        expected_speaker_count=None,
+        late_join_offset_seconds=None,
+        repair_reason=None,
+    ):
         if progress_callback:
             progress_callback(0.15, "Transcribing audio")
             progress_callback(0.45, "Aligning words")
             progress_callback(0.70, "Assigning speakers")
+        self.expected_speaker_count = expected_speaker_count
+        self.late_join_offset_seconds = late_join_offset_seconds
+        self.repair_reason = repair_reason
         return FileTranscriptionResult(
             text="Hello world Goodbye now",
             duration_seconds=3.5,
             language="en",
             confidence=None,
+            diarization_backend="pyannote",
+            diarization_model="pyannote/speaker-diarization-community-1",
+            repair_strategy="full_file_exact_count" if expected_speaker_count is not None else "full_file_unconstrained",
             segments=[
                 AlignedTranscriptSegment(
                     start=0.0,
@@ -118,7 +131,9 @@ class WhisperXRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.export = importlib.import_module("src.api.routes.export")
+        cls.diarize_module = importlib.import_module("src.transcription.diarize")
         cls.manager_module = importlib.import_module("src.transcription.manager")
+        cls.diarization_runtime = importlib.import_module("src.transcription.diarization_runtime")
         cls.websocket = importlib.import_module("src.api.routes.websocket")
         cls.settings_module = importlib.import_module("config.settings")
         cls.whisperx_local = importlib.import_module("src.transcription.whisperx_local")
@@ -192,7 +207,7 @@ class WhisperXRegressionTests(unittest.TestCase):
                 "ensure_session_audio_path",
                 return_value=audio_path,
             ):
-                transcript, duration = asyncio.run(
+                transcript, duration, metadata = asyncio.run(
                     self.export._transcribe_and_persist_session(
                         session_id="session-1",
                         session=session,
@@ -205,12 +220,46 @@ class WhisperXRegressionTests(unittest.TestCase):
 
         self.assertEqual(duration, 3.5)
         self.assertEqual(transcript, "[00:00] Attendee A: Hello world\n[00:01] Attendee B: Goodbye now")
+        self.assertEqual(metadata["diarization_backend"], "pyannote")
+        self.assertEqual(metadata["diarization_model"], "pyannote/speaker-diarization-community-1")
         self.assertEqual(len(repository.added_segments), 2)
         self.assertEqual(repository.added_segments[0].speaker_cluster, "SPEAKER_00")
         self.assertEqual(repository.added_segments[1].speaker_cluster, "SPEAKER_01")
         self.assertEqual(repository.has_transcription_updates, [("session-1", True)])
         self.assertEqual(repository.reindexed_sessions, ["session-1"])
         self.assertTrue(repository.transcript_version_updates)
+        self.assertIsNone(manager.repair_reason)
+
+    def test_transcribe_and_persist_session_passes_repair_reason(self):
+        repository = _RepositoryDouble()
+        manager = _TranscriptionManagerDouble()
+        session = SimpleNamespace(id="session-1", ended_at=True)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_path = Path(tmpdir) / "session-1.wav"
+            audio_path.write_bytes(b"RIFF")
+            with patch.object(self.export, "get_session_audio_path", return_value=audio_path), patch.object(
+                self.export,
+                "ensure_session_audio_path",
+                return_value=audio_path,
+            ):
+                asyncio.run(
+                    self.export._transcribe_and_persist_session(
+                        session_id="session-1",
+                        session=session,
+                        repository=repository,
+                        transcription_manager=manager,
+                        primary_meeting_id="meeting-1",
+                        transcript_version_id="tv-1",
+                        expected_speaker_count=3,
+                        late_join_offset_seconds=120.0,
+                        repair_reason="missing_speaker",
+                    )
+                )
+
+        self.assertEqual(manager.expected_speaker_count, 3)
+        self.assertEqual(manager.late_join_offset_seconds, 120.0)
+        self.assertEqual(manager.repair_reason, "missing_speaker")
 
     def test_whisperx_local_streaming_preview_is_not_supported(self):
         engine = self.whisperx_local.WhisperXLocalEngine()
@@ -221,8 +270,6 @@ class WhisperXRegressionTests(unittest.TestCase):
     def test_whisperx_local_file_transcription_uses_pyav_decode(self):
         engine = self.whisperx_local.WhisperXLocalEngine()
         engine._initialized = True
-
-        diarization_inputs = []
 
         def fake_transcribe(audio, batch_size, language=None):
             self.assertIsInstance(audio, np.ndarray)
@@ -247,24 +294,8 @@ class WhisperXRegressionTests(unittest.TestCase):
                 ],
             }
 
-        def fake_assign_word_speakers(_diarize_segments, aligned_result):
-            return {
-                "segments": [
-                    {
-                        **aligned_result["segments"][0],
-                        "speaker": "SPEAKER_00",
-                    },
-                ],
-            }
-
-        def fake_diarization_pipeline(audio):
-            diarization_inputs.append(audio)
-            self.assertIsInstance(audio, np.ndarray)
-            return object()
-
         fake_whisperx = types.ModuleType("whisperx")
         fake_whisperx.align = fake_align
-        fake_whisperx.assign_word_speakers = fake_assign_word_speakers
 
         def fail_load_audio(_audio_file):
             raise AssertionError("whisperx.load_audio should not be called")
@@ -286,9 +317,13 @@ class WhisperXRegressionTests(unittest.TestCase):
             "_get_align_model",
             return_value=("align-model", {"language": "en", "type": "torchaudio", "dictionary": {}}),
         ), patch.object(
-            engine,
-            "_get_diarization_pipeline",
-            return_value=fake_diarization_pipeline,
+            self.whisperx_local,
+            "ensure_diarization_ready",
+            return_value={"enabled": True, "ready": True},
+        ), patch.object(
+            self.diarize_module,
+            "diarize",
+            return_value=[(0.0, 1.0, "SPEAKER_00")],
         ), patch.dict(sys.modules, {"whisperx": fake_whisperx}):
             result = engine._transcribe_file_sync("sample.wav", None)
 
@@ -296,13 +331,111 @@ class WhisperXRegressionTests(unittest.TestCase):
         self.assertEqual(result.duration_seconds, 1.0)
         self.assertEqual(result.text, "Hello world")
         self.assertEqual(result.segments[0].speaker_cluster, "SPEAKER_00")
-        self.assertEqual(len(diarization_inputs), 1)
+        self.assertEqual(result.diarization_backend, "pyannote")
+        self.assertEqual(result.repair_strategy, "full_file_unconstrained")
+
+    def test_repair_uses_same_full_file_pyannote_path_as_initial_transcription(self):
+        engine = self.whisperx_local.WhisperXLocalEngine()
+        engine._initialized = True
+        engine._model = SimpleNamespace(
+            transcribe=lambda _audio, batch_size, language=None: {
+                "language": "en",
+                "segments": [
+                    {"start": 0.0, "end": 2.0, "text": "Hello Greg"},
+                    {"start": 2.0, "end": 4.0, "text": "Hi Oscar"},
+                    {"start": 4.0, "end": 6.0, "text": "Greg joined"},
+                ],
+            }
+        )
+
+        fake_whisperx = types.ModuleType("whisperx")
+        fake_whisperx.align = lambda *_args, **_kwargs: {
+            "segments": [
+                {"start": 0.0, "end": 2.0, "text": "Hello Greg"},
+                {"start": 2.0, "end": 4.0, "text": "Hi Oscar"},
+                {"start": 4.0, "end": 6.0, "text": "Greg joined"},
+            ],
+        }
+
+        with patch.object(
+            self.whisperx_local,
+            "decode_audio_to_mono_float32",
+            return_value=np.ones(32000, dtype=np.float32),
+        ), patch.object(
+            self.whisperx_local,
+            "duration_seconds_from_audio",
+            return_value=2.0,
+        ), patch.object(
+            engine,
+            "_get_align_model",
+            return_value=("align-model", {"language": "en"}),
+        ), patch.object(
+            self.whisperx_local,
+            "ensure_diarization_ready",
+            return_value={"enabled": True, "ready": True},
+        ), patch.object(
+            self.diarize_module,
+            "diarize",
+            return_value=[(0.0, 2.0, "SPEAKER_02"), (2.0, 4.0, "SPEAKER_01"), (4.0, 6.0, "SPEAKER_00")],
+        ) as diarize_mock, patch.dict(sys.modules, {"whisperx": fake_whisperx}):
+            result = engine._transcribe_file_sync(
+                "sample.wav",
+                None,
+                expected_speaker_count=3,
+                late_join_offset_seconds=75.0,
+                repair_reason="missing_speaker",
+            )
+
+        diarize_mock.assert_called_once()
+        self.assertIsNone(diarize_mock.call_args.kwargs.get("start_offset"))
+        self.assertIsNone(diarize_mock.call_args.kwargs.get("end_offset"))
+        self.assertEqual(result.diarization_backend, "pyannote")
+        self.assertEqual(result.diarization_model, "pyannote/speaker-diarization-community-1")
+        self.assertEqual(result.segments[0].speaker_cluster, "SPEAKER_02")
+        self.assertEqual(result.repair_strategy, "full_file_exact_count")
+        self.assertEqual(result.diarization_actual_speaker_count, 3)
+
+    def test_repair_quality_gate_rejects_wrong_count_and_high_unassigned_ratio(self):
+        engine = self.whisperx_local.WhisperXLocalEngine()
+
+        self.assertFalse(
+            engine._repair_quality_gate_passed(
+                {
+                    "actual_speaker_count": 4,
+                    "unassigned_segment_ratio": 0.0,
+                },
+                expected_speaker_count=3,
+            )
+        )
+        self.assertFalse(
+            engine._repair_quality_gate_passed(
+                {
+                    "actual_speaker_count": 3,
+                    "unassigned_segment_ratio": 0.2,
+                },
+                expected_speaker_count=3,
+            )
+        )
+
+    def test_required_diarization_runtime_reports_load_failure(self):
+        with patch.object(
+            self.diarization_runtime,
+            "preload_required_pipeline",
+            side_effect=RuntimeError("HF_TOKEN missing or invalid"),
+        ):
+            state = self.diarization_runtime.preload_diarization_runtime(
+                enabled=True,
+                hf_token="",
+            )
+
+        self.assertTrue(state["enabled"])
+        self.assertFalse(state["ready"])
+        self.assertIn("HF_TOKEN missing or invalid", state["error"])
 
     def test_whisperx_unload_releases_cached_models_and_cuda_memory(self):
         engine = self.whisperx_local.WhisperXLocalEngine()
         engine._initialized = True
         engine._model = object()
-        engine._diarization_pipeline = object()
         engine._align_models["en"] = (object(), object())
 
         fake_cuda = SimpleNamespace(
@@ -319,7 +452,6 @@ class WhisperXRegressionTests(unittest.TestCase):
             asyncio.run(engine.unload())
 
         self.assertIsNone(engine._model)
-        self.assertIsNone(engine._diarization_pipeline)
         self.assertEqual(engine._align_models, {})
         self.assertFalse(engine._initialized)
         gc_collect.assert_called_once_with()

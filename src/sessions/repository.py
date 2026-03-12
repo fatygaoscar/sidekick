@@ -17,9 +17,12 @@ from .models import (
     ImportantMarker,
     Meeting,
     Session,
+    SpeakerProfile,
+    SpeakerProfileExample,
     StructuredItem,
     Summary,
     TranscriptSegment,
+    TranscriptSpeakerProfileOverride,
     TranscriptVersion,
     WorkspaceChatMessage,
     WorkspaceChatThread,
@@ -28,6 +31,10 @@ from src.core.datetime_utils import to_utc_iso
 
 
 UNSET = object()
+
+
+def _normalize_speaker_profile_name(value: str | None) -> str:
+    return " ".join(str(value or "").strip().lower().split())
 
 
 class Repository:
@@ -165,6 +172,14 @@ class Repository:
             )
             await db.execute(
                 delete(WorkspaceChatThread).where(WorkspaceChatThread.session_id == session_id)
+            )
+            await db.execute(
+                delete(SpeakerProfileExample).where(SpeakerProfileExample.session_id == session_id)
+            )
+            await db.execute(
+                delete(TranscriptSpeakerProfileOverride).where(
+                    TranscriptSpeakerProfileOverride.session_id == session_id
+                )
             )
             await db.execute(
                 delete(Meeting).where(Meeting.session_id == session_id)
@@ -368,6 +383,7 @@ class Repository:
             settings = AppSettings(
                 id=1,
                 workspace_chat_enabled=bool(get_settings().workspace_chat_enabled),
+                speaker_repair_enabled=False,
                 summarization_backend=str(get_settings().summarization_backend.value),
                 recording_capture_mode="whole_room",
             )
@@ -380,6 +396,7 @@ class Repository:
         self,
         *,
         workspace_chat_enabled: bool | object = UNSET,
+        speaker_repair_enabled: bool | object = UNSET,
         summarization_backend: str | object = UNSET,
         recording_capture_mode: str | object = UNSET,
     ) -> AppSettings:
@@ -391,6 +408,7 @@ class Repository:
                 settings = AppSettings(
                     id=1,
                     workspace_chat_enabled=bool(get_settings().workspace_chat_enabled),
+                    speaker_repair_enabled=False,
                     summarization_backend=str(get_settings().summarization_backend.value),
                     recording_capture_mode="whole_room",
                 )
@@ -399,6 +417,8 @@ class Repository:
 
             if workspace_chat_enabled is not UNSET:
                 settings.workspace_chat_enabled = bool(workspace_chat_enabled)
+            if speaker_repair_enabled is not UNSET:
+                settings.speaker_repair_enabled = bool(speaker_repair_enabled)
             if summarization_backend is not UNSET:
                 settings.summarization_backend = str(summarization_backend)
             if recording_capture_mode is not UNSET:
@@ -407,6 +427,232 @@ class Repository:
             await db.commit()
             await db.refresh(settings)
             return settings
+
+    async def list_speaker_profiles(self, *, include_archived: bool = False) -> list[SpeakerProfile]:
+        """List local speaker profiles."""
+        async with self._session_factory() as db:
+            query = (
+                select(SpeakerProfile)
+                .options(selectinload(SpeakerProfile.examples))
+                .order_by(SpeakerProfile.display_name.asc(), SpeakerProfile.created_at.asc())
+            )
+            if not include_archived:
+                query = query.where(SpeakerProfile.archived_at.is_(None))
+            result = await db.execute(query)
+            return list(result.scalars().all())
+
+    async def get_speaker_profile(self, profile_id: str) -> SpeakerProfile | None:
+        """Get a speaker profile by ID."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(SpeakerProfile)
+                .options(selectinload(SpeakerProfile.examples))
+                .where(SpeakerProfile.id == profile_id)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_speaker_profile_by_name(self, display_name: str) -> SpeakerProfile | None:
+        """Resolve a speaker profile by normalized display name."""
+        normalized_name = _normalize_speaker_profile_name(display_name)
+        if not normalized_name:
+            return None
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(SpeakerProfile)
+                .options(selectinload(SpeakerProfile.examples))
+                .where(
+                    SpeakerProfile.normalized_name == normalized_name,
+                    SpeakerProfile.archived_at.is_(None),
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def create_speaker_profile(
+        self,
+        *,
+        display_name: str,
+        notes: str | None = None,
+    ) -> SpeakerProfile:
+        """Create a new local speaker profile."""
+        normalized_name = _normalize_speaker_profile_name(display_name)
+        if not normalized_name:
+            raise ValueError("display_name is required")
+        async with self._session_factory() as db:
+            existing_result = await db.execute(
+                select(SpeakerProfile).where(
+                    SpeakerProfile.normalized_name == normalized_name,
+                    SpeakerProfile.archived_at.is_(None),
+                )
+            )
+            existing = existing_result.scalar_one_or_none()
+            if existing is not None:
+                await db.refresh(existing)
+                return existing
+
+            profile = SpeakerProfile(
+                display_name=" ".join(str(display_name).strip().split()),
+                normalized_name=normalized_name,
+                notes=notes.strip() if notes else None,
+            )
+            db.add(profile)
+            await db.commit()
+            await db.refresh(profile)
+            return profile
+
+    async def add_speaker_profile_example(
+        self,
+        *,
+        speaker_profile_id: str,
+        session_id: str,
+        transcript_version_id: str | None,
+        speaker_cluster: str | None,
+        clip_start_seconds: float,
+        clip_end_seconds: float,
+        duration_seconds: float,
+        source_type: str,
+        embedding_model: str,
+        embedding_vector_json: str,
+    ) -> SpeakerProfileExample:
+        """Store a confirmed local speaker-example embedding."""
+        async with self._session_factory() as db:
+            example = SpeakerProfileExample(
+                speaker_profile_id=speaker_profile_id,
+                session_id=session_id,
+                transcript_version_id=transcript_version_id,
+                speaker_cluster=speaker_cluster,
+                clip_start_seconds=float(clip_start_seconds),
+                clip_end_seconds=float(clip_end_seconds),
+                duration_seconds=float(duration_seconds),
+                source_type=str(source_type),
+                embedding_model=str(embedding_model),
+                embedding_vector_json=embedding_vector_json,
+            )
+            db.add(example)
+            await db.commit()
+            await db.refresh(example)
+            return example
+
+    async def list_speaker_profile_examples(self, speaker_profile_id: str) -> list[SpeakerProfileExample]:
+        """List saved examples for one speaker profile, oldest first."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(SpeakerProfileExample)
+                .where(SpeakerProfileExample.speaker_profile_id == speaker_profile_id)
+                .order_by(SpeakerProfileExample.created_at.asc())
+            )
+            return list(result.scalars().all())
+
+    async def get_speaker_profile_example(self, example_id: str) -> SpeakerProfileExample | None:
+        """Get one speaker profile example."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(SpeakerProfileExample).where(SpeakerProfileExample.id == example_id)
+            )
+            return result.scalar_one_or_none()
+
+    async def delete_speaker_profile_example(self, example_id: str) -> bool:
+        """Delete one saved speaker profile example."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                delete(SpeakerProfileExample).where(SpeakerProfileExample.id == example_id)
+            )
+            await db.commit()
+            return bool(result.rowcount)
+
+    async def get_transcript_speaker_profile_override(
+        self,
+        transcript_version_id: str,
+        speaker_cluster: str,
+    ) -> TranscriptSpeakerProfileOverride | None:
+        """Get one transcript-scoped speaker-profile override."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(TranscriptSpeakerProfileOverride)
+                .options(selectinload(TranscriptSpeakerProfileOverride.speaker_profile))
+                .where(
+                    TranscriptSpeakerProfileOverride.transcript_version_id == transcript_version_id,
+                    TranscriptSpeakerProfileOverride.speaker_cluster == speaker_cluster,
+                )
+            )
+            return result.scalar_one_or_none()
+
+    async def list_transcript_speaker_profile_overrides(
+        self,
+        transcript_version_id: str,
+    ) -> list[TranscriptSpeakerProfileOverride]:
+        """List transcript-scoped speaker-profile overrides."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(TranscriptSpeakerProfileOverride)
+                .options(selectinload(TranscriptSpeakerProfileOverride.speaker_profile))
+                .where(TranscriptSpeakerProfileOverride.transcript_version_id == transcript_version_id)
+                .order_by(TranscriptSpeakerProfileOverride.created_at.asc())
+            )
+            return list(result.scalars().all())
+
+    async def set_transcript_speaker_profile_override(
+        self,
+        *,
+        session_id: str,
+        transcript_version_id: str,
+        speaker_cluster: str,
+        speaker_profile_id: str,
+    ) -> TranscriptSpeakerProfileOverride:
+        """Create or update a transcript-scoped speaker-profile override."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(TranscriptSpeakerProfileOverride).where(
+                    TranscriptSpeakerProfileOverride.transcript_version_id == transcript_version_id,
+                    TranscriptSpeakerProfileOverride.speaker_cluster == speaker_cluster,
+                )
+            )
+            override = result.scalar_one_or_none()
+            if override is None:
+                override = TranscriptSpeakerProfileOverride(
+                    session_id=session_id,
+                    transcript_version_id=transcript_version_id,
+                    speaker_cluster=speaker_cluster,
+                    speaker_profile_id=speaker_profile_id,
+                )
+                db.add(override)
+            else:
+                override.speaker_profile_id = speaker_profile_id
+            await db.commit()
+            await db.refresh(override)
+            return await self.get_transcript_speaker_profile_override(transcript_version_id, speaker_cluster)
+
+    async def delete_transcript_speaker_profile_override(
+        self,
+        transcript_version_id: str,
+        speaker_cluster: str,
+    ) -> bool:
+        """Delete one transcript-scoped speaker-profile override."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                delete(TranscriptSpeakerProfileOverride).where(
+                    TranscriptSpeakerProfileOverride.transcript_version_id == transcript_version_id,
+                    TranscriptSpeakerProfileOverride.speaker_cluster == speaker_cluster,
+                )
+            )
+            await db.commit()
+            return bool(result.rowcount)
+
+    async def delete_empty_speaker_profile(self, profile_id: str) -> bool:
+        """Delete a speaker profile only when it has no saved examples."""
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(SpeakerProfile)
+                .options(selectinload(SpeakerProfile.examples))
+                .where(SpeakerProfile.id == profile_id)
+            )
+            profile = result.scalar_one_or_none()
+            if profile is None:
+                return False
+            if getattr(profile, "examples", None):
+                raise ValueError("Speaker profile has saved voice examples")
+            await db.delete(profile)
+            await db.commit()
+            return True
 
     async def list_transcript_versions(self, session_id: str) -> list[TranscriptVersion]:
         """List transcript versions for a session, newest first."""
@@ -470,6 +716,15 @@ class Repository:
         transcription_model: str | None = None,
         diarization_backend: str | None = None,
         diarization_model: str | None = None,
+        diarization_expected_speaker_count: int | None = None,
+        diarization_late_join_offset_seconds: float | None = None,
+        diarization_repair_source_version_id: str | None = None,
+        repair_strategy: str | None = None,
+        diarization_actual_speaker_count: int | None = None,
+        diarization_unassigned_segment_count: int | None = None,
+        diarization_unassigned_segment_ratio: float | None = None,
+        repair_quality_gate_passed: bool | None = None,
+        repair_reason: str | None = None,
         template_key: str | None = None,
         custom_prompt: str | None = None,
         speaker_review_required: bool = False,
@@ -488,6 +743,15 @@ class Repository:
                 transcription_model=transcription_model,
                 diarization_backend=diarization_backend,
                 diarization_model=diarization_model,
+                diarization_expected_speaker_count=diarization_expected_speaker_count,
+                diarization_late_join_offset_seconds=diarization_late_join_offset_seconds,
+                diarization_repair_source_version_id=diarization_repair_source_version_id,
+                repair_strategy=repair_strategy,
+                diarization_actual_speaker_count=diarization_actual_speaker_count,
+                diarization_unassigned_segment_count=diarization_unassigned_segment_count,
+                diarization_unassigned_segment_ratio=diarization_unassigned_segment_ratio,
+                repair_quality_gate_passed=repair_quality_gate_passed,
+                repair_reason=repair_reason,
                 template_key=template_key,
                 custom_prompt=custom_prompt,
                 speaker_review_required=speaker_review_required,
@@ -511,6 +775,15 @@ class Repository:
         transcription_model: str | None | object = UNSET,
         diarization_backend: str | None | object = UNSET,
         diarization_model: str | None | object = UNSET,
+        diarization_expected_speaker_count: int | None | object = UNSET,
+        diarization_late_join_offset_seconds: float | None | object = UNSET,
+        diarization_repair_source_version_id: str | None | object = UNSET,
+        repair_strategy: str | None | object = UNSET,
+        diarization_actual_speaker_count: int | None | object = UNSET,
+        diarization_unassigned_segment_count: int | None | object = UNSET,
+        diarization_unassigned_segment_ratio: float | None | object = UNSET,
+        repair_quality_gate_passed: bool | None | object = UNSET,
+        repair_reason: str | None | object = UNSET,
     ) -> TranscriptVersion | None:
         """Update mutable transcript version fields."""
         values: dict[str, Any] = {"updated_at": datetime.utcnow()}
@@ -532,6 +805,24 @@ class Repository:
             values["diarization_backend"] = diarization_backend
         if diarization_model is not UNSET:
             values["diarization_model"] = diarization_model
+        if diarization_expected_speaker_count is not UNSET:
+            values["diarization_expected_speaker_count"] = diarization_expected_speaker_count
+        if diarization_late_join_offset_seconds is not UNSET:
+            values["diarization_late_join_offset_seconds"] = diarization_late_join_offset_seconds
+        if diarization_repair_source_version_id is not UNSET:
+            values["diarization_repair_source_version_id"] = diarization_repair_source_version_id
+        if repair_strategy is not UNSET:
+            values["repair_strategy"] = repair_strategy
+        if diarization_actual_speaker_count is not UNSET:
+            values["diarization_actual_speaker_count"] = diarization_actual_speaker_count
+        if diarization_unassigned_segment_count is not UNSET:
+            values["diarization_unassigned_segment_count"] = diarization_unassigned_segment_count
+        if diarization_unassigned_segment_ratio is not UNSET:
+            values["diarization_unassigned_segment_ratio"] = diarization_unassigned_segment_ratio
+        if repair_quality_gate_passed is not UNSET:
+            values["repair_quality_gate_passed"] = repair_quality_gate_passed
+        if repair_reason is not UNSET:
+            values["repair_reason"] = repair_reason
 
         async with self._session_factory() as db:
             await db.execute(
@@ -541,6 +832,67 @@ class Repository:
             )
             await db.commit()
         return await self.get_transcript_version(version_id)
+
+    async def clone_transcript_version_segments(
+        self,
+        *,
+        source_transcript_version_id: str,
+        target_transcript_version_id: str,
+        speaker_cluster_rewrites: dict[str, str] | None = None,
+    ) -> int:
+        """Clone transcript segments from one version into another."""
+        speaker_cluster_rewrites = {
+            str(key): str(value)
+            for key, value in (speaker_cluster_rewrites or {}).items()
+            if str(key).strip() and str(value).strip()
+        }
+        async with self._session_factory() as db:
+            source_result = await db.execute(
+                select(TranscriptSegment)
+                .where(TranscriptSegment.transcript_version_id == source_transcript_version_id)
+                .order_by(TranscriptSegment.start_time.asc(), TranscriptSegment.created_at.asc())
+            )
+            source_segments = list(source_result.scalars().all())
+            if not source_segments:
+                return 0
+
+            target_version_result = await db.execute(
+                select(TranscriptVersion).where(TranscriptVersion.id == target_transcript_version_id)
+            )
+            target_version = target_version_result.scalar_one_or_none()
+            if target_version is None:
+                return 0
+
+            clones: list[TranscriptSegment] = []
+            for segment in source_segments:
+                rewritten_cluster = speaker_cluster_rewrites.get(
+                    str(getattr(segment, "speaker_cluster", "") or "")
+                )
+                speaker_cluster = rewritten_cluster if rewritten_cluster is not None else segment.speaker_cluster
+                speaker_label = segment.speaker
+                if rewritten_cluster is not None and segment.speaker == segment.speaker_cluster:
+                    speaker_label = rewritten_cluster
+                clones.append(
+                    TranscriptSegment(
+                        session_id=segment.session_id,
+                        meeting_id=segment.meeting_id,
+                        transcript_version_id=target_transcript_version_id,
+                        text=segment.text,
+                        start_time=segment.start_time,
+                        end_time=segment.end_time,
+                        created_at=segment.created_at,
+                        is_important=segment.is_important,
+                        confidence=segment.confidence,
+                        speaker=speaker_label,
+                        speaker_cluster=speaker_cluster,
+                    )
+                )
+
+            db.add_all(clones)
+            await db.flush()
+            await self._refresh_transcript_search_index_for_session(db, target_version.session_id)
+            await db.commit()
+            return len(clones)
 
     async def ensure_transcript_versions(self, session_id: str) -> list[TranscriptVersion]:
         """Lazy-backfill transcript version v1 for legacy recordings."""
@@ -727,6 +1079,32 @@ class Repository:
             for session_id in session_ids:
                 await self._refresh_transcript_search_index_for_session(db, session_id)
             await db.commit()
+
+    async def update_transcript_version_cluster_speaker_name(
+        self,
+        *,
+        transcript_version_id: str,
+        speaker_cluster: str,
+        speaker_name: str | None,
+    ) -> int:
+        """Bulk update one cluster's display speaker name within one transcript version."""
+        async with self._session_factory() as db:
+            session_result = await db.execute(
+                select(TranscriptVersion.session_id).where(TranscriptVersion.id == transcript_version_id)
+            )
+            session_id = session_result.scalar_one_or_none()
+            result = await db.execute(
+                update(TranscriptSegment)
+                .where(
+                    TranscriptSegment.transcript_version_id == transcript_version_id,
+                    TranscriptSegment.speaker_cluster == speaker_cluster,
+                )
+                .values(speaker=speaker_name)
+            )
+            if session_id:
+                await self._refresh_transcript_search_index_for_session(db, session_id)
+            await db.commit()
+            return result.rowcount or 0
 
     async def update_segments_speaker_metadata(
         self,
@@ -1651,6 +2029,15 @@ class Repository:
                     transcription_model VARCHAR(100),
                     diarization_backend VARCHAR(50),
                     diarization_model VARCHAR(100),
+                    diarization_expected_speaker_count INTEGER,
+                    diarization_late_join_offset_seconds FLOAT,
+                    diarization_repair_source_version_id VARCHAR(36),
+                    repair_strategy VARCHAR(48),
+                    diarization_actual_speaker_count INTEGER,
+                    diarization_unassigned_segment_count INTEGER,
+                    diarization_unassigned_segment_ratio FLOAT,
+                    repair_quality_gate_passed BOOLEAN,
+                    repair_reason VARCHAR(32),
                     template_key VARCHAR(100),
                     custom_prompt TEXT,
                     speaker_review_required BOOLEAN DEFAULT 0,
@@ -1661,6 +2048,44 @@ class Repository:
                 """
             )
         )
+        result = await conn.execute(text("PRAGMA table_info(transcript_versions)"))
+        column_names = {row[1] for row in result.fetchall()}
+        if "diarization_expected_speaker_count" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE transcript_versions ADD COLUMN diarization_expected_speaker_count INTEGER")
+            )
+        if "diarization_late_join_offset_seconds" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE transcript_versions ADD COLUMN diarization_late_join_offset_seconds FLOAT")
+            )
+        if "diarization_repair_source_version_id" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE transcript_versions ADD COLUMN diarization_repair_source_version_id VARCHAR(36)")
+            )
+        if "repair_strategy" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE transcript_versions ADD COLUMN repair_strategy VARCHAR(48)")
+            )
+        if "diarization_actual_speaker_count" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE transcript_versions ADD COLUMN diarization_actual_speaker_count INTEGER")
+            )
+        if "diarization_unassigned_segment_count" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE transcript_versions ADD COLUMN diarization_unassigned_segment_count INTEGER")
+            )
+        if "diarization_unassigned_segment_ratio" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE transcript_versions ADD COLUMN diarization_unassigned_segment_ratio FLOAT")
+            )
+        if "repair_quality_gate_passed" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE transcript_versions ADD COLUMN repair_quality_gate_passed BOOLEAN")
+            )
+        if "repair_reason" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE transcript_versions ADD COLUMN repair_reason VARCHAR(32)")
+            )
 
     async def _ensure_transcript_segment_version_column(self, conn) -> None:
         """Backfill schema for transcript version linkage."""
@@ -1868,6 +2293,7 @@ class Repository:
                 CREATE TABLE IF NOT EXISTS app_settings (
                     id INTEGER PRIMARY KEY,
                     workspace_chat_enabled BOOLEAN NOT NULL DEFAULT 0,
+                    speaker_repair_enabled BOOLEAN NOT NULL DEFAULT 0,
                     summarization_backend VARCHAR(32) NOT NULL DEFAULT 'ollama',
                     recording_capture_mode VARCHAR(32) NOT NULL DEFAULT 'whole_room',
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1881,6 +2307,10 @@ class Repository:
         if "summarization_backend" not in column_names:
             await conn.execute(
                 text("ALTER TABLE app_settings ADD COLUMN summarization_backend VARCHAR(32) DEFAULT 'ollama'")
+            )
+        if "speaker_repair_enabled" not in column_names:
+            await conn.execute(
+                text("ALTER TABLE app_settings ADD COLUMN speaker_repair_enabled BOOLEAN DEFAULT 0")
             )
         if "recording_capture_mode" not in column_names:
             await conn.execute(
@@ -1913,17 +2343,19 @@ class Repository:
                 INSERT INTO app_settings (
                     id,
                     workspace_chat_enabled,
+                    speaker_repair_enabled,
                     summarization_backend,
                     recording_capture_mode,
                     created_at,
                     updated_at
                 )
-                SELECT 1, :workspace_chat_enabled, :summarization_backend, :recording_capture_mode, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                SELECT 1, :workspace_chat_enabled, :speaker_repair_enabled, :summarization_backend, :recording_capture_mode, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 WHERE NOT EXISTS (SELECT 1 FROM app_settings WHERE id = 1)
                 """
             ),
             {
                 "workspace_chat_enabled": 1 if get_settings().workspace_chat_enabled else 0,
+                "speaker_repair_enabled": 0,
                 "summarization_backend": str(get_settings().summarization_backend.value),
                 "recording_capture_mode": "whole_room",
             },

@@ -41,6 +41,13 @@ class FileTranscriptionResult:
     segments: list[AlignedTranscriptSegment]
     confidence: float | None = None
     language: str | None = None
+    diarization_backend: str | None = None
+    diarization_model: str | None = None
+    repair_strategy: str | None = None
+    diarization_actual_speaker_count: int | None = None
+    diarization_unassigned_segment_count: int | None = None
+    diarization_unassigned_segment_ratio: float | None = None
+    repair_quality_gate_passed: bool | None = None
 
 
 class TranscriptionEngine(ABC):
@@ -95,6 +102,9 @@ class TranscriptionEngine(ABC):
         file_path: str | Path,
         language: str | None = None,
         progress_callback=None,
+        expected_speaker_count: int | None = None,
+        late_join_offset_seconds: float | None = None,
+        repair_reason: str | None = None,
     ) -> FileTranscriptionResult:
         """Transcribe an audio file from disk."""
         raise NotImplementedError(f"{self.__class__.__name__} does not support file transcription")

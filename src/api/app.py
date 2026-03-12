@@ -1,5 +1,6 @@
 """FastAPI application factory."""
 
+import asyncio
 import json
 import re
 from contextlib import asynccontextmanager
@@ -16,6 +17,12 @@ from src.sessions.models import init_db
 from src.sessions.repository import Repository
 from src.sessions.manager import SessionManager
 from src.transcription.manager import TranscriptionManager
+from src.transcription.diarization_runtime import diarization_runtime_state, preload_diarization_runtime
+from src.transcription.speaker_profiles import (
+    get_embedding_model_name,
+    get_loaded_embedding_device,
+    preload_speaker_embedding_model,
+)
 from src.summarization.manager import SummarizationManager
 
 
@@ -26,6 +33,8 @@ class AppState:
     session_manager: SessionManager
     transcription_manager: TranscriptionManager
     summarization_manager: SummarizationManager
+    diarization_runtime: dict
+    speaker_embedding_runtime: dict
 
 
 @asynccontextmanager
@@ -52,6 +61,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_manager = SessionManager(app.state.repository)
     app.state.transcription_manager = TranscriptionManager(settings)
     app.state.summarization_manager = SummarizationManager(settings)
+    app.state.diarization_runtime = await asyncio.to_thread(
+        preload_diarization_runtime,
+        enabled=bool(settings.diarization_enabled),
+        hf_token=settings.hf_token,
+    )
+    app.state.speaker_embedding_runtime = {
+        "ready": False,
+        "model": get_embedding_model_name(),
+        "device": None,
+        "error": None,
+    }
+    try:
+        await asyncio.to_thread(preload_speaker_embedding_model, settings.hf_token)
+        app.state.speaker_embedding_runtime = {
+            "ready": True,
+            "model": get_embedding_model_name(),
+            "device": get_loaded_embedding_device(),
+            "error": None,
+        }
+    except Exception as exc:
+        app.state.speaker_embedding_runtime = {
+            "ready": False,
+            "model": get_embedding_model_name(),
+            "device": get_loaded_embedding_device(),
+            "error": str(exc),
+        }
     app_settings = await app.state.repository.get_app_settings(create_if_missing=True)
     if app_settings is not None:
         app.state.summarization_manager.set_selected_backend(
@@ -152,9 +187,15 @@ def create_app() -> FastAPI:
     # Health check endpoint
     @app.get("/health")
     async def health_check() -> dict:
+        diarization = getattr(app.state, "diarization_runtime", None) or diarization_runtime_state()
+        status = "healthy"
+        if diarization.get("enabled") and not diarization.get("ready"):
+            status = "degraded"
         return {
-            "status": "healthy",
+            "status": status,
             "version": "0.1.0",
+            "diarization": diarization,
+            "speaker_embeddings": getattr(app.state, "speaker_embedding_runtime", None) or {},
         }
 
     # Root redirect to UI

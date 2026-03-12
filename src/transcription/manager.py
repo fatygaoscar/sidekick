@@ -187,6 +187,9 @@ class TranscriptionManager:
         file_path: str | Path,
         language: str | None = None,
         progress_callback: Optional[ProgressCallback] = None,
+        expected_speaker_count: int | None = None,
+        late_join_offset_seconds: float | None = None,
+        repair_reason: str | None = None,
     ) -> FileTranscriptionResult:
         """
         Transcribe an audio file from disk.
@@ -218,6 +221,9 @@ class TranscriptionManager:
                 resolved,
                 language=language,
                 progress_callback=progress_callback,
+                expected_speaker_count=expected_speaker_count,
+                late_join_offset_seconds=late_join_offset_seconds,
+                repair_reason=repair_reason,
             )
             await self._event_bus.emit(
                 EventType.TRANSCRIPTION_COMPLETED,
