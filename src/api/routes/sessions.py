@@ -55,6 +55,16 @@ from src.sessions.repository import Repository, UNSET
 from src.summarization.manager import SummarizationManager
 from src.summarization.prompts import DEFAULT_TEMPLATE_KEY, normalize_template_key
 from src.transcription.diarize import assign_speaker, diarize
+from src.transcription.speaker_attribution import (
+    assign_speakers_to_segments,
+    repair_quality_gate_passed,
+    speaker_assignment_metrics,
+)
+from src.transcription.speaker_review_state import (
+    speaker_identity,
+    speaker_review_update_fields,
+    transcript_requires_speaker_review,
+)
 from src.transcription.speaker_profiles import (
     apply_profile_matches_to_segments,
     build_profile_example,
@@ -239,7 +249,7 @@ async def _run_speaker_detection_job(
             int(expected_speaker_count) if expected_speaker_count is not None else None,
             int(expected_speaker_count) if expected_speaker_count is not None else None,
         )
-        reassigned_segments = _assign_segments_from_spans(source_segments, spans)
+        reassigned_segments = assign_speakers_to_segments(source_segments, spans, assign_speaker)
 
         _update_speaker_detection_job(
             job_id,
@@ -273,11 +283,11 @@ async def _run_speaker_detection_job(
                 session_id=session_id,
                 meeting_id=source_version.meeting_id,
                 transcript_version_id=target_transcript_version_id,
-                text=str(segment["text"]).strip(),
-                start_time=float(segment["start"]),
-                end_time=float(segment["end"]),
-                speaker=segment.get("speaker"),
-                speaker_cluster=segment.get("speaker_cluster"),
+                text=str(segment.text).strip(),
+                start_time=float(segment.start),
+                end_time=float(segment.end),
+                speaker=segment.speaker,
+                speaker_cluster=segment.speaker_cluster,
                 confidence=None,
             )
         await repository.set_session_has_transcription(session_id, True)
@@ -287,14 +297,16 @@ async def _run_speaker_detection_job(
             session_id=session_id,
             transcript_version_id=target_transcript_version_id,
         )
-        metrics = _transcript_speaker_metrics(persisted_segments)
-        if (
-            expected_speaker_count is not None
-            and (
-                int(metrics["actual_speaker_count"]) != int(expected_speaker_count)
-                or float(metrics["unassigned_segment_ratio"]) > 0.05
+        metrics = speaker_assignment_metrics(persisted_segments)
+        gate_passed = (
+            repair_quality_gate_passed(
+                metrics,
+                expected_speaker_count=int(expected_speaker_count),
             )
-        ):
+            if expected_speaker_count is not None
+            else None
+        )
+        if gate_passed is False:
             await repository.update_transcript_version(
                 target_transcript_version_id,
                 status="failed",
@@ -310,12 +322,11 @@ async def _run_speaker_detection_job(
         updated_version = await repository.update_transcript_version(
             target_transcript_version_id,
             status="ready",
-            speaker_review_required=_transcript_requires_speaker_review(persisted_segments),
-            speaker_review_completed_at=None,
+            **speaker_review_update_fields(persisted_segments),
             diarization_actual_speaker_count=metrics["actual_speaker_count"],
             diarization_unassigned_segment_count=metrics["unassigned_segment_count"],
             diarization_unassigned_segment_ratio=metrics["unassigned_segment_ratio"],
-            repair_quality_gate_passed=True if expected_speaker_count is not None else None,
+            repair_quality_gate_passed=gate_passed,
         )
         _update_speaker_detection_job(
             job_id,
@@ -442,30 +453,14 @@ def _normalize_optional_text(value: str | None) -> str:
     return (value or "").strip()
 
 
-def _transcript_requires_speaker_review(segments: list) -> bool:
-    unresolved = set()
-    for segment in segments:
-        speaker_name = getattr(segment, "speaker", None)
-        speaker_cluster = getattr(segment, "speaker_cluster", None)
-        if speaker_name and not is_generic_speaker(speaker_name):
-            continue
-        speaker_key = speaker_name or speaker_cluster
-        if is_generic_speaker(speaker_key):
-            unresolved.add(speaker_key)
-    return len(unresolved) > 1
-
-
 async def _sync_transcript_speaker_review_state(
     repository: Repository,
     transcript_version_id: str,
     segments: list,
 ):
-    requires_review = _transcript_requires_speaker_review(segments)
-    completed_at = datetime.now(timezone.utc) if not requires_review else None
     return await repository.update_transcript_version(
         transcript_version_id,
-        speaker_review_required=requires_review,
-        speaker_review_completed_at=completed_at,
+        **speaker_review_update_fields(segments),
     )
 
 
@@ -569,25 +564,6 @@ async def _normalize_legacy_session_lifecycle(
     return updated_session or session, True
 
 
-def _transcript_speaker_metrics(segments: list) -> dict[str, float | int]:
-    total_segments = len(segments)
-    raw_speakers = [
-        getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
-        for segment in segments
-    ]
-    assigned = [speaker for speaker in raw_speakers if speaker]
-    unassigned_count = sum(1 for speaker in raw_speakers if not speaker)
-    return {
-        "actual_speaker_count": len({speaker for speaker in assigned}),
-        "unassigned_segment_count": unassigned_count,
-        "unassigned_segment_ratio": (
-            float(unassigned_count) / float(total_segments)
-            if total_segments
-            else 0.0
-        ),
-    }
-
-
 def _serialize_speaker_profile(profile) -> dict:
     examples = getattr(profile, "examples", []) or []
     return {
@@ -637,46 +613,6 @@ def _speaker_profile_overrides_by_cluster(overrides: list | None) -> dict[str, o
         for override in (overrides or [])
         if str(getattr(override, "speaker_cluster", "")).strip()
     }
-
-
-def _build_segment_dicts_for_rerun(segments: list, *, match_name_map: dict[str, str] | None = None) -> list[dict]:
-    match_name_map = match_name_map or {}
-    rebuilt: list[dict] = []
-    for segment in segments:
-        cluster = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
-        assigned_name = match_name_map.get(str(cluster)) if cluster else None
-        rebuilt.append(
-            {
-                "text": segment.text,
-                "start": float(segment.start_time),
-                "end": float(segment.end_time),
-                "speaker_cluster": str(cluster) if cluster else None,
-                "speaker": assigned_name or (str(cluster) if cluster else None),
-            }
-        )
-    return rebuilt
-
-
-def _assign_segments_from_spans(segments: list, spans: list[tuple[float, float, str]]) -> list[dict]:
-    reassigned: list[dict] = []
-    for segment in segments:
-        speaker_cluster = assign_speaker(
-            float(segment.start_time),
-            float(segment.end_time),
-            spans,
-            min_overlap=0.05,
-            min_overlap_ratio=0.15,
-        )
-        reassigned.append(
-            {
-                "text": segment.text,
-                "start": float(segment.start_time),
-                "end": float(segment.end_time),
-                "speaker_cluster": str(speaker_cluster) if speaker_cluster is not None else None,
-                "speaker": str(speaker_cluster) if speaker_cluster is not None else None,
-            }
-        )
-    return reassigned
 
 
 def _transcript_version_label(version) -> str:
@@ -924,7 +860,7 @@ def _build_speaker_cards(
     profiles_by_name = _speaker_profiles_by_name(speaker_profiles or [])
     overrides_by_cluster = _speaker_profile_overrides_by_cluster(speaker_profile_overrides)
     for segment in segments:
-        speaker_cluster = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+        speaker_cluster = speaker_identity(segment)
         if not speaker_cluster:
             continue
         grouped.setdefault(speaker_cluster, []).append(segment)
@@ -1830,7 +1766,7 @@ async def get_recording_workspace(
 
     step_started_at = perf_counter()
     if active_version and session.has_transcription and segments:
-        inferred_requires_review = _transcript_requires_speaker_review(segments)
+        inferred_requires_review = transcript_requires_speaker_review(segments)
         is_completed = getattr(active_version, "speaker_review_completed_at", None) is not None
         should_be_completed = not inferred_requires_review
         if (
@@ -2910,7 +2846,7 @@ async def update_recording_speakers(
     updates: dict[str, str | None] = {}
     cluster_assignments: dict[str, str] = {}
     for segment in segments:
-        speaker_cluster = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+        speaker_cluster = speaker_identity(segment)
         if not speaker_cluster:
             continue
         mapped_name = request.assignments.get(speaker_cluster)
@@ -2978,9 +2914,9 @@ async def merge_speaker_clusters(
         transcript_version_id=active_version.id,
     )
     available_clusters = {
-        getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+        speaker_identity(segment)
         for segment in segments
-        if getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
+        if speaker_identity(segment)
     }
     if source_cluster not in available_clusters or target_cluster not in available_clusters:
         raise HTTPException(status_code=404, detail="Speaker cluster not found")
@@ -3022,12 +2958,11 @@ async def merge_speaker_clusters(
         session_id=session_id,
         transcript_version_id=merged_version.id,
     )
-    merged_metrics = _transcript_speaker_metrics(merged_segments)
+    merged_metrics = speaker_assignment_metrics(merged_segments)
     merged_version = await repository.update_transcript_version(
         merged_version.id,
         status="ready",
-        speaker_review_required=_transcript_requires_speaker_review(merged_segments),
-        speaker_review_completed_at=None,
+        **speaker_review_update_fields(merged_segments),
         repair_strategy="manual_cluster_merge",
         diarization_actual_speaker_count=merged_metrics["actual_speaker_count"],
         diarization_unassigned_segment_count=merged_metrics["unassigned_segment_count"],

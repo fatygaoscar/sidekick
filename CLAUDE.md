@@ -43,7 +43,7 @@ python -m src.main
 
 ### 2) Export Pipeline (authoritative)
 
-`saved audio file -> WhisperX transcribe -> align -> diarize -> cohesive summary -> markdown`
+`saved audio file -> WhisperX transcribe -> align -> pyannote diarize -> shared speaker attribution -> cohesive summary -> markdown`
 
 - `src/api/routes/export.py`
 - Uses saved session audio from `data/audio/`

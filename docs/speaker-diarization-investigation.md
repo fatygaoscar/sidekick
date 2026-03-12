@@ -120,13 +120,29 @@ Older recordings with incomplete legacy metadata are now normalized on read so t
 
 This specifically targeted the `Power BI Refinement` March 4 workspace-open failure.
 
+### 12. Centralized speaker attribution and review-state logic
+
+The core speaker logic is now shared instead of being reimplemented separately in multiple paths:
+
+- initial WhisperX transcription
+- speaker-detection reruns
+- transcript-version speaker review state updates
+
+This means:
+
+- pyannote span-to-segment assignment now comes from one shared helper
+- repair quality-gate metrics come from one shared helper
+- speaker-review-required state comes from one shared helper
+
+The practical goal is not new model quality by itself. It is to reduce drift between initial transcription and rerun behavior so speaker bugs are easier to reason about and fix.
+
 ## Current Product Behavior
 
 ### Initial transcription
 
 1. WhisperX transcribes and aligns.
 2. `community-1` diarizes the full recording.
-3. Sidekick assigns speaker labels onto the aligned transcript.
+3. Sidekick applies shared speaker-attribution logic onto the aligned transcript.
 4. If known local speaker profiles exist, speaker/profile matching may relabel clusters.
 
 ### Speaker review

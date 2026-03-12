@@ -5,7 +5,7 @@ This document contains foundational mandates for the Gemini CLI agent working on
 ## Engineering Standards
 
 - **Obsidian First:** All summarization logic must prioritize scannability in Obsidian. Use bullet points (`-`), nested indentation (2 spaces), and blank lines between sections. **No long paragraphs.**
-- **Local AI Integrity:** Ensure all AI operations remain compatible with the current local stack (WhisperX for transcription/alignment/diarization, Ollama for summarization).
+- **Local AI Integrity:** Ensure all AI operations remain compatible with the current local stack (WhisperX for transcription/alignment, pyannote `community-1` for diarization, Ollama for summarization).
 - **Meeting Summaries:** `General Meeting` uses the legacy cohesive two-pass summarizer with a relevance-first prompt contract. Prefer selective, useful notes over exhaustive coverage.
 - **Workspace Controller:** Keep `web/js/recording-workspace.js` as the shared workspace implementation for both post-recording review and History `Open`.
 - **Mobile optimization:** Maintain the iPhone-friendly UI. Do not re-introduce internal scrollbars or oversized text. Modals must expand and scroll as a single unit.

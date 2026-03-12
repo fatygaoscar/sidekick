@@ -57,6 +57,10 @@ from src.summarization.prompts import (
 )
 from src.transcription.manager import TranscriptionManager
 from src.transcription.audio_decode import media_duration_seconds
+from src.transcription.speaker_review_state import (
+    speaker_identity,
+    speaker_review_update_fields,
+)
 from src.transcription.speaker_profiles import apply_profile_matches_to_segments, match_segments_to_profiles
 from src.workspace_chat.service import WorkspaceChatService
 
@@ -461,19 +465,6 @@ def _compute_transcription_job_progress(stage: str, transcription_progress: floa
     return max(0.0, min(transcription_progress, 1.0))
 
 
-def _speaker_identity(segment) -> str | None:
-    return getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None)
-
-
-def _speaker_review_required(segments: list) -> bool:
-    raw_clusters = {
-        identity
-        for identity in (_speaker_identity(segment) for segment in segments)
-        if identity and str(identity).startswith("SPEAKER_")
-    }
-    return len(raw_clusters) > 1
-
-
 def _speaker_review_blocks_summary(meeting) -> bool:
     return False
 
@@ -483,12 +474,9 @@ async def _update_transcript_version_speaker_review_state(
     transcript_version_id: str,
     segments: list,
 ) -> None:
-    required = _speaker_review_required(segments)
-    completed_at = None if required else datetime.utcnow()
     await repository.update_transcript_version(
         transcript_version_id,
-        speaker_review_required=required,
-        speaker_review_completed_at=completed_at,
+        **speaker_review_update_fields(segments),
     )
 
 
@@ -641,7 +629,7 @@ def _segments_to_transcript(segments: list) -> tuple[str, float]:
     fallback_map = build_user_facing_speaker_map(
         (
             (inferred or {}).get("speaker_cluster")
-            or _speaker_identity(segment)
+            or speaker_identity(segment)
             or (inferred or {}).get("speaker")
         )
         for segment, inferred in zip(segments, inferred_speakers)
@@ -652,7 +640,7 @@ def _segments_to_transcript(segments: list) -> tuple[str, float]:
         marker = " [IMPORTANT]" if segment.is_important else ""
         effective_speaker = getattr(segment, "speaker", None) or (inferred or {}).get("speaker")
         effective_raw_label = (
-            _speaker_identity(segment)
+            speaker_identity(segment)
             or (inferred or {}).get("speaker_cluster")
             or (inferred or {}).get("speaker")
         )

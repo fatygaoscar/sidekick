@@ -134,6 +134,7 @@ class WhisperXRegressionTests(unittest.TestCase):
         cls.diarize_module = importlib.import_module("src.transcription.diarize")
         cls.manager_module = importlib.import_module("src.transcription.manager")
         cls.diarization_runtime = importlib.import_module("src.transcription.diarization_runtime")
+        cls.speaker_attribution = importlib.import_module("src.transcription.speaker_attribution")
         cls.websocket = importlib.import_module("src.api.routes.websocket")
         cls.settings_module = importlib.import_module("config.settings")
         cls.whisperx_local = importlib.import_module("src.transcription.whisperx_local")
@@ -396,10 +397,8 @@ class WhisperXRegressionTests(unittest.TestCase):
         self.assertEqual(result.diarization_actual_speaker_count, 3)
 
     def test_repair_quality_gate_rejects_wrong_count_and_high_unassigned_ratio(self):
-        engine = self.whisperx_local.WhisperXLocalEngine()
-
         self.assertFalse(
-            engine._repair_quality_gate_passed(
+            self.speaker_attribution.repair_quality_gate_passed(
                 {
                     "actual_speaker_count": 4,
                     "unassigned_segment_ratio": 0.0,
@@ -408,7 +407,7 @@ class WhisperXRegressionTests(unittest.TestCase):
             )
         )
         self.assertFalse(
-            engine._repair_quality_gate_passed(
+            self.speaker_attribution.repair_quality_gate_passed(
                 {
                     "actual_speaker_count": 3,
                     "unassigned_segment_ratio": 0.2,

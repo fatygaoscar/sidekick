@@ -7,7 +7,7 @@ Browser-based meeting recorder that captures audio, builds transcript versions, 
 - **High-fidelity audio** — captures and plays back at 48kHz while downsampling to 16kHz for AI
 - **Recovery-first recording pipeline** — live recordings are retained as chunk storage first, finalized audio second
 - **Local transcription** via WhisperX large-v3 (CUDA, float16)
-- **Speaker alignment + diarization** via WhisperX forced alignment and diarization pipeline
+- **Speaker alignment + diarization** via WhisperX forced alignment plus pyannote `speaker-diarization-community-1`
 - **Manual-first speaker identification** — review speaker clips and assign names directly in the workspace
 - **Readable unresolved speakers** — transcript and summary views use `Attendee`, `Attendee A`, `Attendee B`, etc. instead of raw `SPEAKER_XX`
 - **Authoritative stop flow** — browser waits for chunk uploads, asks the server to finalize, and only uses a large backup upload as a last resort
@@ -97,7 +97,8 @@ Browser
                      or auto-start from workspace
                                 │
                      WhisperX large-v3 (CUDA, float16, batch 16)
-                     transcribe → forced alignment → diarization
+                     transcribe → forced alignment → pyannote diarization
+                     → shared speaker attribution + review-state derivation
                      → transcript version + aligned segments
                                 │
                      cohesive.py summary generation
@@ -158,7 +159,7 @@ sidekick/
 │   │       ├── narrator.py
 │   │       └── pipeline.py
 │   └── transcription/
-│       ├── diarize.py                # Legacy standalone pyannote helpers (deprecated runtime path)
+│       ├── diarize.py                # Shared pyannote diarization helpers
 │       ├── manager.py                # Transcription orchestration
 │       ├── whisper_local.py          # Legacy faster-whisper engine (deprecated runtime path)
 │       └── whisperx_local.py         # WhisperX local engine for authoritative file transcription
@@ -296,7 +297,7 @@ Diarization is free, fully local, and runs on GPU.
 
 1. Create a free account at [huggingface.co](https://huggingface.co)
 2. Accept the license for each gated model:
-   - WhisperX diarization dependencies gated by your Hugging Face token
+   - `pyannote/speaker-diarization-community-1`
    - language-specific WhisperX alignment models loaded on demand
 3. Generate a read token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
 4. Add to `.env`:

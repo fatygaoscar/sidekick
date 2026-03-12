@@ -61,7 +61,7 @@ sidekick/
 │   │       ├── narrator.py
 │   │       └── pipeline.py
 │   └── transcription/
-│       ├── diarize.py                # Legacy standalone pyannote helpers (deprecated runtime path)
+│       ├── diarize.py                # Shared pyannote diarization helpers
 │       ├── manager.py                # Transcription orchestration
 │       ├── whisper_local.py          # Legacy faster-whisper engine (deprecated runtime path)
 │       └── whisperx_local.py         # WhisperX local engine for authoritative file transcription
@@ -315,7 +315,8 @@ Default template: `meeting`
 - **Attendees Compatibility:** `meeting.attendees` and `attendees_snapshot` still exist in the DB/API for backward compatibility, but they are deprecated and no longer drive speaker resolution or summary gating.
 
 **Key implementation notes**:
-- Local authoritative transcription uses **WhisperX** with forced alignment and integrated diarization.
+- Local authoritative transcription uses **WhisperX** for ASR/alignment and `pyannote/speaker-diarization-community-1` for diarization.
+- Speaker attribution and speaker-review state are centralized in shared helpers so initial transcription and speaker-detection reruns follow the same rules.
 - `TRANSCRIPTION_BACKEND=local` disables live preview; only the saved-file pipeline is authoritative for local runs.
 - Audio loaded via **PyAV** — no system `ffmpeg` needed.
 - Manual resolution endpoint returns clip URLs; frontend plays cached WAV speaker clips directly.
