@@ -100,6 +100,10 @@ sidekick/
     ├── benchmark_summary.py          # Benchmark full two-pass cohesive summary pipeline
     ├── benchmark_utils.py            # Shared benchmark helpers
     ├── re_export.py                  # Re-export or rewrite Obsidian output for an existing recording
+    ├── capture_week_folder_meetings.py
+    │                                 # Conservative capture/move tool for legacy `2026 Week ##` folders
+    ├── rewrite_meetings_to_modern_export.py
+    │                                 # Conservative dry-run-first rewrite for untouched Meetings notes only
     └── switch_sidekick_branch.sh     # Stop/stash/switch/restart helper for main/dev workflows
 ```
 
@@ -304,6 +308,8 @@ Default template: `meeting`
 - **Unified View & Refinement:** functionally identical review/view modals.
 - **Obsidian Versioning:** canonical `vN` numbering still applies to saved summaries and archived export files, but the visible latest note keeps a clean filename without `(vN)`.
 - **Obsidian migration tool:** `python3 scripts/migrate_obsidian_meetings_layout.py` is the backup-first, dry-run-by-default way to reorganize old week/archive notes into the new year/month layout. It copies first, verifies hashes, updates DB paths only after successful copy, and does not auto-delete originals.
+- **Obsidian week-folder capture tool:** `python3 scripts/capture_week_folder_meetings.py` is the conservative bridge for old `2026 Week ##` folders. It promotes one visible latest note per inferred meeting when possible, moves older versions into `_versions/`, adds only factual Properties to unmatched legacy notes, preserves note bodies unless a DB-backed note still qualifies for a full modern rebuild, and only updates `summaries.obsidian_relative_path` for notes that are still DB-backed.
+- **Obsidian rewrite tool:** `python3 scripts/rewrite_meetings_to_modern_export.py` only rewrites notes under `Meetings/`, never re-summarizes, never mutates summary/transcript DB content, and skips aggressively on ambiguity. It is expected to rewrite only clearly untouched notes and to leave most legacy/manual notes alone.
 - **Markdown Logic:** Consolidated into `src/core/markdown_utils.py`.
 - **Database:** Auto-migrations in `repository.py` for `processing_duration_seconds` and `template`.
 - **Attendees Compatibility:** `meeting.attendees` and `attendees_snapshot` still exist in the DB/API for backward compatibility, but they are deprecated and no longer drive speaker resolution or summary gating.

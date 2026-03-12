@@ -197,6 +197,10 @@ sidekick/
     ├── monitor_ollama.ps1            # PowerShell: Ollama + GPU live watcher
     ├── monitor_sidekick.sh           # Bash: inline WSL live monitor (GPU, Whisper, Ollama, job, pipeline)
     ├── re_export.py                  # Re-export an existing recording summary
+    ├── capture_week_folder_meetings.py
+    │                                 # Conservative capture/move tool for legacy `2026 Week ##` meeting folders
+    ├── rewrite_meetings_to_modern_export.py
+    │                                 # Conservative dry-run-first rewrite of untouched Meetings notes
     └── switch_sidekick_branch.sh     # Stop/stash/switch/restart helper for main/dev workflows
 ```
 
@@ -342,6 +346,8 @@ All templates are editable before export from the workspace Settings tab.
 - Sidekick does not auto-generate Obsidian tags or aliases for exported notes. It writes `tags: []` by default and carries forward any tags you manually add to the latest exported note on future exports.
 - `sidekick_export_status` now uses string values (`latest` / `archived`) instead of a boolean checkbox field so it is harder to break Base filtering with an accidental click. Update Bases/Dataview filters to `sidekick_export_status == "latest"`. Use `python3 scripts/repair_obsidian_export_status.py --apply` to repair older exported notes after reviewing the dry run.
 - Existing old `Meetings/` notes can be reorganized with `python3 scripts/migrate_obsidian_meetings_layout.py`. It is dry-run by default and only performs a copy-first migration with a backup when `--apply` is passed.
+- Legacy `2026 Week ##` meeting folders can be captured into the new month layout with `python3 scripts/capture_week_folder_meetings.py`. It is dry-run by default, only touches notes under those week folders, preserves current note bodies unless a DB-backed note still matches Sidekick strongly enough for a full modern rebuild, and updates `summaries.obsidian_relative_path` only for notes that are still DB-backed. Review `data/week_capture_manifest.json` before any `--apply` run.
+- Old exported `Meetings/` notes can be modernized into the current collapsed-callout export style with `python3 scripts/rewrite_meetings_to_modern_export.py`. It is intentionally strict, dry-run by default, file-only, and expected to skip most notes unless the current file still matches the stored Sidekick summary/transcript payload exactly. Review `data/obsidian_rewrite_manifest.json` before any `--apply` run.
 - Desktop uses the polished tab-row hide/reveal motion; mobile uses a simpler direct-tracking path for smoother touch scrolling.
 
 ## Backups
