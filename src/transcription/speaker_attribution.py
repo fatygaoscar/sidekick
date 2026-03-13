@@ -10,6 +10,82 @@ from .base import AlignedTranscriptSegment
 DiarizationSpan = tuple[float, float, str]
 AssignSpeakerFn = Callable[[float, float, list[DiarizationSpan], float, float], str | None]
 
+GetLabelFn = Callable[[Any], str | None]
+SetLabelFn = Callable[[Any, str], None]
+GetTimeFn = Callable[[Any], float]
+
+
+def _segment_time(segment: Any, key: str) -> float:
+    if isinstance(segment, dict):
+        return float(segment.get(key, 0.0))
+    return float(getattr(segment, key, 0.0))
+
+
+def _segment_label(segment: Any) -> str | None:
+    if isinstance(segment, dict):
+        raw = segment.get("speaker_cluster") or segment.get("speaker") or ""
+    else:
+        raw = getattr(segment, "speaker_cluster", None) or getattr(segment, "speaker", None) or ""
+    return str(raw).strip() or None
+
+
+def _set_segment_label(segment: Any, label: str) -> None:
+    if isinstance(segment, dict):
+        segment["speaker"] = label
+        segment["speaker_cluster"] = label
+        return
+    segment.speaker = label
+    segment.speaker_cluster = label
+
+
+def _backfill_unassigned_neighbor_consensus(
+    segments: Sequence[Any],
+    labels: list[str | None],
+    *,
+    get_start: GetTimeFn,
+    get_end: GetTimeFn,
+    get_label: GetLabelFn,
+    set_label: SetLabelFn,
+    max_gap_seconds: float = 1.5,
+) -> None:
+    """Fill unlabeled gaps when both nearest neighbors agree on the same speaker."""
+    for index, segment in enumerate(segments):
+        if labels[index] is not None:
+            continue
+
+        previous_label = None
+        next_label = None
+        previous_gap = None
+        next_gap = None
+
+        for previous_index in range(index - 1, -1, -1):
+            candidate = labels[previous_index] or get_label(segments[previous_index])
+            if candidate is None:
+                continue
+            previous_label = candidate
+            previous_gap = get_start(segment) - get_end(segments[previous_index])
+            break
+
+        for next_index in range(index + 1, len(segments)):
+            candidate = labels[next_index] or get_label(segments[next_index])
+            if candidate is None:
+                continue
+            next_label = candidate
+            next_gap = get_start(segments[next_index]) - get_end(segment)
+            break
+
+        if (
+            previous_label
+            and next_label
+            and previous_label == next_label
+            and previous_gap is not None
+            and next_gap is not None
+            and previous_gap <= max_gap_seconds
+            and next_gap <= max_gap_seconds
+        ):
+            set_label(segment, previous_label)
+            labels[index] = previous_label
+
 
 def assign_speakers_to_aligned_result(
     aligned_result: dict[str, Any],
@@ -83,45 +159,14 @@ def assign_speakers_to_aligned_result(
         guided_segments.append(guided_segment)
         segment_speakers.append(speaker_label)
 
-    for index, guided_segment in enumerate(guided_segments):
-        if segment_speakers[index] is not None:
-            continue
-        previous_label = None
-        next_label = None
-        previous_gap = None
-        next_gap = None
-
-        for previous_index in range(index - 1, -1, -1):
-            candidate = segment_speakers[previous_index]
-            if candidate is None:
-                continue
-            previous_label = candidate
-            previous_gap = float(guided_segment.get("start", 0.0)) - float(
-                guided_segments[previous_index].get("end", 0.0)
-            )
-            break
-        for next_index in range(index + 1, len(guided_segments)):
-            candidate = segment_speakers[next_index]
-            if candidate is None:
-                continue
-            next_label = candidate
-            next_gap = float(guided_segments[next_index].get("start", 0.0)) - float(
-                guided_segment.get("end", 0.0)
-            )
-            break
-
-        if (
-            previous_label
-            and next_label
-            and previous_label == next_label
-            and previous_gap is not None
-            and next_gap is not None
-            and previous_gap <= 1.5
-            and next_gap <= 1.5
-        ):
-            guided_segment["speaker"] = previous_label
-            guided_segment["speaker_cluster"] = previous_label
-            segment_speakers[index] = previous_label
+    _backfill_unassigned_neighbor_consensus(
+        guided_segments,
+        segment_speakers,
+        get_start=lambda segment: _segment_time(segment, "start"),
+        get_end=lambda segment: _segment_time(segment, "end"),
+        get_label=_segment_label,
+        set_label=_set_segment_label,
+    )
 
     return {**aligned_result, "segments": guided_segments}
 
@@ -175,6 +220,18 @@ def assign_speakers_to_segments(
                 words=getattr(segment, "words", None),
             )
         )
+    reassigned_labels = [
+        _segment_label(segment)
+        for segment in reassigned
+    ]
+    _backfill_unassigned_neighbor_consensus(
+        reassigned,
+        reassigned_labels,
+        get_start=lambda segment: _segment_time(segment, "start"),
+        get_end=lambda segment: _segment_time(segment, "end"),
+        get_label=_segment_label,
+        set_label=_set_segment_label,
+    )
     return reassigned
 
 

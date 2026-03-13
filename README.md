@@ -8,6 +8,7 @@ Browser-based meeting recorder that captures audio, builds transcript versions, 
 - **Recovery-first recording pipeline** — live recordings are retained as chunk storage first, finalized audio second
 - **Local transcription** via WhisperX large-v3 (CUDA, float16)
 - **Speaker alignment + diarization** via WhisperX forced alignment plus pyannote `speaker-diarization-community-1`
+- **Consistent speaker reruns** — diarization-only speaker detection now reuses the same gap-backfill attribution rules as initial transcription, so short in-turn utterances do not fall through the repair quality gate
 - **Manual-first speaker identification** — review speaker clips and assign names directly in the workspace
 - **Robust speaker preview playback** — workspace speaker clips are fetched through the shared network transport and played with Web Audio so remote/fallback loading is less brittle
 - **Readable unresolved speakers** — transcript and summary views use `Attendee`, `Attendee A`, `Attendee B`, etc. instead of raw `SPEAKER_XX`
@@ -103,6 +104,10 @@ Browser
                      → shared speaker attribution + review-state derivation
                      → transcript version + aligned segments
                                 │
+                    POST /api/recordings/{id}/speaker-detection-job
+                    → pyannote diarization rerun on existing transcript timing
+                    → same shared speaker attribution backfill rules
+                                │
                      cohesive.py summary generation
                      → draft summary / saved summary
                                 │
@@ -163,6 +168,7 @@ sidekick/
 │   └── transcription/
 │       ├── diarize.py                # Shared pyannote diarization helpers
 │       ├── manager.py                # Transcription orchestration
+│       ├── speaker_attribution.py    # Shared speaker mapping + rerun backfill rules
 │       ├── whisper_local.py          # Legacy faster-whisper engine (deprecated runtime path)
 │       └── whisperx_local.py         # WhisperX local engine for authoritative file transcription
 │   └── workspace_chat/
@@ -206,6 +212,12 @@ sidekick/
     │                                 # Conservative dry-run-first rewrite of untouched Meetings notes
     └── switch_sidekick_branch.sh     # Stop/stash/switch/restart helper for main/dev workflows
 ```
+
+## Speaker Repair Notes
+
+- Initial transcription and speaker-detection reruns both flow through `src/transcription/speaker_attribution.py`.
+- The rerun path now applies the same neighbor-consensus backfill rule as the initial aligned transcript path.
+- That keeps the `repair_quality_gate_passed` check strict without failing reruns on short utterances that sit inside an already-detected speaker turn.
 
 ## Configuration
 

@@ -26,10 +26,12 @@ Key files:
 ## Runtime Facts
 
 - Local authoritative stack: WhisperX + pyannote community-1 + Ollama.
+- Initial transcription and diarization-only speaker reruns must stay behaviorally aligned through `src/transcription/speaker_attribution.py`.
 - Transcript versions are authoritative for summary drafts/saved summaries.
 - Speaker review is manual-first. Respect `clip_available`; weak legacy clusters should show `No Preview`.
 - Speaker preview playback uses Web Audio plus `web/js/network.js`, not raw `new Audio().src`.
 - If frontend changes do not show up, bump the `?v=` asset query string in `web/index.html` and `web/recordings.html`.
+- Do not "fix" speaker rerun quality by loosening the gate first; check attribution drift before changing thresholds.
 
 ### 1. Plan Mode Default
 - Enter plan mode for ANY non-trivial task (3+ steps or architectural decisions)

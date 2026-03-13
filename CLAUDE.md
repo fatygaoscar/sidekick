@@ -19,12 +19,14 @@ Primary surfaces:
 - `src/api/routes/sessions.py`: workspace, speakers, recording lifecycle
 - `src/api/routes/export.py`: transcription/export jobs
 - `src/transcription/whisperx_local.py`: local authoritative transcript path
+- `src/transcription/speaker_attribution.py`: shared speaker attribution for initial transcription and reruns
 - `src/summarization/cohesive.py`: current summary generator
 - `web/js/recording-workspace.js`: workspace UI, speaker playback, edits
 
 ## Operating Notes
 
 - Use the local stack unless the task explicitly changes architecture.
+- Keep speaker-detection reruns and initial transcription on the same attribution rules; drift here creates false diarization failures.
 - Speaker preview clips use Web Audio and the fallback-aware network helper.
 - `clip_available=false` means render `No Preview`, not a broken play action.
 - Cache-bust frontend assets by bumping `?v=` in `web/index.html` and `web/recordings.html`.

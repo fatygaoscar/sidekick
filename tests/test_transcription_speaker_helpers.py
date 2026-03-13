@@ -52,6 +52,60 @@ class TranscriptionSpeakerHelperTests(unittest.TestCase):
             ["SPEAKER_00", "SPEAKER_00", "SPEAKER_00"],
         )
 
+    def test_assign_speakers_to_segments_backfills_short_gap_between_same_speaker(self):
+        segments = [
+            SimpleNamespace(text="Hello", start_time=0.0, end_time=1.0, words=None),
+            SimpleNamespace(text="Uh huh", start_time=1.1, end_time=1.4, words=None),
+            SimpleNamespace(text="Continue", start_time=1.5, end_time=2.2, words=None),
+        ]
+
+        reassigned = assign_speakers_to_segments(
+            segments,
+            [(0.0, 1.0, "SPEAKER_00"), (1.5, 2.2, "SPEAKER_00")],
+            assign_speaker,
+        )
+
+        self.assertEqual(
+            [segment.speaker_cluster for segment in reassigned],
+            ["SPEAKER_00", "SPEAKER_00", "SPEAKER_00"],
+        )
+
+    def test_assign_speakers_to_segments_does_not_backfill_when_neighbors_disagree(self):
+        segments = [
+            SimpleNamespace(text="Hello", start_time=0.0, end_time=1.0, words=None),
+            SimpleNamespace(text="Maybe", start_time=1.1, end_time=1.4, words=None),
+            SimpleNamespace(text="Continue", start_time=1.5, end_time=2.2, words=None),
+        ]
+
+        reassigned = assign_speakers_to_segments(
+            segments,
+            [(0.0, 1.0, "SPEAKER_00"), (1.5, 2.2, "SPEAKER_01")],
+            assign_speaker,
+        )
+
+        self.assertEqual(
+            [segment.speaker_cluster for segment in reassigned],
+            ["SPEAKER_00", None, "SPEAKER_01"],
+        )
+
+    def test_assign_speakers_to_segments_does_not_backfill_when_gap_is_too_large(self):
+        segments = [
+            SimpleNamespace(text="Hello", start_time=0.0, end_time=1.0, words=None),
+            SimpleNamespace(text="Maybe", start_time=3.0, end_time=3.2, words=None),
+            SimpleNamespace(text="Continue", start_time=3.3, end_time=4.0, words=None),
+        ]
+
+        reassigned = assign_speakers_to_segments(
+            segments,
+            [(0.0, 1.0, "SPEAKER_00"), (3.3, 4.0, "SPEAKER_00")],
+            assign_speaker,
+        )
+
+        self.assertEqual(
+            [segment.speaker_cluster for segment in reassigned],
+            ["SPEAKER_00", None, "SPEAKER_00"],
+        )
+
     def test_speaker_metrics_and_review_state_share_generic_speaker_rules(self):
         unresolved_segments = [
             SimpleNamespace(speaker="SPEAKER_00", speaker_cluster="SPEAKER_00"),
