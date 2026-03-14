@@ -7,7 +7,12 @@ import re
 import time
 from typing import Callable, Awaitable, Optional
 
-from config.settings import Settings, SummarizationBackend as SumBackendEnum, get_settings
+from config.settings import (
+    Settings,
+    SummarizationBackend as SumBackendEnum,
+    SummarizationPipelineStrategy as PipelineStrategyEnum,
+    get_settings,
+)
 from src.core.events import EventType, get_event_bus
 from src.sessions.manager import SessionManager
 
@@ -21,6 +26,17 @@ from .prompts import DEFAULT_TEMPLATE_KEY, get_template_content, normalize_templ
 from .cohesive import generate_cohesive_summary
 from .pipeline.pipeline import run_pipeline
 from .pipeline.types import PipelineResult
+from .topic_segmented import (
+    build_topic_identification_prompts,
+    build_topic_extraction_prompts,
+    build_topic_segmented_summary,
+    evaluate_topic_quality,
+    normalize_topic_payload,
+    normalize_identified_topics,
+    prepare_business_transcript,
+    render_topic_segmented_markdown,
+    segment_transcript,
+)
 
 
 # Type alias for pipeline progress callback
@@ -406,6 +422,7 @@ class SummarizationManager:
         self._event_bus = get_event_bus()
         self._backends: dict[SumBackendEnum, SummarizationBackend] = {}
         self._selected_backend_type = self._settings.summarization_backend
+        self._default_pipeline_strategy = self._settings.summarization_pipeline_strategy
         self._active_backend: SummarizationBackend | None = None
         self._switch_lock = asyncio.Lock()
         self._initialized = False
@@ -420,10 +437,22 @@ class SummarizationManager:
         """Get the currently active backend type."""
         return self._selected_backend_type
 
+    @property
+    def default_pipeline_strategy(self) -> PipelineStrategyEnum:
+        """Get the runtime default summarization pipeline strategy."""
+        return self._default_pipeline_strategy
+
     def set_selected_backend(self, backend: SumBackendEnum | str) -> None:
         """Update the selected backend without forcing immediate initialization."""
         self._selected_backend_type = self._coerce_backend_type(backend)
         self._active_backend = self._backends.get(self._selected_backend_type)
+
+    def set_default_pipeline_strategy(
+        self,
+        strategy: PipelineStrategyEnum | str,
+    ) -> None:
+        """Update the runtime default pipeline strategy."""
+        self._default_pipeline_strategy = self._coerce_pipeline_strategy(strategy)
 
     async def initialize(self, backend: SumBackendEnum | None = None) -> None:
         """
@@ -512,11 +541,16 @@ class SummarizationManager:
         active_backend = self._backends.get(self._selected_backend_type)
         return {
             "selected_backend": self._selected_backend_type.value,
+            "selected_pipeline_strategy": self._default_pipeline_strategy.value,
             "active_backend": (
                 self._selected_backend_type.value if active_backend is not None else None
             ),
             "applies_to": "new_requests_only",
             "providers": self.describe_backends(),
+            "pipeline_strategies": [
+                PipelineStrategyEnum.COHESIVE.value,
+                PipelineStrategyEnum.TOPIC_SEGMENTED_V1.value,
+            ],
         }
 
     async def summarize_meeting(
@@ -525,6 +559,7 @@ class SummarizationManager:
         meeting_id: str,
         prompt_type: str = "default",
         custom_instructions: str | None = None,
+        pipeline_strategy: PipelineStrategyEnum | str | None = None,
     ) -> SummarizationResult:
         """
         Summarize a meeting by its ID.
@@ -556,6 +591,7 @@ class SummarizationManager:
             transcript=transcript,
             prompt_type=prompt_type,
             custom_instructions=custom_instructions,
+            pipeline_strategy=pipeline_strategy,
         )
 
     async def summarize(
@@ -569,6 +605,7 @@ class SummarizationManager:
         system_prompt: str | None = None,
         user_prompt: str | None = None,
         progress_callback: Optional[Callable[[float], None]] = None,
+        pipeline_strategy: PipelineStrategyEnum | str | None = None,
     ) -> SummarizationResult:
         """
         Generate a summary from transcript.
@@ -587,6 +624,9 @@ class SummarizationManager:
         backend = await self._backend_for_operation()
         ctx_len = self._context_length()
         normalized_prompt_type = normalize_template_key(prompt_type)
+        resolved_pipeline_strategy = self._coerce_pipeline_strategy(
+            pipeline_strategy or self._default_pipeline_strategy
+        )
 
         # Emit start event
         await self._event_bus.emit(
@@ -610,42 +650,49 @@ class SummarizationManager:
                     num_ctx=ctx_len,
                 )
             else:
-                async def llm_call(sys_prompt: str, usr_prompt: str) -> str:
-                    llm_result = await self._summarize_with_timeout(
+                if resolved_pipeline_strategy == PipelineStrategyEnum.TOPIC_SEGMENTED_V1:
+                    result = await self._summarize_topic_segmented(
                         backend=backend,
-                        transcript="",
-                        system_prompt=sys_prompt,
-                        user_prompt=usr_prompt,
-                        num_ctx=ctx_len,
+                        transcript=transcript,
+                        progress_callback=progress_callback,
                     )
-                    return llm_result.content
+                else:
+                    async def llm_call(sys_prompt: str, usr_prompt: str) -> str:
+                        llm_result = await self._summarize_with_timeout(
+                            backend=backend,
+                            transcript="",
+                            system_prompt=sys_prompt,
+                            user_prompt=usr_prompt,
+                            num_ctx=ctx_len,
+                        )
+                        return llm_result.content
 
-                template_contract = (
-                    custom_instructions.strip()
-                    if normalized_prompt_type == "custom" and custom_instructions
-                    else get_template_content(normalized_prompt_type)
-                )
+                    template_contract = (
+                        custom_instructions.strip()
+                        if normalized_prompt_type == "custom" and custom_instructions
+                        else get_template_content(normalized_prompt_type)
+                    )
 
-                cohesive_text, _, _, _, speaker_map, prompt_audit = await generate_cohesive_summary(
-                    llm_call=llm_call,
-                    transcript=transcript,
-                    template=normalized_prompt_type,
-                    template_contract=template_contract,
-                    perspective=perspective,
-                    context_length=ctx_len,
-                    custom_instructions=(
-                        custom_instructions if normalized_prompt_type != "custom" else None
-                    ),
-                    include_structured_tables=include_structured_tables,
-                    progress_callback=progress_callback,
-                )
-                result = SummarizationResult(
-                    content=cohesive_text,
-                    backend=backend.name,
-                    model=backend.model,
-                    speaker_map=speaker_map,
-                    prompt_audit=prompt_audit,
-                )
+                    cohesive_text, _, _, _, speaker_map, prompt_audit = await generate_cohesive_summary(
+                        llm_call=llm_call,
+                        transcript=transcript,
+                        template=normalized_prompt_type,
+                        template_contract=template_contract,
+                        perspective=perspective,
+                        context_length=ctx_len,
+                        custom_instructions=(
+                            custom_instructions if normalized_prompt_type != "custom" else None
+                        ),
+                        include_structured_tables=include_structured_tables,
+                        progress_callback=progress_callback,
+                    )
+                    result = SummarizationResult(
+                        content=cohesive_text,
+                        backend=backend.name,
+                        model=backend.model,
+                        speaker_map=speaker_map,
+                        prompt_audit=prompt_audit,
+                    )
 
             # Emit completion event
             await self._event_bus.emit(
@@ -672,6 +719,214 @@ class SummarizationManager:
                 source="summarization_manager",
             )
             raise
+
+    async def _summarize_topic_segmented(
+        self,
+        *,
+        backend: SummarizationBackend,
+        transcript: str,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ) -> SummarizationResult:
+        """Summarize by segmenting the transcript into simple topics first."""
+        def _emit(progress: float) -> None:
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(progress)
+            except Exception:
+                pass
+
+        _emit(0.05)
+        business_turns, participants, speaker_map, segmentation_warnings, segmentation_context = prepare_business_transcript(transcript)
+        _emit(0.14)
+        if not business_turns:
+            return SummarizationResult(
+                content="## Summary\n\n- No transcript content was available for topic-segmented summarization.",
+                backend=backend.name,
+                model=backend.model,
+                speaker_map=speaker_map,
+                prompt_audit={
+                    "topic_identification_system_prompt": "",
+                    "topic_identification_user_prompt": "",
+                    "pass1_system_prompt": "",
+                    "pass1_user_prompt": "",
+                    "pass2_system_prompt": "Deterministic topic-segmented markdown renderer.",
+                    "pass2_user_prompt": "",
+                },
+                workflow_data={
+                    "pipeline_version": PipelineStrategyEnum.TOPIC_SEGMENTED_V1.value,
+                    "topic_segmented_summary": {
+                        "schema_version": "topic_segmented_summary_v1",
+                        "participants": [],
+                        "meeting_summary": ["No transcript content was available."],
+                        "topics": [],
+                        "warnings": ["empty_transcript"],
+                    },
+                    "segmentation": {
+                        "topics": [],
+                        "warnings": ["empty_transcript"],
+                        "boundary_version": "windowed_v2",
+                        "label_strategy": "post_extract_llm_v1",
+                        "business_start_index": 0,
+                        "preamble_turn_ids": [],
+                        "preamble_turn_count": 0,
+                    },
+                },
+            )
+
+        prompt_tokens_total = 0
+        completion_tokens_total = 0
+        extracted_topics: list[dict[str, object]] = []
+        topic_quality: list[dict[str, object]] = []
+        warnings: list[str] = [str(item.get("code") or "segmentation_warning") for item in segmentation_warnings]
+        topic_identification_system_prompt = ""
+        topic_identification_user_prompt = "Topic-identification prompt payload omitted from audit."
+        extraction_system_prompt = ""
+        extraction_user_prompt = "Per-topic extraction prompt payload omitted from audit."
+        topic_identification_source = "llm_topics_v1"
+
+        topic_identification_system_prompt, topic_identification_user_prompt = build_topic_identification_prompts(
+            business_turns,
+            participants,
+            max_topics=6,
+        )
+        llm_topics: list[dict[str, object]] = []
+        try:
+            topic_result = await self._summarize_with_timeout(
+                backend=backend,
+                transcript="",
+                system_prompt=topic_identification_system_prompt,
+                user_prompt=topic_identification_user_prompt,
+                num_ctx=min(self._context_length(), 16384),
+                json_mode=backend.supports_structured_outputs,
+                max_output_tokens=1800,
+            )
+            if topic_result.prompt_tokens is not None:
+                prompt_tokens_total += int(topic_result.prompt_tokens)
+            if topic_result.completion_tokens is not None:
+                completion_tokens_total += int(topic_result.completion_tokens)
+            parsed_topics = self._parse_json_response(topic_result.content)
+            if parsed_topics is None:
+                repaired_topics = await self._repair_json_response(
+                    backend=backend,
+                    invalid_response=topic_result.content,
+                    schema_hint="topics, warnings",
+                )
+                parsed_topics = self._parse_json_response(repaired_topics)
+                warnings.append("malformed_topic_identification_repaired")
+            llm_topics, topic_identification_warnings = normalize_identified_topics(
+                parsed_topics,
+                business_turns,
+                max_topics=6,
+            )
+            warnings.extend(topic_identification_warnings)
+        except Exception:
+            logger.exception("topic identification failed; falling back to deterministic segmentation")
+            llm_topics = []
+            warnings.append("topic_identification_failed")
+
+        if llm_topics:
+            topics = llm_topics
+        else:
+            topics, fallback_warnings, _fallback_participants, _fallback_speaker_map, fallback_context = segment_transcript(transcript)
+            segmentation_warnings = fallback_warnings
+            warnings.extend(str(item.get("code") or "segmentation_warning") for item in fallback_warnings)
+            segmentation_context = fallback_context
+            topic_identification_source = "deterministic_fallback"
+
+        for index, topic in enumerate(topics):
+            system_prompt, user_prompt = build_topic_extraction_prompts(topic, participants)
+            extraction_system_prompt = extraction_system_prompt or system_prompt
+            llm_result = await self._summarize_with_timeout(
+                backend=backend,
+                transcript="",
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                num_ctx=min(self._context_length(), 16384),
+                json_mode=backend.supports_structured_outputs,
+                max_output_tokens=1800,
+            )
+            if llm_result.prompt_tokens is not None:
+                prompt_tokens_total += int(llm_result.prompt_tokens)
+            if llm_result.completion_tokens is not None:
+                completion_tokens_total += int(llm_result.completion_tokens)
+
+            parsed = self._parse_json_response(llm_result.content)
+            if parsed is None:
+                repaired = await self._repair_json_response(
+                    backend=backend,
+                    invalid_response=llm_result.content,
+                    schema_hint="summary, decisions, action_items, milestones, unresolved_questions",
+                )
+                parsed = self._parse_json_response(repaired)
+                warnings.append("malformed_extraction_repaired")
+
+            normalized_topic, topic_warnings = normalize_topic_payload(topic, parsed)
+            warnings.extend(topic_warnings)
+            extracted_topics.append(normalized_topic)
+            _emit(0.14 + (0.68 * ((index + 1) / max(len(topics), 1))))
+
+        for topic, extracted_topic in zip(topics, extracted_topics):
+            extracted_topic["label"] = str(topic.get("label") or extracted_topic.get("label") or "Discussion")
+            quality = evaluate_topic_quality(extracted_topic, list(topic.get("_turns") or []))
+            topic_quality.append(quality)
+            warnings.extend(list(quality.get("warnings") or []))
+
+        structured_payload = build_topic_segmented_summary(
+            participants=participants,
+            topics=extracted_topics,
+            warnings=warnings,
+        )
+        content = render_topic_segmented_markdown(structured_payload)
+        _emit(0.92)
+
+        segmentation_metadata = {
+            "topic_count": len(topics),
+            "topics": [
+                {
+                    "topic_id": str(topic.get("topic_id") or ""),
+                    "label": str(topic.get("label") or ""),
+                    "why_this_is_a_topic": str(topic.get("why_this_is_a_topic") or ""),
+                    "start_timestamp": topic.get("start_timestamp"),
+                    "end_timestamp": topic.get("end_timestamp"),
+                    "turn_ids": list(topic.get("turn_ids") or []),
+                    "turn_count": int(topic.get("turn_count") or 0),
+                }
+                for topic in topics
+            ],
+            "warnings": segmentation_warnings,
+            "boundary_version": "windowed_v2",
+            "label_strategy": topic_identification_source,
+            "topic_identification_version": "llm_topics_v1",
+            "source": topic_identification_source,
+            "business_start_index": int(segmentation_context.get("business_start_index") or 0),
+            "preamble_turn_ids": list(segmentation_context.get("preamble_turn_ids") or []),
+            "preamble_turn_count": int(segmentation_context.get("preamble_turn_count") or 0),
+        }
+        _emit(0.98)
+        return SummarizationResult(
+            content=content,
+            backend=backend.name,
+            model=backend.model,
+            prompt_tokens=(prompt_tokens_total or None),
+            completion_tokens=(completion_tokens_total or None),
+            speaker_map=speaker_map,
+            prompt_audit={
+                "topic_identification_system_prompt": topic_identification_system_prompt,
+                "topic_identification_user_prompt": topic_identification_user_prompt,
+                "pass1_system_prompt": extraction_system_prompt,
+                "pass1_user_prompt": extraction_user_prompt,
+                "pass2_system_prompt": "Deterministic topic-segmented markdown renderer.",
+                "pass2_user_prompt": "Render the extracted topic JSON into final Obsidian markdown without adding facts.",
+            },
+            workflow_data={
+                "pipeline_version": PipelineStrategyEnum.TOPIC_SEGMENTED_V1.value,
+                "topic_segmented_summary": structured_payload,
+                "segmentation": segmentation_metadata,
+                "topic_quality": topic_quality,
+                "warnings": warnings,
+            },
+        )
 
     def _create_backend(self, backend: SumBackendEnum) -> SummarizationBackend:
         """Create a summarization backend for the specified type."""
@@ -1372,6 +1627,14 @@ class SummarizationManager:
         if isinstance(backend, SumBackendEnum):
             return backend
         return SumBackendEnum(str(backend).strip().lower())
+
+    def _coerce_pipeline_strategy(
+        self,
+        strategy: PipelineStrategyEnum | str,
+    ) -> PipelineStrategyEnum:
+        if isinstance(strategy, PipelineStrategyEnum):
+            return strategy
+        return PipelineStrategyEnum(str(strategy).strip().lower())
 
     def _context_length(self) -> int:
         return int(self._settings.summarization_context_length)

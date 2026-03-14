@@ -23,6 +23,9 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
         cls.export = importlib.import_module("src.api.routes.export")
         cls.audio_clips = importlib.import_module("src.audio.clips")
         cls.audio_storage = importlib.import_module("src.audio.storage")
+        cls.summarization_prompts = importlib.import_module("src.summarization.prompts")
+        cls.topic_segmented = importlib.import_module("src.summarization.topic_segmented")
+        cls.summarization_manager = importlib.import_module("src.summarization.manager")
 
     def test_sessions_router_imports_cleanly(self):
         self.assertTrue(hasattr(self.sessions, "UpdateRecordingSettingsRequest"))
@@ -241,6 +244,379 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
 
         self.assertEqual(payload["revision_history"], [])
         self.assertIsNone(payload["latest_revision"])
+
+    def test_serialize_app_settings_includes_pipeline_strategy(self):
+        payload = self.sessions._serialize_app_settings(
+            SimpleNamespace(
+                workspace_chat_enabled=True,
+                speaker_repair_enabled=False,
+                summarization_backend="ollama",
+                summarization_pipeline_strategy="topic_segmented_v1",
+                recording_capture_mode="whole_room",
+            )
+        )
+
+        self.assertEqual(payload["summarization_pipeline_strategy"], "topic_segmented_v1")
+
+    def test_topic_segmented_render_keeps_actions_local_to_topic(self):
+        payload = self.topic_segmented.build_topic_segmented_summary(
+            participants=["Oscar", "Mina"],
+            topics=[
+                {
+                    "topic_id": "topic_001",
+                    "label": "Dashboard Design",
+                    "start_timestamp": "00:00",
+                    "end_timestamp": "04:00",
+                    "summary": ["Reviewed the dashboard scope and dealer-facing metrics."],
+                    "decisions": [{"text": "Keep the dashboard dealer-facing", "owner": None, "timestamp": "01:15"}],
+                    "action_items": [
+                        {
+                            "text": "Validate the metric mapping",
+                            "owner": "Oscar",
+                            "due_date": None,
+                            "timestamp": "02:10",
+                            "status": "open",
+                        }
+                    ],
+                    "milestones": [],
+                    "unresolved_questions": [],
+                },
+                {
+                    "topic_id": "topic_002",
+                    "label": "Payout Cadence",
+                    "start_timestamp": "04:00",
+                    "end_timestamp": "08:00",
+                    "summary": ["Compared monthly and biweekly payout timing."],
+                    "decisions": [],
+                    "action_items": [],
+                    "milestones": [],
+                    "unresolved_questions": [{"text": "Whether payout cadence should change", "owner": "Mina"}],
+                },
+            ],
+            warnings=[],
+        )
+
+        markdown = self.topic_segmented.render_topic_segmented_markdown(payload)
+
+        self.assertIn("## Topic: Dashboard Design", markdown)
+        self.assertIn("| Oscar | Validate the metric mapping |  |", markdown)
+        self.assertIn("## Topic: Payout Cadence", markdown)
+        self.assertEqual(markdown.count("### Action Items"), 2)
+
+    def test_topic_segmented_pass1_prompt_helper_uses_dedicated_template(self):
+        system_prompt, user_prompt = self.topic_segmented.build_topic_extraction_prompts(
+            {
+                "topic_id": "topic_001",
+                "label": "Topic 1",
+                "transcript": "[00:00] Oscar: Validate the dashboard metrics.",
+            },
+            ["Oscar", "Mina"],
+        )
+
+        self.assertEqual(
+            system_prompt,
+            self.summarization_prompts.get_topic_segmented_pass1_prompts(
+                participants=["Oscar", "Mina"],
+                topic_label="topic_001",
+                topic_text="[00:00] Oscar: Validate the dashboard metrics.",
+            )[0],
+        )
+        self.assertIn("Participants:", user_prompt)
+        self.assertIn("Topic Segment:", user_prompt)
+        self.assertIn("topic_001", user_prompt)
+        self.assertIn("Validate the dashboard metrics.", user_prompt)
+        self.assertNotIn('"status"', user_prompt)
+        self.assertNotIn('"warnings"', user_prompt)
+
+    def test_topic_identification_prompt_helper_uses_dedicated_template(self):
+        turns = self.topic_segmented.preprocess_transcript(
+            "\n".join(
+                [
+                    "[00:00] Oscar: Let's review Kia Genesis reporting readiness.",
+                    "[00:20] Mina: The Genesis mapping still needs validation.",
+                ]
+            )
+        )
+
+        system_prompt, user_prompt = self.topic_segmented.build_topic_identification_prompts(
+            turns,
+            ["Oscar", "Mina"],
+            max_topics=4,
+        )
+
+        expected_system, expected_user = self.summarization_prompts.get_topic_segmented_topic_identification_prompt(
+            participants=["Oscar", "Mina"],
+            transcript="\n".join(
+                [
+                    "[00:00] Oscar: Let's review Kia Genesis reporting readiness.",
+                    "[00:20] Mina: The Genesis mapping still needs validation.",
+                ]
+            ),
+            max_topics=4,
+        )
+
+        self.assertEqual(system_prompt, expected_system)
+        self.assertEqual(user_prompt, expected_user)
+        self.assertIn("Create topics only for sustained business discussion.", system_prompt)
+        self.assertIn('"why_this_is_a_topic"', user_prompt)
+
+    def test_topic_segmented_label_prompt_helper_uses_dedicated_template(self):
+        system_prompt, user_prompt = self.topic_segmented.build_topic_label_prompts(
+            {
+                "topic_id": "topic_001",
+                "label": "Topic 1",
+                "start_timestamp": "00:00",
+                "end_timestamp": "03:00",
+                "summary": ["Reviewed dealer dashboard filter readiness for launch."],
+                "decisions": [{"text": "Keep the dashboard dealer-facing", "owner": None, "timestamp": "01:00"}],
+                "action_items": [{"text": "Validate metric mapping", "owner": "Oscar", "due_date": None, "timestamp": "02:00"}],
+                "milestones": [],
+                "unresolved_questions": [{"text": "Whether the launch scope needs one more filter pass", "owner": None}],
+            },
+            ["Oscar", "Mina"],
+        )
+
+        expected_system, expected_user = self.summarization_prompts.get_topic_segmented_post_extract_label_prompt(
+            participants=["Oscar", "Mina"],
+            topic_time_range="00:00 - 03:00",
+            summary_lines=["Reviewed dealer dashboard filter readiness for launch."],
+            decision_lines=["Keep the dashboard dealer-facing"],
+            action_lines=["Oscar Validate metric mapping"],
+            question_lines=["Whether the launch scope needs one more filter pass"],
+            milestone_lines=[],
+        )
+
+        self.assertEqual(system_prompt, expected_system)
+        self.assertEqual(user_prompt, expected_user)
+        self.assertIn("Examples of good labels:", user_prompt)
+        self.assertNotEqual(system_prompt, self.summarization_prompts.SYSTEM_PROMPT)
+
+    def test_finalize_topic_label_falls_back_for_generic_output(self):
+        label, warnings = self.topic_segmented.finalize_topic_label(
+            "General Discussion",
+            fallback_label="Inventory Planner Rollout",
+            existing_labels=set(),
+        )
+
+        self.assertEqual(label, "Inventory Planner Rollout")
+        self.assertIn("label_rejected_as_generic", warnings)
+        self.assertIn("generic_label_fallback", warnings)
+
+    def test_fallback_label_from_extracted_topic_uses_extracted_content(self):
+        label = self.topic_segmented.fallback_label_from_extracted_topic(
+            {
+                "summary": ["Reviewed Kia/Genesis maintenance care reporting readiness."],
+                "decisions": [],
+                "action_items": [{"text": "Validate Genesis maintenance care data readiness", "owner": "Oscar"}],
+                "milestones": [],
+                "unresolved_questions": [{"text": "Whether Kia reporting is ready for next week", "owner": None}],
+            },
+            1,
+        )
+
+        self.assertIn("Kia", label)
+        self.assertNotIn("Coffee", label)
+
+    def test_normalize_identified_topics_builds_non_overlapping_topics(self):
+        turns = self.topic_segmented.preprocess_transcript(
+            "\n".join(
+                [
+                    "[00:00] Oscar: Let's review Kia Genesis reporting readiness.",
+                    "[00:20] Mina: The Genesis mapping still needs validation.",
+                    "[00:40] Oscar: Switching to payout cadence for maintenance care.",
+                    "[01:00] Mina: We need to compare monthly and biweekly timing.",
+                ]
+            )
+        )
+
+        topics, warnings = self.topic_segmented.normalize_identified_topics(
+            {
+                "topics": [
+                    {
+                        "topic_id": "topic_001",
+                        "topic_name": "Kia/Genesis Reporting Readiness",
+                        "start_timestamp": "00:00",
+                        "end_timestamp": "00:40",
+                        "why_this_is_a_topic": "Focused on data readiness.",
+                    },
+                    {
+                        "topic_id": "topic_002",
+                        "topic_name": "Maintenance Care Payout Cadence",
+                        "start_timestamp": "00:20",
+                        "end_timestamp": "01:00",
+                        "why_this_is_a_topic": "Focused on payout timing.",
+                    },
+                ]
+            },
+            turns,
+            max_topics=6,
+        )
+
+        self.assertEqual(len(topics), 2)
+        self.assertEqual(topics[0]["label"], "Kia/Genesis Reporting Readiness")
+        self.assertEqual(topics[1]["label"], "Maintenance Care Payout Cadence")
+        self.assertTrue(set(topics[0]["turn_ids"]).isdisjoint(set(topics[1]["turn_ids"])))
+        self.assertEqual(warnings, [])
+
+    def test_business_start_filter_skips_casual_preamble(self):
+        transcript = "\n".join(
+            [
+                "[00:00] Oscar: Good morning, did you get coffee yet?",
+                "[00:20] Mina: Yeah, and happy St. Patrick's Day.",
+                "[00:40] Oscar: Anyway, let's review Kia Genesis maintenance reporting readiness.",
+                "[01:00] Mina: The Genesis data mapping still needs validation.",
+                "[01:20] Oscar: We need to confirm if maintenance care reporting is ready.",
+            ]
+        )
+
+        topics, warnings, _participants, _speaker_map, metadata = self.topic_segmented.segment_transcript(
+            transcript,
+            target_turns_per_topic=10,
+            hard_max_turns_per_topic=20,
+            tiny_topic_max_turns=0,
+            large_gap_seconds=90.0,
+            max_topics=6,
+        )
+
+        self.assertEqual(metadata["business_start_index"], 2)
+        self.assertEqual(metadata["preamble_turn_count"], 2)
+        self.assertTrue(any(item.get("code") == "preamble_skipped" for item in warnings))
+        self.assertEqual(len(topics), 1)
+
+    def test_topic_segmentation_lookahead_avoids_split_on_single_noisy_turn(self):
+        transcript = "\n".join(
+            [
+                "[00:00] Oscar: The dashboard filters for dealers still need cleanup.",
+                "[00:20] Mina: We also need dashboard metric mapping to stay dealer-facing.",
+                "[00:40] Oscar: The dealer dashboard scope should stay narrow for launch.",
+                "[01:00] Mina: Dashboard filters and mapping are still the main launch work.",
+                "[01:20] Oscar: We should keep the dashboard experience simple for dealers.",
+                "[01:40] Mina: The dashboard metric mapping still needs validation.",
+                "[02:00] Oscar: Dealer-facing dashboard filters are still the core issue.",
+                "[02:20] Mina: The launch dashboard needs better dealer metric mapping.",
+                "[02:40] Oscar: Dashboard filter cleanup matters more than adding new charts.",
+                "[03:00] Mina: The dealer dashboard scope should stay focused.",
+                "[03:20] Oscar: Budget approval may still affect timing here.",
+                "[03:40] Mina: But the dashboard filter mapping for dealers is still the work item.",
+                "[04:00] Oscar: Yes, the dealer dashboard metrics still need alignment.",
+            ]
+        )
+
+        topics, warnings, _participants, _speaker_map, _metadata = self.topic_segmented.segment_transcript(
+            transcript,
+            target_turns_per_topic=10,
+            hard_max_turns_per_topic=20,
+            tiny_topic_max_turns=0,
+            large_gap_seconds=90.0,
+            max_topics=6,
+        )
+
+        self.assertEqual(len(topics), 1)
+        self.assertEqual(warnings, [])
+
+    def test_topic_segmentation_splits_on_windowed_drift(self):
+        transcript = "\n".join(
+            [
+                "[00:00] Oscar: The dashboard filters for dealers still need cleanup.",
+                "[00:20] Mina: We also need dashboard metric mapping to stay dealer-facing.",
+                "[00:40] Oscar: The dealer dashboard scope should stay narrow for launch.",
+                "[01:00] Mina: Dashboard filters and mapping are still the main launch work.",
+                "[01:20] Oscar: We should keep the dashboard experience simple for dealers.",
+                "[01:40] Mina: The dashboard metric mapping still needs validation.",
+                "[02:00] Oscar: Dealer-facing dashboard filters are still the core issue.",
+                "[02:20] Mina: The launch dashboard needs better dealer metric mapping.",
+                "[02:40] Oscar: Dashboard filter cleanup matters more than adding new charts.",
+                "[03:00] Mina: The dealer dashboard scope should stay focused.",
+                "[03:20] Oscar: Maintenance care payout cadence is still under review.",
+                "[03:40] Mina: We need to compare monthly and biweekly payout timing.",
+                "[04:00] Oscar: The payout schedule decision affects partner operations.",
+            ]
+        )
+
+        topics, warnings, _participants, _speaker_map, _metadata = self.topic_segmented.segment_transcript(
+            transcript,
+            target_turns_per_topic=10,
+            hard_max_turns_per_topic=20,
+            tiny_topic_max_turns=0,
+            large_gap_seconds=90.0,
+            max_topics=6,
+        )
+
+        self.assertEqual(len(topics), 2)
+        self.assertFalse(any(item.get("code") == "topic_cap_merge" for item in warnings))
+
+    def test_topic_segmentation_caps_topics_and_records_merge_warning(self):
+        transcript = "\n".join(
+            [
+                "[00:00] Oscar: Moving on to dashboard design for dealers.",
+                "[02:30] Mina: Another thing, the Kia Genesis mapping still looks broken.",
+                "[05:00] Oscar: Next topic, payout cadence for maintenance care.",
+                "[07:30] Mina: Separately, inventory planner rollout needs a timeline.",
+                "[10:00] Oscar: Switching to dashboard filters and launch scope.",
+            ]
+        )
+
+        topics, warnings, participants, _speaker_map, _metadata = self.topic_segmented.segment_transcript(
+            transcript,
+            target_turns_per_topic=1,
+            hard_max_turns_per_topic=2,
+            tiny_topic_max_turns=0,
+            large_gap_seconds=30.0,
+            max_topics=3,
+        )
+
+        self.assertLessEqual(len(topics), 3)
+        self.assertIn("Oscar", participants)
+        self.assertTrue(any(item.get("code") == "topic_cap_merge" for item in warnings))
+
+    def test_topic_quality_detects_filler_leakage(self):
+        turns = self.topic_segmented.preprocess_transcript(
+            "\n".join(
+                [
+                    "[00:00] Oscar: Good morning, did you get coffee yet?",
+                    "[00:20] Mina: Happy Friday.",
+                    "[00:40] Oscar: We need to validate the Genesis reporting data.",
+                    "[01:00] Mina: The maintenance care data still needs review.",
+                ]
+            )
+        )
+
+        quality = self.topic_segmented.evaluate_topic_quality(
+            {
+                "topic_id": "topic_001",
+                "label": "Genesis Reporting Readiness",
+                "summary": ["Reviewed Genesis reporting readiness."],
+                "decisions": [],
+                "action_items": [{"text": "Validate Genesis reporting data", "owner": "Oscar"}],
+                "milestones": [],
+                "unresolved_questions": [],
+            },
+            turns,
+        )
+
+        self.assertIn("filler_leakage", quality["warnings"])
+
+    def test_summarization_manager_runtime_state_tracks_pipeline_strategy(self):
+        settings = self.summarization_manager.get_settings()
+        manager = self.summarization_manager.SummarizationManager(settings)
+
+        manager.set_default_pipeline_strategy("topic_segmented_v1")
+        runtime = manager.runtime_state()
+
+        self.assertEqual(runtime["selected_pipeline_strategy"], "topic_segmented_v1")
+        self.assertIn("topic_segmented_v1", runtime["pipeline_strategies"])
+
+    def test_topic_segmented_prompt_helper_is_separate_from_cohesive_templates(self):
+        system_prompt, user_prompt = self.summarization_prompts.get_topic_segmented_pass1_prompts(
+            participants=["Oscar"],
+            topic_label="Kia Genesis Data",
+            topic_text="[00:00] Oscar: The mapping is broken.",
+        )
+
+        self.assertIn("Return valid JSON matching the schema exactly.", system_prompt)
+        self.assertIn('"action_items"', user_prompt)
+        self.assertNotEqual(system_prompt, self.summarization_prompts.SYSTEM_PROMPT)
+        self.assertNotEqual(self.summarization_prompts.get_template_content("meeting"), system_prompt)
 
     def test_update_recording_settings_can_clear_custom_prompt(self):
         request = self.sessions.UpdateRecordingSettingsRequest(custom_prompt=None)
@@ -928,13 +1304,16 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
                     "workspace_chat_enabled": True,
                     "speaker_repair_enabled": True,
                     "summarization_backend": "openai",
+                    "summarization_pipeline_strategy": "cohesive",
                     "recording_capture_mode": "whole_room",
                 },
                 "summarization": {
                     "selected_backend": "openai",
+                    "selected_pipeline_strategy": "cohesive",
                     "active_backend": "openai",
                     "applies_to": "new_requests_only",
                     "providers": {},
+                    "pipeline_strategies": ["cohesive", "topic_segmented_v1"],
                 },
                 "diarization": {},
             },
@@ -995,13 +1374,16 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
                     "workspace_chat_enabled": True,
                     "speaker_repair_enabled": True,
                     "summarization_backend": "ollama",
+                    "summarization_pipeline_strategy": "cohesive",
                     "recording_capture_mode": "whole_room",
                 },
                 "summarization": {
                     "selected_backend": "ollama",
+                    "selected_pipeline_strategy": "cohesive",
                     "active_backend": "ollama",
                     "applies_to": "new_requests_only",
                     "providers": {},
+                    "pipeline_strategies": ["cohesive", "topic_segmented_v1"],
                 },
                 "diarization": {},
             },
@@ -2587,6 +2969,78 @@ class SessionsWorkspaceRegressionTests(unittest.TestCase):
         self.assertIn("[00:00] Oscar: Hey Pam.", transcript)
         self.assertIn("[00:00] Pretty good.", transcript)
         self.assertNotIn("?: Pretty good.", transcript)
+
+
+class SpeakerOverrideAfterRediarizationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.sessions = importlib.import_module("src.api.routes.sessions")
+
+    def _make_segment(self, speaker="SPEAKER_00", cluster="SPEAKER_00",
+                       start=0.0, end=5.0, text="Hello everyone."):
+        return SimpleNamespace(
+            speaker=speaker, speaker_cluster=cluster,
+            start_time=start, end_time=end, text=text,
+        )
+
+    def _make_profile(self, id="p1", display_name="Oscar Robles"):
+        return SimpleNamespace(id=id, display_name=display_name, examples=[])
+
+    def test_speaker_card_override_match_when_override_exists(self):
+        """After fix: workspace with override for new version shows match_source=override."""
+        profile = self._make_profile()
+        override = SimpleNamespace(speaker_cluster="SPEAKER_00", speaker_profile=profile)
+        segments = [self._make_segment()]
+        cards = self.sessions._build_speaker_cards(
+            segments, "session1", "version1",
+            speaker_profiles=[profile],
+            speaker_profile_overrides=[override],
+        )
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["match_source"], "override")
+        self.assertEqual(cards[0]["matched_profile_id"], "p1")
+
+    def test_speaker_card_no_match_without_override_and_generic_name(self):
+        """Before fix: new version with no overrides and SPEAKER_XX speaker has match_source=none."""
+        profile = self._make_profile()
+        segments = [self._make_segment(speaker="SPEAKER_00")]
+        cards = self.sessions._build_speaker_cards(
+            segments, "session1", "version1",
+            speaker_profiles=[profile],
+            speaker_profile_overrides=[],
+        )
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["match_source"], "none")
+
+    def test_speaker_card_name_inferred_when_segment_has_display_name(self):
+        """apply_profile_matches_to_segments sets segment.speaker to display name.
+        Name inference finds it even without an override."""
+        profile = self._make_profile(display_name="Oscar Robles")
+        segments = [self._make_segment(speaker="Oscar Robles", cluster="SPEAKER_00")]
+        cards = self.sessions._build_speaker_cards(
+            segments, "session1", "version1",
+            speaker_profiles=[profile],
+            speaker_profile_overrides=[],
+        )
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["match_source"], "name_inferred")
+        self.assertEqual(cards[0]["matched_profile_id"], "p1")
+
+    def test_only_matched_state_qualifies_for_override_persistence(self):
+        """Logic test: only state='matched' entries should be persisted as overrides."""
+        profile_matches = {
+            "SPEAKER_00": {"state": "matched", "profile_id": "p1", "profile_name": "Alice"},
+            "SPEAKER_01": {"state": "suggested", "profile_id": "p2", "profile_name": "Bob"},
+            "SPEAKER_02": {"state": "none"},
+        }
+        to_persist = {
+            cluster: match
+            for cluster, match in profile_matches.items()
+            if match.get("state") == "matched" and match.get("profile_id")
+        }
+        self.assertEqual(list(to_persist.keys()), ["SPEAKER_00"])
+        self.assertNotIn("SPEAKER_01", to_persist)
+        self.assertNotIn("SPEAKER_02", to_persist)
 
 
 if __name__ == "__main__":

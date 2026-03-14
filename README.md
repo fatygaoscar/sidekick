@@ -23,7 +23,7 @@ Browser-based meeting recorder that captures audio, builds transcript versions, 
 - **Prompt Audit Export** — Obsidian exports keep `Meeting Info`, revision history, Pass 1 / Pass 2 prompts, and transcript in collapsed foldable callouts so the note stays short until expanded
 - **Clean Latest Notes** — Obsidian latest exports now live in year/month folders with short filenames, while older exported versions are copied into `_versions/`
 - **DAW-style analyzer** — the live recording visualizer uses a higher-resolution log-spaced spectrum analyzer while keeping the same minimal style
-- **Relevance-first meeting summaries** — `General Meeting` uses the cohesive two-pass summarizer with a selective prompt contract that surfaces only useful, high-signal notes
+- **Relevance-first meeting summaries** — `General Meeting` uses the cohesive two-pass summarizer by default, with an optional topic-identified `topic_segmented_v1` pipeline for topic-local notes
 - **Smart Versioning** — canonical `vN` summary numbering still exists, but the latest visible note keeps a clean filename while archived exports use `vN.md`
 - **Performance Optimizations** — dynamic context sizing and single-pass early exit for ultra-fast short meeting processing
 - **Structured templates** — general meeting, strategic review, working session, custom
@@ -480,8 +480,8 @@ Recommended approach:
 - `SUMMARIZATION_TIMEOUT_SECONDS` is only a per-call timeout. It does not control model unloading.
 - Summarization calls now send Ollama `keep_alive=0`, so the summarization model unloads immediately after each call finishes.
 - Transcription jobs now free CUDA memory after completion or error so repeated WhisperX runs do not pin VRAM.
-- `SUMMARIZATION_MEETING_STRUCTURED_ENABLED` is deprecated. Normal meeting summaries use the cohesive two-pass summarizer.
-- When that flag is `false`, or if the structured path fails/returns no evidence, Sidekick falls back to the existing cohesive two-pass summarizer.
+- `SUMMARIZATION_MEETING_STRUCTURED_ENABLED` is deprecated. Normal meeting summaries use the cohesive two-pass summarizer by default.
+- `topic_segmented_v1` is a separate opt-in pipeline strategy that first identifies business topics, then extracts each topic separately with deterministic fallback if topic identification fails.
 - Re-summarize reuses existing transcript when `session.has_transcription=true` AND segments exist; it does not require attendees.
 - Speaker identity is manual-first. The `Speakers` tab is the only product-facing place to map diarization clusters to real names.
 - If a speaker is still unresolved, transcript and summary output use fallback labels like `Attendee`, `Attendee A`, `Attendee B`.

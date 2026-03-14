@@ -12,6 +12,7 @@ This document covers the active production summarization path:
 - transcript assembly from stored segments
 - template and prompt resolution
 - cohesive two-pass summarization
+- optional topic-identified topic-segmented summarization
 - draft summary persistence
 - refine and save flows
 - export-time behavior
@@ -25,7 +26,7 @@ Normal workspace flow:
 1. The workspace persists title/template/custom prompt settings.
 2. The user starts `POST /api/recordings/{id}/summary-job`.
 3. The backend selects a transcript version and rebuilds a timestamped transcript from stored segments.
-4. `SummarizationManager.summarize()` runs the cohesive summarizer.
+4. `SummarizationManager.summarize()` routes to the configured pipeline strategy.
 5. The result is written as a `draft` summary tied to that transcript version.
 6. The user can manually edit, AI-revise, or save the draft.
 7. Saving promotes the draft to a `saved` summary and optionally writes the Obsidian note.
@@ -51,6 +52,7 @@ Legacy/direct export flow:
 
 - `src/summarization/manager.py`
   - backend selection
+  - pipeline strategy selection
   - runtime provider switching for future requests
   - provider diagnostics
   - timeout handling
@@ -65,6 +67,7 @@ Legacy/direct export flow:
   - retry behavior
 - `src/summarization/prompts.py`
   - template contracts and display metadata
+  - topic-identification / topic-extraction prompt contracts for `topic_segmented_v1`
 - `src/summarization/ollama_backend.py`
   - normal local backend implementation
 
@@ -527,8 +530,24 @@ These are the rules future changes should preserve unless intentionally redesign
 - action item owners must come from transcript evidence or remain `TBD`
 - prompt audit fields must remain persisted for generated summaries
 - the cohesive summarizer is the default path for normal meeting summaries
+- `topic_segmented_v1` is an opt-in internal pipeline, not the default workspace path
+- `topic_segmented_v1` should identify business topics before per-topic extraction and should fall back deterministically if topic identification fails
 - export should not use a different summary algorithm than workspace draft generation without explicit documentation
 - provider switching must not let one in-flight summary operation mix multiple backends
+
+## Optional Topic-Segmented Path
+
+`topic_segmented_v1` is an opt-in pipeline strategy behind the same manager and summary job orchestration.
+
+High-level shape:
+
+1. deterministic business-start filtering removes casual preamble
+2. a transcript-level topic-identification prompt identifies real business topics and their timestamp ranges
+3. each identified topic range is extracted with the strict JSON topic extraction prompt
+4. deterministic markdown rendering produces topic-local sections and action items
+5. if topic identification fails or returns unusable spans, the pipeline falls back to the deterministic segmentation helper
+
+This path is intended for cases where topic-local organization matters more than the default cohesive narrative summary. It does not replace the cohesive path as the default meeting-summary architecture.
 
 ## Change Checklist
 

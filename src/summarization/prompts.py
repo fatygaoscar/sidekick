@@ -41,6 +41,166 @@ DECISION_LOG_TEMPLATE = """Extract all decisions made during this meeting. Forma
 TRANSCRIPT:
 {transcript}"""
 
+TOPIC_SEGMENTED_PASS1_SYSTEM_PROMPT = """You extract structured facts from meeting transcripts.
+
+Rules:
+- Extract only information explicitly stated in the transcript.
+- Do not infer owners, dates, or decisions.
+- If ownership is unclear, return null.
+- Suggestions, questions, and vague intentions are not action items.
+- Return valid JSON matching the schema exactly."""
+
+TOPIC_SEGMENTED_PASS1_USER_PROMPT_TEMPLATE = """Participants:
+{participants}
+
+Topic Segment:
+{topic_label}
+
+Transcript:
+{topic_text}
+
+Return JSON matching this schema:
+
+{{
+  "summary": ["string"],
+  "decisions": [
+    {{
+      "text": "string",
+      "owner": "string|null",
+      "timestamp": "MM:SS|null"
+    }}
+  ],
+  "action_items": [
+    {{
+      "text": "string",
+      "owner": "string|null",
+      "due_date": "string|null",
+      "timestamp": "MM:SS|null"
+    }}
+  ],
+  "milestones": [
+    {{
+      "text": "string",
+      "date": "string|null",
+      "owner": "string|null"
+    }}
+  ],
+  "unresolved_questions": [
+    {{
+      "text": "string",
+      "owner": "string|null"
+    }}
+  ]
+}}"""
+
+TOPIC_SEGMENTED_LABEL_SYSTEM_PROMPT = """You generate short human-readable labels for one meeting topic chunk.
+
+Rules:
+- Return only the label text.
+- Use 2-6 words.
+- Prefer concrete business, product, process, or problem phrases.
+- Do not use generic labels like "Discussion", "General Update", or "Topic 1".
+- Do not include speaker names unless central to the topic.
+- Do not write a sentence or summary."""
+
+TOPIC_SEGMENTED_LABEL_USER_PROMPT_TEMPLATE = """Participants:
+{participants}
+
+Topic Time Range:
+{topic_time_range}
+
+Keyword Hints:
+{keyword_hints}
+
+Opening Turns:
+{opening_turns}
+
+Closing Turns:
+{closing_turns}
+
+Examples of good labels:
+- Inventory Planner Rollout
+- Kia Genesis Data Issues
+- Dashboard Filter Design
+- Maintenance Care Payout Cadence
+
+Return one short label only."""
+
+TOPIC_SEGMENTED_POST_EXTRACT_LABEL_SYSTEM_PROMPT = """You generate short human-readable business topic labels from extracted meeting content.
+
+Rules:
+- Return only the label text.
+- Use 2-7 words.
+- Base the label on the actual business issue, decision, workstream, or unresolved question.
+- Prefer labels that a person would recognize as a real meeting topic.
+- Do not use generic labels like "Discussion", "General Update", or "Topic 1".
+- Do not restate transcript filler or social chatter.
+- Do not write a sentence or summary."""
+
+TOPIC_SEGMENTED_POST_EXTRACT_LABEL_USER_PROMPT_TEMPLATE = """Participants:
+{participants}
+
+Topic Time Range:
+{topic_time_range}
+
+Summary:
+{summary_lines}
+
+Decisions:
+{decision_lines}
+
+Action Items:
+{action_lines}
+
+Unresolved Questions:
+{question_lines}
+
+Milestones:
+{milestone_lines}
+
+Examples of good labels:
+- Kia/Genesis Maintenance Reporting
+- Dealer Dashboard Filter Readiness
+- Inventory Planner Rollout Timeline
+- Maintenance Care Payout Cadence
+
+Return one short label only."""
+
+TOPIC_SEGMENTED_TOPIC_ID_SYSTEM_PROMPT = """You identify real business topics in meeting transcripts.
+
+Rules:
+- Ignore filler, greetings, coffee talk, weather, weekend chatter, jokes, and social banter.
+- Create topics only for sustained business discussion.
+- Separate adjacent but distinct business issues, even when they happen back-to-back.
+- Do not create topics for conversational style or incidental wording.
+- Use topic names that reflect the actual business issue, workstream, policy question, reporting problem, pricing issue, or goal discussion.
+- Do not invent owners, dates, or decisions.
+- Return valid JSON only."""
+
+TOPIC_SEGMENTED_TOPIC_ID_USER_PROMPT_TEMPLATE = """Participants:
+{participants}
+
+Max Topics:
+{max_topics}
+
+Transcript:
+{transcript}
+
+Return JSON matching this schema:
+
+{{
+  "topics": [
+    {{
+      "topic_id": "topic_001",
+      "topic_name": "string",
+      "start_timestamp": "MM:SS|null",
+      "end_timestamp": "MM:SS|null",
+      "why_this_is_a_topic": "string"
+    }}
+  ],
+  "warnings": ["string"]
+}}"""
+
 # New structured templates for Obsidian export
 
 ONE_ON_ONE_TEMPLATE = """Create 1-on-1 meeting notes optimized for Obsidian.
@@ -335,6 +495,85 @@ Written as if it will be handed to someone who was not in the meeting
 Do not restate the transcript.
 Do not speculate beyond what the conversation supports.
 Optimize for clarity, alignment, and reusability."""
+
+
+def get_topic_segmented_pass1_prompts(
+    *,
+    participants: list[str],
+    topic_label: str,
+    topic_text: str,
+) -> tuple[str, str]:
+    """Render the dedicated Pass 1 extraction prompts for topic_segmented_v1."""
+    participant_text = ", ".join(participants) if participants else "(none)"
+    user_prompt = TOPIC_SEGMENTED_PASS1_USER_PROMPT_TEMPLATE.format(
+        participants=participant_text,
+        topic_label=(topic_label.strip() or "General discussion"),
+        topic_text=(topic_text.strip() or "(none)"),
+    )
+    return TOPIC_SEGMENTED_PASS1_SYSTEM_PROMPT, user_prompt
+
+
+def get_topic_segmented_label_prompt(
+    *,
+    participants: list[str],
+    topic_time_range: str,
+    keyword_hints: list[str],
+    opening_turns: list[str],
+    closing_turns: list[str],
+) -> tuple[str, str]:
+    """Render the dedicated label-generation prompt for topic_segmented_v1."""
+    participant_text = ", ".join(participants) if participants else "(none)"
+    keyword_text = ", ".join(keyword_hints) if keyword_hints else "(none)"
+    opening_text = "\n".join(opening_turns) if opening_turns else "(none)"
+    closing_text = "\n".join(closing_turns) if closing_turns else "(none)"
+    user_prompt = TOPIC_SEGMENTED_LABEL_USER_PROMPT_TEMPLATE.format(
+        participants=participant_text,
+        topic_time_range=(topic_time_range.strip() or "(unknown)"),
+        keyword_hints=keyword_text,
+        opening_turns=opening_text,
+        closing_turns=closing_text,
+    )
+    return TOPIC_SEGMENTED_LABEL_SYSTEM_PROMPT, user_prompt
+
+
+def get_topic_segmented_post_extract_label_prompt(
+    *,
+    participants: list[str],
+    topic_time_range: str,
+    summary_lines: list[str],
+    decision_lines: list[str],
+    action_lines: list[str],
+    question_lines: list[str],
+    milestone_lines: list[str],
+) -> tuple[str, str]:
+    """Render the post-extraction label-generation prompt for topic_segmented_v1."""
+    participant_text = ", ".join(participants) if participants else "(none)"
+    user_prompt = TOPIC_SEGMENTED_POST_EXTRACT_LABEL_USER_PROMPT_TEMPLATE.format(
+        participants=participant_text,
+        topic_time_range=(topic_time_range.strip() or "(unknown)"),
+        summary_lines="\n".join(f"- {line}" for line in summary_lines) if summary_lines else "- (none)",
+        decision_lines="\n".join(f"- {line}" for line in decision_lines) if decision_lines else "- (none)",
+        action_lines="\n".join(f"- {line}" for line in action_lines) if action_lines else "- (none)",
+        question_lines="\n".join(f"- {line}" for line in question_lines) if question_lines else "- (none)",
+        milestone_lines="\n".join(f"- {line}" for line in milestone_lines) if milestone_lines else "- (none)",
+    )
+    return TOPIC_SEGMENTED_POST_EXTRACT_LABEL_SYSTEM_PROMPT, user_prompt
+
+
+def get_topic_segmented_topic_identification_prompt(
+    *,
+    participants: list[str],
+    transcript: str,
+    max_topics: int,
+) -> tuple[str, str]:
+    """Render the transcript-level topic-identification prompt for topic_segmented_v1."""
+    participant_text = ", ".join(participants) if participants else "(none)"
+    user_prompt = TOPIC_SEGMENTED_TOPIC_ID_USER_PROMPT_TEMPLATE.format(
+        participants=participant_text,
+        max_topics=max_topics,
+        transcript=(transcript.strip() or "(none)"),
+    )
+    return TOPIC_SEGMENTED_TOPIC_ID_SYSTEM_PROMPT, user_prompt
 
 
 def get_prompt(
